@@ -12,7 +12,7 @@ import {
   type ShareSettings,
   shareErrText,
 } from "../../api/share";
-import { listProjects } from "../../api/projects";
+import { listProjectsLocal } from "../../api/projects";
 import { invalidateProjectMutationQueries } from "../../lib/paperMutations";
 import { Button } from "../ui/button";
 import { Dialog } from "../ui/dialog";
@@ -54,14 +54,16 @@ export function ShareSettingsDialog({
     queryFn: () => getShareSettings(share.share_id),
   });
   // Resolves the hoster's project and the reader's linked-project name
-  // by matching against both active and archived projects.
+  // by matching against both active and archived projects. Local-only:
+  // shares live in the local library, so a remote default backend's
+  // project rows would never match (distinct query keys).
   const projectsActiveQ = useQuery({
-    queryKey: ["projects", "active"],
-    queryFn: () => listProjects("active"),
+    queryKey: ["projects", "active", "local"],
+    queryFn: () => listProjectsLocal("active"),
   });
   const projectsArchivedQ = useQuery({
-    queryKey: ["projects", "archived"],
-    queryFn: () => listProjects("archived"),
+    queryKey: ["projects", "archived", "local"],
+    queryFn: () => listProjectsLocal("archived"),
   });
   const projects = [
     ...(projectsActiveQ.data?.projects ?? []),
@@ -216,7 +218,10 @@ export function ShareSettingsDialog({
             Start the app with networking available and leave again.
           </p>
         )}
-        {hosted && share.e2ee && <MembersSection shareId={share.share_id} />}
+        {share.e2ee &&
+          (hosted || share.role === "admin" || share.role === "co-admin") && (
+            <MembersSection shareId={share.share_id} hosted={hosted} />
+          )}
         <div className="flex items-center justify-between border-t border-[var(--color-border)] pt-4">
           <span className="text-xs" style={{ color: "var(--color-muted)" }}>
             {hosted

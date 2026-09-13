@@ -7,6 +7,7 @@ import type {
   SharedProjectsListing,
   ReceivedListing,
   MembersListing,
+  AdminTransferred,
   TicketMinted,
   ImportedReceipt,
   UnlinkedReceipt,
@@ -31,6 +32,7 @@ export type {
   ShareDirection,
   SyncReceipt,
   SyncReason,
+  MembersListing,
 };
 
 /** Narrower than lib/errText: only ApiError messages surface in the sharing UI,
@@ -64,7 +66,9 @@ export const sharingAvailable = isTauri;
 // crates/server/src/{route/share.rs, share_sync.rs} (aliased above); only
 // JoinResult and ReceivedPaper, which have no Rust twin, are hand-written.
 
-export type MemberRole = "hoster" | "editor" | "viewer";
+/** "admin" is THE ADMIN (singleton); "co-admin" any other admin-tier member.
+ * Hosting is a device property, not a role. */
+export type MemberRole = "admin" | "co-admin" | "editor" | "viewer";
 
 /** Summaries of every project published (shared out) from this library. */
 export async function listShared(): Promise<SharedSummary[]> {
@@ -166,11 +170,11 @@ export async function publishSecure(
   return shareApi("POST", `/api/share/project/${projectId}/publish_secure`);
 }
 
-/** Grant a device access to a hosted e2ee share and mint its pasteable
- *  invite string. */
+/** Grant a device access to an e2ee share and mint its pasteable invite
+ *  string. Admin-tier op, from the hosting device or a co-admin's. */
 export async function inviteMember(
   shareId: string,
-  opts: { memberCode: string; role: Exclude<MemberRole, "hoster">; name?: string }
+  opts: { memberCode: string; role: "editor" | "viewer"; name?: string }
 ): Promise<string> {
   const res = await shareApi<InviteMinted>(
     "POST",
@@ -180,24 +184,33 @@ export async function inviteMember(
   return res.invite;
 }
 
-/** Members of a hoster-owned e2ee share (the hoster entry is this device). */
-export async function listMembers(shareId: string): Promise<ShareMember[]> {
-  const res = await shareApi<MembersListing>(
-    "GET",
-    `/api/share/${shareId}/members`
-  );
-  return res.members;
+/** Members of an e2ee share this device administers, plus this device's own
+ *  member id and admin-tier standing (drives which controls the UI offers). */
+export async function listMembers(shareId: string): Promise<MembersListing> {
+  return shareApi<MembersListing>("GET", `/api/share/${shareId}/members`);
 }
 
-/** Change an invited member's role on a hosted e2ee share (viewer ↔ editor;
- *  the route rejects admin — keyhive-supported but app-deferred). */
+/** Change a member's role (viewer ↔ editor, or promote to co-admin — the
+ *  co-admin grant is THE ADMIN's alone; "admin" only moves via
+ *  {@link transferAdmin}). */
 export async function setMemberRole(
   shareId: string,
   memberId: string,
-  role: Exclude<MemberRole, "hoster">
+  role: Exclude<MemberRole, "admin">
 ): Promise<RoleChanged> {
   return shareApi("POST", `/api/share/${shareId}/member/${memberId}/role`, {
     role,
+  });
+}
+
+/** Hand THE ADMIN role to a co-admin. The old admin becomes a co-admin —
+ *  powers travel with the role; hosting stays where it is. */
+export async function transferAdmin(
+  shareId: string,
+  memberId: string
+): Promise<AdminTransferred> {
+  return shareApi("POST", `/api/share/${shareId}/transfer_admin`, {
+    member_id: memberId,
   });
 }
 
