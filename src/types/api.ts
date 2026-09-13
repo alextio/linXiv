@@ -140,6 +140,7 @@ export type {
   MembersListing,
   MemberRow,
   RoleChanged,
+  AdminTransferred,
   RevokedReceipt,
   RekeyedReceipt,
   RemovedReceipt,
