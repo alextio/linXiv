@@ -87,6 +87,7 @@ pub struct SharedAnnotation {
 pub struct SharedSummary {
     pub share_id: String,
     pub name: String,
+    pub description: String,
     pub paper_count: usize,
     pub note_count: usize,
     pub annotation_count: usize,

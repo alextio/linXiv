@@ -868,8 +868,9 @@ pub fn list_shared(share_dir: &Path) -> Result<Vec<SharedSummary>> {
     Ok(out)
 }
 
-/// A doc's listing summary: only `share_id`/`name` are hydrated and subgraphs are
-/// counted by list length — never materializes bodies/anchors like a full `load`.
+/// A doc's listing summary: only `share_id`/`name`/`description` are hydrated and
+/// subgraphs are counted by list length — never materializes bodies/anchors like a
+/// full `load`.
 fn summarize(path: &Path, share_id: &str) -> Result<SharedSummary> {
     let mut doc = AutoCommit::load(&std::fs::read(path)?).map_err(crdt)?;
     // Empty pre-first-sync e2ee placeholder: nothing here yet (mirrors `load`).
@@ -880,11 +881,13 @@ fn summarize(path: &Path, share_id: &str) -> Result<SharedSummary> {
     struct Meta {
         share_id: String,
         name: String,
+        description: String,
     }
     let meta: Meta = autosurgeon::hydrate(&doc).map_err(crdt)?;
     Ok(SharedSummary {
         share_id: meta.share_id,
         name: meta.name,
+        description: meta.description,
         paper_count: list_len(&doc, "papers")?,
         note_count: list_len(&doc, "notes")?,
         annotation_count: list_len(&doc, "annotations")?,

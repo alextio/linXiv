@@ -211,6 +211,10 @@ impl From<ShareError> for ApiError {
 pub struct SummaryRow {
     share_id: String,
     name: String,
+    // Omitted (not "") when the project has no description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    description: Option<String>,
     paper_count: usize,
     note_count: usize,
     tag_count: usize,
@@ -517,6 +521,7 @@ fn summary_row(
     SummaryRow {
         share_id: s.share_id.clone(),
         name: s.name.clone(),
+        description: (!s.description.is_empty()).then(|| s.description.clone()),
         paper_count: s.paper_count,
         note_count: s.note_count,
         tag_count: s.tag_count,
@@ -590,6 +595,7 @@ fn pending_received(dir: &Path, listed: &[SummaryRow]) -> Vec<SummaryRow> {
             paused: share_sync::load_settings(dir, &id).paused,
             share_id: id,
             name: String::new(),
+            description: None,
             paper_count: 0,
             note_count: 0,
             tag_count: 0,
@@ -1765,6 +1771,7 @@ mod tests {
         let hosted = SummaryRow {
             share_id: "s-1".into(),
             name: "P".into(),
+            description: Some("d".into()),
             paper_count: 2,
             note_count: 1,
             tag_count: 3,
@@ -1778,11 +1785,12 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&hosted).unwrap(),
-            r#"{"share_id":"s-1","name":"P","paper_count":2,"note_count":1,"tag_count":3,"synced_at":null,"paused":false,"project_fk":7,"e2ee":true,"member_count":1}"#
+            r#"{"share_id":"s-1","name":"P","description":"d","paper_count":2,"note_count":1,"tag_count":3,"synced_at":null,"paused":false,"project_fk":7,"e2ee":true,"member_count":1}"#
         );
         let pending = SummaryRow {
             share_id: "s-2".into(),
             name: String::new(),
+            description: None,
             paper_count: 0,
             note_count: 0,
             tag_count: 0,
