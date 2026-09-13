@@ -1,4 +1,5 @@
 import { libraryFetch } from "../stores/backend.ts";
+import { apiFetch } from "./client.ts";
 import type {
   BulkAddReceipt,
   CreatedProject,
@@ -26,6 +27,21 @@ export async function createProject(
   body: ProjectCreateBody
 ): Promise<CreatedProject> {
   return libraryFetch("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Always-local variants for local-only flows (sharing publishes from the
+ *  local library): skip libraryFetch's default-backend routing. */
+export async function listProjectsLocal(status = "active"): Promise<ProjectsResponse> {
+  return apiFetch<ProjectsResponse>(`/api/projects?status=${status}`);
+}
+
+export async function createProjectLocal(
+  body: ProjectCreateBody
+): Promise<CreatedProject> {
+  return apiFetch("/api/projects", {
     method: "POST",
     body: JSON.stringify(body),
   });

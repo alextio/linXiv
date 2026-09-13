@@ -240,7 +240,7 @@ export default function SharePage() {
           className="flex flex-1 items-center justify-center text-sm"
           style={{ color: "var(--color-muted)" }}
         >
-          No shared projects yet. Press Create Shared Project to share one of yours, or join with a ticket provided by another linXiv user.
+          Invite collaborators to start sharing papers, tags and annotations.
         </div>
       )}
       {!loading && cards.length > 0 && (
