@@ -57,6 +57,13 @@ LINXIV_P2P_PASSPHRASE=change-me \
 docker compose -f docs/headless/docker-compose.yml up -d --build
 ```
 
+Published images are on GHCR (`ghcr.io/linxiv-dev/linxiv-headless:<version>`,
+plus `:latest` for stable releases) if you'd rather pull than build.
+
+> The library is single-writer: never point two running nodes (or a node and
+> the desktop app) at the same `LINXIV_DATA_DIR` / volume — they contend on the
+> DB and p2p key store and one will hang. One node per data dir.
+
 ## Environment
 
 | Variable | Default | Purpose |
@@ -76,8 +83,8 @@ docker compose -f docs/headless/docker-compose.yml up -d --build
   Remote Query Mode Member List (`/api/admin/relay/members`), shows the
   relay access log and PDF transfer log, and mints the copyable Node
   Address once a relay is configured.
-- `GET /api/status` is the one-call health/config aggregate (also the
-  container healthcheck target).
+- `GET /api/status` is the one-call health/config aggregate; the
+  container healthcheck itself probes the lighter `GET /api/papers`.
 - Relay settings are the same on-disk user settings as the app
   (`p2p_relay_url` / `p2p_relay_auth_token` / `p2p_relay_only`): set them
   via `PATCH /api/settings`, then `POST /api/share/relay/reconnect` to
