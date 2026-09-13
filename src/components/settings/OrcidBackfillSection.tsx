@@ -69,7 +69,7 @@ export function OrcidBackfillSection() {
           !backfillMutation.isPending &&
           !backfillMutation.isError && (
           <p className="text-xs text-danger mb-2">
-            {lastRun.errored} lookup{lastRun.errored !== 1 ? "s" : ""} failed —
+            {lastRun.errored} lookup{lastRun.errored !== 1 ? "s" : ""} failed.
             CrossRef/OpenAlex may be rate-limiting; try again shortly.
           </p>
         )}
@@ -78,7 +78,7 @@ export function OrcidBackfillSection() {
             {backfillMutation.error instanceof ApiError &&
             backfillMutation.error.status === 409
               ? "A backfill is already running."
-              : "ORCID backfill failed — CrossRef/OpenAlex may be unreachable. Try again in a minute."}
+              : "ORCID backfill failed. CrossRef/OpenAlex may be unreachable. Try again in a minute."}
           </p>
         )}
       </SettingGroup>

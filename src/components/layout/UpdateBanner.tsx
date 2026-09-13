@@ -166,7 +166,7 @@ function OnboardingPrompt({ onResolved }: { onResolved: () => void }) {
       </Button>
       {failed && (
         <>
-          <span className="text-xs text-danger">Couldn't save — try again.</span>
+          <span className="text-xs text-danger">Couldn't save. Try again.</span>
           {/* Drops the prompt without a write; re-asks next launch. */}
           <Button variant="muted" size="sm" onClick={onResolved}>
             Later

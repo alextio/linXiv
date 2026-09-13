@@ -506,7 +506,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
                         key={c.author_id}
                         armed={armedPaperAction === key}
                         disabled={busy}
-                        armedLabel="Confirm — moves the paper"
+                        armedLabel="Confirm: moves the paper"
                         label={`Reassign to ${c.full_name ?? "(unnamed)"}`}
                         onClick={() => {
                           if (armedPaperAction === key) {
@@ -521,7 +521,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
                   <ArmedActionButton
                     armed={armedPaperAction === unlinkKey}
                     disabled={busy}
-                    armedLabel="Confirm — removes this paper"
+                    armedLabel="Confirm: removes this paper"
                     label="Unlink"
                     onClick={() => {
                       if (armedPaperAction === unlinkKey) {
@@ -559,7 +559,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
           >
             <p style={{ color: "var(--color-text)" }}>
               Same ORCID as{" "}
-              {orcidCandidates.map((a) => a.full_name ?? "(unnamed)").join(", ")} — likely the
+              {orcidCandidates.map((a) => a.full_name ?? "(unnamed)").join(", ")}, likely the
               same person.
             </p>
             <Button
@@ -576,7 +576,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
               }}
             >
               {armedPaperAction === "merge:orcid"
-                ? "Confirm merge — cannot be undone"
+                ? "Confirm merge: cannot be undone"
                 : `Merge duplicate${orcidCandidates.length > 1 ? "s" : ""}`}
             </Button>
           </div>
@@ -590,7 +590,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
             style={{ borderColor: "var(--color-border)" }}
           >
             <p style={{ color: "var(--color-muted)" }}>
-              Same name, separate record{nameCandidates.length > 1 ? "s" : ""} — might be the
+              Same name, separate record{nameCandidates.length > 1 ? "s" : ""}, might be the
               same person, but a shared name alone is weak evidence.
             </p>
             <ul className="space-y-0.5">
@@ -664,7 +664,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
           {mergeMutation.isPending
             ? "Merging…"
             : armedPaperAction === "merge:picker"
-              ? `Confirm merge of ${mergeIds.length} — cannot be undone`
+              ? `Confirm merge of ${mergeIds.length}: cannot be undone`
               : `Merge${mergeIds.length ? ` ${mergeIds.length}` : ""} into this author`}
         </Button>
       </section>
@@ -765,7 +765,7 @@ function FieldDisplay({ label, value }: { label: string; value: string | null })
         {label}
       </dt>
       <dd style={{ color: value ? "var(--color-text)" : "var(--color-muted)" }}>
-        {value ?? "—"}
+        {value ?? "-"}
       </dd>
     </div>
   );

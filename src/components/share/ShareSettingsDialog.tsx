@@ -132,7 +132,7 @@ export function ShareSettingsDialog({
     <Dialog
       open
       onClose={onClose}
-      title={`Settings — ${share.name || "pending share"}`}
+      title={`Settings: ${share.name || "pending share"}`}
     >
       <div className="flex flex-col gap-4">
         {share.e2ee && (
@@ -167,7 +167,7 @@ export function ShareSettingsDialog({
         <SettingsRow label="Local project">
           {hosted ? (
             <span className="truncate text-[13px]" style={{ color: "var(--color-muted)" }}>
-              {hosterProject?.name ?? "—"}
+              {hosterProject?.name ?? "-"}
             </span>
           ) : share.pending ? (
             // Nothing has arrived to import yet; "Sync now" on the card is the

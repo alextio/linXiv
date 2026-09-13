@@ -212,7 +212,7 @@ function ColorRow({
         className="text-sm text-muted tabular-nums"
         style={{ width: "2.5rem", textAlign: "right", flexShrink: 0 }}
       >
-        {canTuneAlpha ? `${alpha}%` : "—"}
+        {canTuneAlpha ? `${alpha}%` : "-"}
       </span>
     </div>
   );

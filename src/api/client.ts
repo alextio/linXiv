@@ -49,7 +49,7 @@ export type BackendRef = RemoteBackend | null;
 /** The ONE honest refused-or-offline state: a non-admitted device is refused
  *  indistinguishably from an offline node, by design. */
 export const UNREACHABLE_MESSAGE =
-  "Can't reach this node — it may be offline, or this device isn't admitted yet. " +
+  "Can't reach this node. It may be offline, or this device isn't admitted yet. " +
   "Check Settings → Remote backends and send your member code to the node operator.";
 
 /** Maps an `api_remote`/`remote_*` rejection (the generated `RemoteError`

@@ -43,6 +43,8 @@ import { openPdfInSystem } from "../api/pdfs";
 import { remotePdfPath } from "../api/remote";
 import { libraryFetch, useBackendStore } from "../stores/backend";
 import { errText } from "../lib/errText";
+import { pdfCanvasDpr } from "../lib/zoom";
+import { useUiStore } from "../stores/ui";
 
 const LATEST_VERSION_KEY = "latest" as const;
 
@@ -715,7 +717,7 @@ export default function PaperDetailPage() {
                           {mergeMutation.isPending && mergeMutation.variables === c.source_fk
                             ? "Merging…"
                             : armedMergeSfk === c.source_fk
-                              ? "Confirm — deletes the duplicate"
+                              ? "Confirm: deletes the duplicate"
                               : "Merge into this paper"}
                         </button>
                       </div>
@@ -1091,6 +1093,7 @@ function PdfPane({
   projectId,
   asStrip,
 }: PdfPaneProps) {
+  const zoom = useUiStore((s) => s.zoom);
   const previewScrollRafRef = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -1272,6 +1275,7 @@ function PdfPane({
                         key={i + 1}
                         pageNumber={i + 1}
                         width={containerWidth ? containerWidth - 32 : undefined}
+                        devicePixelRatio={pdfCanvasDpr(zoom)}
                         className="mx-auto my-2 shadow-md"
                         renderTextLayer
                         renderAnnotationLayer

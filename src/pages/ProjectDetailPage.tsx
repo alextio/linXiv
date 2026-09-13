@@ -610,7 +610,7 @@ export default function ProjectDetailPage() {
             open={historyOpen}
             onClose={closeHistory}
             scope={{ kind: "project", id: projectId }}
-            title={`History — ${project.name}`}
+            title={`History: ${project.name}`}
           />
           {!readOnly && (
             <ImportDialog

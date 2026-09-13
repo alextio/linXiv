@@ -100,7 +100,7 @@ export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) 
                   ? { borderColor: "var(--color-danger)", color: "var(--color-danger)" }
                   : { borderColor: "var(--color-border)", color: "var(--color-muted)" }
               }
-              title={saveError ? `Save failed: ${saveError} — click to retry` : "Save to library"}
+              title={saveError ? `Save failed: ${saveError}. Click to retry` : "Save to library"}
               aria-label={saveError ? `Save failed: ${saveError}. Retry save.` : "Save to library"}
             >
               {saveError ? "!" : "+"}

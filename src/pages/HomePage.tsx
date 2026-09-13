@@ -34,7 +34,7 @@ function StatCard({ label, value, hint, to }: StatCardProps) {
         className="font-display text-[30px] leading-none"
         style={{ color: "var(--color-accent)" }}
       >
-        {value ?? "—"}
+        {value ?? "-"}
       </span>
       <span className="text-[12.5px] text-muted">{label}</span>
       {hint !== undefined && <MonoLabel className="mt-1 normal-case">{hint}</MonoLabel>}
@@ -392,7 +392,7 @@ export default function HomePage() {
                 </section>
 
                 <section className="lg:sticky lg:top-8 self-start">
-                  <SectionTitle className="text-base mb-4">Tags —— Recent Papers</SectionTitle>
+                  <SectionTitle className="text-base mb-4">Tags: Recent Papers</SectionTitle>
                   {topTags.length === 0 ? (
                     <Card variant="inset" className="text-center">
                       <p className="text-muted text-sm">

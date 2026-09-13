@@ -14,6 +14,8 @@ import { isArxivId } from "../lib/papers";
 import { MathText } from "../lib/tex";
 import { invalidatePaperMutationQueries } from "../lib/paperMutations";
 import { errText } from "../lib/errText";
+import { pdfCanvasDpr } from "../lib/zoom";
+import { useUiStore } from "../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -46,6 +48,7 @@ function isValidPdfPreviewState(state: unknown): state is PdfPreviewState {
 }
 
 export default function PdfPreviewPage() {
+  const zoom = useUiStore((s) => s.zoom);
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -215,6 +218,7 @@ export default function PdfPreviewPage() {
                 key={i + 1}
                 pageNumber={i + 1}
                 width={containerWidth ? containerWidth - 32 : undefined}
+                devicePixelRatio={pdfCanvasDpr(zoom)}
                 className="mx-auto my-2 shadow-md"
                 renderTextLayer
                 renderAnnotationLayer
