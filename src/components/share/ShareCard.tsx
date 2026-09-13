@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsMutating,
+  useMutation,
+  useMutationState,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Lock, Settings2 } from "lucide-react";
 import {
   downloadSharedPdf,
@@ -35,6 +40,33 @@ function RolePill({ role }: { role: ShareRoleLabel }) {
       }}
     >
       {role}
+    </span>
+  );
+}
+
+/** Per-card sync state: live "Syncing" while this share's sync mutation is in
+ * flight, otherwise "Synced" / "Not synced" from synced_at. */
+function SyncBadge({ syncing, synced }: { syncing: boolean; synced: boolean }) {
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 font-mono text-[10.5px] font-semibold leading-none"
+      style={{ color: "var(--color-muted)" }}
+    >
+      {syncing ? (
+        <>
+          <Spinner size={10} /> Syncing
+        </>
+      ) : (
+        <>
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{
+              backgroundColor: synced ? "var(--color-success)" : "var(--color-ink-3)",
+            }}
+          />
+          {synced ? "Synced" : "Not synced"}
+        </>
+      )}
     </span>
   );
 }
@@ -127,14 +159,21 @@ export function ShareCard({
   const queryClient = useQueryClient();
   const importM = useImportReceived(share.share_id);
   const sync = useMutation({
-    // Registers under the shared key so the header SyncStatusPill sees it.
-    mutationKey: SHARE_SYNC_MUTATION_KEY,
+    // Suffixing the shared key keeps the header SyncStatusPill's prefix match
+    // working while letting this card's badge watch its own share only.
+    mutationKey: [...SHARE_SYNC_MUTATION_KEY, share.share_id],
     mutationFn: () => syncShare(share.share_id),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["share", "published"] });
       queryClient.invalidateQueries({ queryKey: ["share", "received"] });
     },
   });
+  const syncingThis =
+    useIsMutating({ mutationKey: [...SHARE_SYNC_MUTATION_KEY, share.share_id] }) > 0;
+  // The pill's Sync-all registers under the exact bare key; a card firing a
+  // second concurrent sync for the same share mid-batch must be blocked.
+  const batchSyncing =
+    useIsMutating({ mutationKey: SHARE_SYNC_MUTATION_KEY, exact: true }) > 0;
   const resetRef = useRef(sync.reset);
   resetRef.current = sync.reset;
   useEffect(() => {
@@ -221,8 +260,17 @@ export function ShareCard({
               Pending
             </span>
           )}
+          <SyncBadge syncing={syncingThis} synced={share.synced_at != null} />
           <RolePill role={role} />
         </div>
+        {share.description && (
+          <p
+            className="mt-1 truncate pl-[21px] text-xs"
+            style={{ color: "var(--color-muted)" }}
+          >
+            {share.description}
+          </p>
+        )}
       </div>
       <div className="mx-5 flex items-center gap-2 border-y border-[var(--color-border)] py-2.5">
         <span
@@ -289,7 +337,7 @@ export function ShareCard({
           variant="muted"
           size="sm"
           onClick={() => sync.mutate()}
-          disabled={sync.isPending || share.paused}
+          disabled={sync.isPending || batchSyncing || share.paused}
         >
           {sync.isPending ? <Spinner size={14} /> : "Sync now"}
         </Button>
