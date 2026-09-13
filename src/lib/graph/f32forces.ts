@@ -347,7 +347,9 @@ export function f32Collide<N extends F32Node>(
   const stackC = new Int32Array(STACK);
   const stackB = new Float64Array(STACK * 3);
 
-  const force: Force<N, undefined> = () => {
+  // Collide ignores alpha, but d3 (and the tests) still call it force(alpha)
+  // each tick; declare the param so the arity matches the Force contract.
+  const force: Force<N, undefined> = (_alpha: number) => {
     const m = idx.length;
     if (m < 2 || radius <= 0) return;
     for (let k = 0; k < m; k++) {
