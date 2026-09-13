@@ -963,7 +963,7 @@ export type SummaryRow = {
   e2ee?: boolean,
   member_count?: number,
   pending?: boolean,
-  role?: "hoster" | "editor" | "viewer",
+  role?: "admin" | "co-admin" | "editor" | "viewer",
 };
 
 export type SharedProjectsListing = {
@@ -1014,23 +1014,41 @@ export type InviteMinted = {
 export type MemberRow = {
   member_id: string,
   name: string | null,
-  role: "hoster" | "editor" | "viewer",
+  role: "admin" | "co-admin" | "editor" | "viewer",
   invited_at: string,
   revoked: boolean,
   verified: boolean,
   /**
-   * Re-sendable while the grant stands; `None` once revoked.
+   * Re-sendable while the grant stands; `None` once revoked. Only the
+   * device that minted the invite has it (bearer secret, never synced).
    */
   invite: string | null,
 };
 
 export type MembersListing = {
   members: Array<MemberRow>,
+  /**
+   * This device's member id — how the UI finds "this device" in `members`.
+   * Absent on the store-only legacy path (no live node).
+   */
+  self_member_id?: string,
+  /**
+   * This device's admin-tier standing; member routes require admin-tier.
+   */
+  self_role?: "admin" | "co-admin",
 };
 
 export type RoleChanged = {
   member_id: string,
   role: string,
+};
+
+export type AdminTransferred = {
+  transferred: boolean,
+  /**
+   * The new THE ADMIN's member id (hex).
+   */
+  admin: string,
 };
 
 export type RevokedReceipt = {

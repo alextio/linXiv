@@ -477,7 +477,9 @@ pub async fn sync_share(
         .map_err(|_| ApiError::new(504, "share sync publish timed out"))??;
         touch(&e2ee_hoster_doc);
         // Host-side counterpart of the reader line below: what this device just
-        // republished, and to how many live members.
+        // republished, and to how many live members. Refresh the roster mirror
+        // first so members invited from co-admin devices are counted.
+        crate::route::share::fetch_roster(&node, &dir, share_id).await;
         let members = crate::route::share::live_member_count(&dir, share_id);
         println!(
             "share sync {share_id}: hoster republished papers={} notes={} annotations={} members={members}",

@@ -22,8 +22,8 @@ use linxiv_core::service::paper_import;
 use linxiv_core::service::project as project_svc;
 use linxiv_share::{
     build_shared_project, doc_path, e2ee_dir, e2ee_received_dir, member_id_from_hex, member_id_hex,
-    received_dir, save, valid_share_id, AutoCommit, CustomRelay, ProjectInvite, Role, ShareError,
-    ShareNode, ShareStore, ShareTicket, SharedProject,
+    received_dir, save, valid_share_id, AutoCommit, CustomRelay, MemberMeta, ProjectInvite, Role,
+    ShareError, ShareNode, ShareStore, ShareTicket, SharedProject,
 };
 
 use crate::p2p_config::{self, RelaySetting};
@@ -235,7 +235,7 @@ pub struct SummaryRow {
     pending: Option<bool>,
     // Plain string in Rust; the TS union mirrors MemberRole in src/api/share.ts.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "\"hoster\" | \"editor\" | \"viewer\"")]
+    #[ts(optional, type = "\"admin\" | \"co-admin\" | \"editor\" | \"viewer\"")]
     role: Option<&'static str>,
 }
 
@@ -342,6 +342,15 @@ pub struct InviteMinted {
 #[derive(Debug, Serialize, ts_rs::TS)]
 pub struct MembersListing {
     members: Vec<MemberRow>,
+    /// This device's member id — how the UI finds "this device" in `members`.
+    /// Absent on the store-only legacy path (no live node).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    self_member_id: Option<String>,
+    /// This device's admin-tier standing; member routes require admin-tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "\"admin\" | \"co-admin\"")]
+    self_role: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -349,13 +358,23 @@ pub struct MemberRow {
     member_id: String,
     name: Option<String>,
     // Plain string in Rust; the TS union mirrors MemberRole in src/api/share.ts.
-    #[ts(type = "\"hoster\" | \"editor\" | \"viewer\"")]
+    // "admin" is THE ADMIN (singleton, from the doc marker), "co-admin" any
+    // other keyhive-Admin member; hosting is a device property, not a role.
+    #[ts(type = "\"admin\" | \"co-admin\" | \"editor\" | \"viewer\"")]
     role: String,
     invited_at: String,
     revoked: bool,
     verified: bool,
-    /// Re-sendable while the grant stands; `None` once revoked.
+    /// Re-sendable while the grant stands; `None` once revoked. Only the
+    /// device that minted the invite has it (bearer secret, never synced).
     invite: Option<String>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+pub struct AdminTransferred {
+    transferred: bool,
+    /// The new THE ADMIN's member id (hex).
+    admin: String,
 }
 
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -474,6 +493,9 @@ async fn dispatch_inner(
         }
         ("POST", ["api", "share", id, "revoke"]) => {
             return revoke_member(share, id, ctx.body).await
+        }
+        ("POST", ["api", "share", id, "transfer_admin"]) => {
+            return transfer_admin(share, id, ctx.body).await
         }
         ("POST", ["api", "share", id, "member", mid, "remove"]) => {
             return remove_member(share, id, mid).await
@@ -640,7 +662,20 @@ async fn list_received_with_role(state: &AppState, share: &ShareState) -> Result
                     rows[i].role = match role {
                         Role::Read => Some("viewer"),
                         Role::Edit => Some("editor"),
-                        Role::Admin => Some("hoster"),
+                        // Admin tier splits on THE-ADMIN standing. Derived
+                        // from the same validated path the member routes use
+                        // (admin_standing), so the label can't disagree with
+                        // enforcement when the marker is garbage or forged.
+                        Role::Admin => {
+                            let sid = rows[i].share_id.clone();
+                            let roster = fetch_roster(&node, share.share_dir(), &sid).await;
+                            let the_admin =
+                                admin_standing(&node, E2eeSide::Received, &sid, &roster)
+                                    .await
+                                    .map(|s| s.the_admin)
+                                    .unwrap_or(false);
+                            Some(if the_admin { "admin" } else { "co-admin" })
+                        }
                         Role::Relay => continue,
                     };
                 }
@@ -706,8 +741,10 @@ async fn put_settings(
 
 // ── e2ee members sidecar (`share_dir/members/<id>.json`) ────────────────────
 
-/// One invited device on a hoster-owned e2ee share. The sidecar IS the members
-/// list — the wrapper has no listing API; `query_role` is the live truth-check.
+/// One device invited FROM this device on an e2ee share. The sidecar is the
+/// local bookkeeping half of the members list (invite strings live only here);
+/// the doc's synced roster covers members invited elsewhere, and `query_role`
+/// is the live truth-check for both.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct MemberEntry {
     pub member_id_hex: String,
@@ -727,13 +764,76 @@ pub(crate) struct MemberEntry {
     pub invite: Option<String>,
 }
 
-/// Non-revoked, non-hoster sidecar rows — devices this share is granted to,
-/// for the hoster sync line.
+/// Devices this share is granted to, for the hoster sync line: the local
+/// invite sidecar unioned with the roster mirror (see [`fetch_roster`]), so
+/// members invited on a co-admin's device still count here. Locally-known
+/// revocations and the hoster row are excluded from both sides.
 pub(crate) fn live_member_count(share_dir: &Path, share_id: &str) -> usize {
-    load_members(share_dir, share_id)
+    let sidecar = load_members(share_dir, share_id);
+    let dead: std::collections::HashSet<&str> = sidecar
+        .iter()
+        .filter(|m| m.revoked || m.role == "hoster")
+        .map(|m| m.member_id_hex.as_str())
+        .collect();
+    let mut ids: std::collections::HashSet<String> = sidecar
         .iter()
         .filter(|m| !m.revoked && m.role != "hoster")
-        .count()
+        .map(|m| m.member_id_hex.clone())
+        .collect();
+    for m in load_roster_cache(share_dir, share_id) {
+        // The root entry (invited_by: None) is the creator/hosting device,
+        // seeded by publish — not a device the share was granted to.
+        if m.invited_by.is_some() && !dead.contains(m.member_id.as_str()) {
+            ids.insert(m.member_id);
+        }
+    }
+    ids.len()
+}
+
+// ── roster mirror (`share_dir/members/<id>.roster.json`) ────────────────────
+// The synced roster lives in the beelay doc, reachable only through the live
+// node; these keep a local mirror beside the invite sidecar so node-less
+// paths (live_member_count) still see members invited on other devices.
+
+fn roster_cache_path(share_dir: &Path, share_id: &str) -> PathBuf {
+    share_dir
+        .join("members")
+        .join(format!("{share_id}.roster.json"))
+}
+
+/// Missing or corrupt mirror → empty list.
+pub(crate) fn load_roster_cache(share_dir: &Path, share_id: &str) -> Vec<linxiv_share::MemberMeta> {
+    std::fs::read(roster_cache_path(share_dir, share_id))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_roster_cache(share_dir: &Path, share_id: &str, roster: &[linxiv_share::MemberMeta]) {
+    let path = roster_cache_path(share_dir, share_id);
+    let Some(parent) = path.parent() else { return };
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(roster).expect("roster serialize");
+    // Best-effort mirror: a failed write only staled the count, never the op.
+    let _ = std::fs::create_dir_all(parent)
+        .and_then(|()| std::fs::write(&tmp, bytes))
+        .and_then(|()| std::fs::rename(&tmp, &path));
+}
+
+/// The doc's synced roster via the live node, mirrored to disk on success.
+/// Errors read as an empty roster, matching the old call sites.
+pub(crate) async fn fetch_roster(
+    node: &linxiv_share::ShareNode,
+    share_dir: &Path,
+    share_id: &str,
+) -> Vec<linxiv_share::MemberMeta> {
+    match e2ee_timeout(node.member_meta(share_id), "roster").await {
+        Ok(roster) => {
+            save_roster_cache(share_dir, share_id, &roster);
+            roster
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 fn members_path(share_dir: &Path, share_id: &str) -> PathBuf {
@@ -765,6 +865,189 @@ fn ensure_e2ee_hosted(share_dir: &Path, share_id: &str) -> Result<(), ApiError> 
         ));
     }
     Ok(())
+}
+
+/// Which side of an e2ee share this device is on. Member-management routes
+/// accept both: co-admin devices run keyhive delegation/PCS rotation
+/// themselves; only doc hosting stays a device property.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum E2eeSide {
+    Hosted,
+    Received,
+}
+
+/// 404 unless `share_id` is an e2ee doc on this device (either side).
+fn e2ee_side(share_dir: &Path, share_id: &str) -> Result<E2eeSide, ApiError> {
+    if valid_share_id(share_id) {
+        if doc_path(&e2ee_dir(share_dir), share_id).is_file() {
+            return Ok(E2eeSide::Hosted);
+        }
+        if doc_path(&e2ee_received_dir(share_dir), share_id).is_file() {
+            return Ok(E2eeSide::Received);
+        }
+    }
+    Err(ApiError::new(
+        404,
+        format!("e2ee share {share_id:?} not found"),
+    ))
+}
+
+/// The acting device's admin standing on an e2ee share. THE ADMIN is named by
+/// the doc's marker; a pre-co-admin doc (no marker, no roster) falls back to
+/// "the hosting device is THE ADMIN".
+struct Standing {
+    self_hex: String,
+    /// THE ADMIN's member id, from marker → roster root → hosted-self.
+    admin_hex: Option<String>,
+    /// Holds keyhive Admin (THE ADMIN or co-admin).
+    keyhive_admin: bool,
+    the_admin: bool,
+}
+
+async fn admin_standing(
+    node: &ShareNode,
+    side: E2eeSide,
+    id: &str,
+    roster: &[MemberMeta],
+) -> Result<Standing, ApiError> {
+    let self_id = node.self_member_id().map_err(fetch_error)?;
+    let self_hex = member_id_hex(&self_id);
+    // Fail closed: an authorization input that can't be read is an error,
+    // never a silent fallback to a weaker answer.
+    let marker = e2ee_timeout(node.admin_marker(id), "admin lookup").await?;
+    // The register is member-writable, so the marker only counts when its
+    // holder actually holds keyhive Admin: a garbage or editor-forged value
+    // is ignored (falling back to the creator root = the repair path). A
+    // keyhive-Admin holder is indistinguishable from a real transfer here;
+    // that residual needs signed transfers (deferred).
+    let marker = match marker {
+        Some(hex) => {
+            if is_keyhive_admin(node, id, &hex).await? {
+                Some(hex)
+            } else {
+                eprintln!("share {id}: admin marker holder {hex} lacks keyhive Admin; ignoring");
+                None
+            }
+        }
+        None => None,
+    };
+    let mut admin_hex = marker;
+    if admin_hex.is_none() {
+        // Roster root (invited_by: None) is the project creator — but the
+        // roster is member-writable too, so the root gets the same
+        // keyhive-Admin validation as the marker before it counts.
+        if let Some(root) = roster.iter().find(|m| m.invited_by.is_none()) {
+            if is_keyhive_admin(node, id, &root.member_id).await? {
+                admin_hex = Some(root.member_id.clone());
+            } else {
+                eprintln!(
+                    "share {id}: roster root {} lacks keyhive Admin; ignoring",
+                    root.member_id
+                );
+            }
+        }
+    }
+    let admin_hex = admin_hex.or_else(|| (side == E2eeSide::Hosted).then(|| self_hex.clone()));
+    let keyhive_admin = match side {
+        // The creator's root delegation is Admin and irrevocable.
+        E2eeSide::Hosted => true,
+        E2eeSide::Received => matches!(
+            e2ee_timeout(node.query_role(id, self_id), "role check").await?,
+            Some(Role::Admin)
+        ),
+    };
+    let the_admin = admin_hex.as_deref() == Some(self_hex.as_str());
+    Ok(Standing {
+        self_hex,
+        admin_hex,
+        keyhive_admin,
+        the_admin,
+    })
+}
+
+/// Whether `hex` currently holds keyhive Admin on this share. Malformed ids
+/// are simply not admins; read failures propagate (fail closed).
+async fn is_keyhive_admin(node: &ShareNode, id: &str, hex: &str) -> Result<bool, ApiError> {
+    let Some(mid) = member_id_from_hex(hex) else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        e2ee_timeout(node.query_role(id, mid), "role check").await?,
+        Some(Role::Admin)
+    ))
+}
+
+impl Standing {
+    fn require_admin_tier(&self) -> Result<(), ApiError> {
+        if self.keyhive_admin {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                403,
+                "only admins and co-admins can manage members",
+            ))
+        }
+    }
+
+    fn role_label(&self) -> &'static str {
+        if self.the_admin {
+            "admin"
+        } else {
+            "co-admin"
+        }
+    }
+
+    /// Wire label for a keyhive role held by `hex`.
+    fn label_for(&self, role: Role, hex: &str) -> Option<&'static str> {
+        match role {
+            Role::Read => Some("viewer"),
+            Role::Edit => Some("editor"),
+            Role::Admin => Some(if self.admin_hex.as_deref() == Some(hex) {
+                "admin"
+            } else {
+                "co-admin"
+            }),
+            Role::Relay => None,
+        }
+    }
+}
+
+/// Keyhive revocation (and role change, which revokes + regrants) needs causal
+/// seniority: the signer must be an ancestor issuer in the target's delegation
+/// lineage. The synced roster's `invited_by` chain mirrors that lineage, so
+/// this pre-empts a doomed op with a clear 409 instead of a keyhive NoProof.
+/// The hosted device is the creator (every lineage roots at it): always true.
+/// Unknown lineage (roster gap) → attempt anyway and let keyhive decide.
+fn lineage_allows(
+    roster: &[MemberMeta],
+    side: E2eeSide,
+    actor_hex: &str,
+    target_hex: &str,
+) -> bool {
+    if side == E2eeSide::Hosted {
+        return true;
+    }
+    let mut cur = target_hex.to_string();
+    // Bounded walk: a corrupt roster with an invited_by cycle must not spin.
+    for _ in 0..roster.len() + 1 {
+        let Some(entry) = roster.iter().find(|m| m.member_id == cur) else {
+            return true;
+        };
+        match &entry.invited_by {
+            Some(inviter) if inviter == actor_hex => return true,
+            Some(inviter) => cur = inviter.clone(),
+            None => return false,
+        }
+    }
+    false
+}
+
+fn seniority_err() -> ApiError {
+    ApiError::new(
+        409,
+        "keyhive causal seniority: only the device that invited this member \
+         (or the project host) can revoke or demote them",
+    )
 }
 
 /// `<doc>.unpublished` — where `unpublish` parks a doc's CRDT history.
@@ -811,6 +1094,17 @@ async fn unpublish(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     }
     // Revocation runs against the live node (content lives in beelay state).
     let node = live_node(share).await?;
+    // Unpublish is the delete lever, and only THE ADMIN deletes: a hosting
+    // device that transferred the role away is a co-admin and may not revoke
+    // the whole membership (including THE ADMIN) on its way out.
+    let roster = fetch_roster(&node, dir, id).await;
+    let standing = admin_standing(&node, E2eeSide::Hosted, id, &roster).await?;
+    if !standing.the_admin {
+        return Err(ApiError::new(
+            403,
+            "only THE ADMIN can unpublish; transfer the admin role back first",
+        ));
+    }
     let mut list = load_members(dir, id);
     let mut failed = Vec::new();
     for m in list.iter_mut().filter(|m| !m.revoked && m.role != "hoster") {
@@ -835,6 +1129,36 @@ async fn unpublish(share: &ShareState, id: &str) -> Result<Value, ApiError> {
             Err(e) => failed.push(format!("{}: {}", m.member_id_hex, e.detail)),
         }
     }
+    // Members granted from co-admin devices exist only in the synced roster,
+    // not this sidecar — revoke them too, or their keyhive grant outlives the
+    // unpublish and a later republish silently serves them again.
+    let sidecar_ids: std::collections::HashSet<&str> =
+        list.iter().map(|m| m.member_id_hex.as_str()).collect();
+    for m in fetch_roster(&node, dir, id).await {
+        // invited_by: None is the creator's own root entry — never revocable
+        // (and never a granted device), even if the hoster sidecar row was
+        // lost to a failed write.
+        if m.invited_by.is_none() || sidecar_ids.contains(m.member_id.as_str()) {
+            continue;
+        }
+        let Some(mid) = member_id_from_hex(&m.member_id) else {
+            continue;
+        };
+        if matches!(
+            e2ee_timeout(node.query_role(id, mid), "member query").await,
+            Ok(None)
+        ) {
+            continue;
+        }
+        match e2ee_timeout(node.revoke(id, mid), "revoke").await {
+            Ok(_) => {
+                let _ = e2ee_timeout(node.remove_member_meta(id, &m.member_id), "roster").await;
+            }
+            Err(e) => failed.push(format!("{}: {}", m.member_id, e.detail)),
+        }
+    }
+    // Mirror the post-revoke roster so counts don't read the parked members.
+    fetch_roster(&node, dir, id).await;
     if let Err(e) = save_members(dir, id, &list) {
         eprintln!("share {id}: could not persist members sidecar: {e}");
     }
@@ -880,11 +1204,35 @@ async fn leave(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     if was_e2ee {
         match share.node().await {
             Some(node) => {
+                // THE ADMIN leaving strands the admin tier: unpublish and
+                // transfer both need the marker-holder. Transfer first. If
+                // standing can't be read (doc missing from beelay — reset
+                // p2p dir, parked join), there's nothing to guard: leave is
+                // cleanup of this device, and forget_e2ee handles absence.
+                let roster = fetch_roster(&node, dir, id).await;
+                match admin_standing(&node, E2eeSide::Received, id, &roster).await {
+                    Ok(standing) if standing.the_admin => {
+                        return Err(ApiError::new(
+                            409,
+                            "this device holds THE ADMIN role; transfer it before leaving",
+                        ));
+                    }
+                    Ok(_) => {}
+                    // Only the doc-absent case skips the guard; a transient
+                    // read failure fails closed, or THE ADMIN could leave
+                    // during a timeout and strand the marker forever.
+                    Err(e) if e.status == 404 => {
+                        eprintln!("share {id}: leave admin check skipped: {}", e.detail)
+                    }
+                    Err(e) => return Err(e),
+                }
                 e2ee_timeout(node.forget_e2ee(id), "leave share").await?;
                 forgotten = true;
             }
             // Not fatal: the user asked to leave, and the files below are what
             // the interval loop reads. The response says the undo is partial.
+            // (Offline we also cannot check the admin marker — a marker-holder
+            // leaving offline is a known hole, recoverable by rejoining.)
             None => eprintln!("share {id}: leaving with p2p offline; beelay entry survives"),
         }
     }
@@ -1264,6 +1612,37 @@ async fn publish_secure(state: &AppState, share: &ShareState, id: &str) -> Resul
             );
         }
     }
+    // Seed the co-admin metadata riding the doc: THE-ADMIN marker (this
+    // device) and the roster root (invited_by: None = the creator). Both
+    // best-effort — a missing marker reads as "the hosting device is THE
+    // ADMIN" anyway, and the next publish retries.
+    if let Ok(self_hex) = node.self_member_id().map(|m| member_id_hex(&m)) {
+        match e2ee_timeout(node.admin_marker(&sp.share_id), "admin lookup").await {
+            Ok(None) => {
+                if let Err(e) =
+                    e2ee_timeout(node.set_admin_marker(&sp.share_id, &self_hex), "admin seed").await
+                {
+                    eprintln!("share {}: seeding admin marker: {}", sp.share_id, e.detail);
+                }
+            }
+            Ok(Some(_)) => {}
+            Err(e) => eprintln!("share {}: reading admin marker: {}", sp.share_id, e.detail),
+        }
+        let roster = fetch_roster(&node, &dir, &sp.share_id).await;
+        if !roster.iter().any(|m| m.member_id == self_hex) {
+            let meta = MemberMeta {
+                member_id: self_hex,
+                name: None,
+                invited_at: chrono::Utc::now().to_rfc3339(),
+                invited_by: None,
+            };
+            if let Err(e) =
+                e2ee_timeout(node.upsert_member_meta(&sp.share_id, meta), "roster").await
+            {
+                eprintln!("share {}: seeding roster root: {}", sp.share_id, e.detail);
+            }
+        }
+    }
     to_value(&PublishedReceipt {
         share_id: sp.share_id,
         e2ee: Some(true),
@@ -1271,7 +1650,9 @@ async fn publish_secure(state: &AppState, share: &ShareState, id: &str) -> Resul
 }
 
 /// `POST /api/share/{id}/invite {member_code, role: "editor"|"viewer", name?}`
-/// — grant a device access to a hoster-owned e2ee share and mint its invite.
+/// — grant a device access to an e2ee share and mint its invite. Admin-tier
+/// op from either side: a co-admin's invite points the invitee at the
+/// co-admin's own address, and the grant reaches the host via the preamble.
 async fn invite(
     state: &AppState,
     share: &ShareState,
@@ -1279,7 +1660,7 @@ async fn invite(
     body: Option<&Value>,
 ) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
-    ensure_e2ee_hosted(&dir, id)?;
+    let side = e2ee_side(&dir, id)?;
     let code = body
         .and_then(|b| b.get("member_code"))
         .and_then(Value::as_str)
@@ -1297,6 +1678,12 @@ async fn invite(
     let role = match role_s {
         "editor" => Role::Edit,
         "viewer" => Role::Read,
+        "co-admin" | "admin" => {
+            return Err(ApiError::new(
+                422,
+                "invite as \"editor\" or \"viewer\"; promote to co-admin after they join",
+            ))
+        }
         _ => return Err(ApiError::new(422, "role must be \"editor\" or \"viewer\"")),
     };
     let name = body
@@ -1304,34 +1691,50 @@ async fn invite(
         .and_then(Value::as_str)
         .map(String::from);
     let node = live_node(share).await?;
+    // Standing checks run under the write lock (see set_member_role): a
+    // concurrent transfer/demotion must not act on a stale snapshot.
     let _lock = share.lock_writes(id).await;
-    // A concurrent unpublish may have parked the doc since the entry check above.
-    ensure_e2ee_hosted(&dir, id)?;
+    // A concurrent unpublish/leave may have parked the doc before the lock.
+    e2ee_side(&dir, id)?;
+    let roster = fetch_roster(&node, &dir, id).await;
+    let standing = admin_standing(&node, side, id, &roster).await?;
+    standing.require_admin_tier()?;
     // A typed ShareError::RoleConflict surfaces as 409 via fetch_error.
     let (member, invite) = e2ee_timeout(node.invite_member(id, code, role), "invite").await?;
     // Keyhive accepted the grant, so a sidecar entry disagreeing on role is
     // stale — overwritten below, never a post-grant 409.
     let hex = member_id_hex(&member);
     let mut list = load_members(&dir, id);
-    let was_active = list.iter().any(|m| m.member_id_hex == hex && !m.revoked);
+    // Active if the local sidecar says so OR the synced roster carries them
+    // (invited from another device): the compensating revoke below must never
+    // strip access this request didn't create.
+    let was_active = list.iter().any(|m| m.member_id_hex == hex && !m.revoked)
+        || roster.iter().any(|m| m.member_id == hex);
     // Blobs stored before this grant are keyed to a pre-grant epoch: re-store and
     // republish under the post-grant one. The grant already happened, so a re-key
-    // failure must not abort the invite — the interval hoster leg retries.
-    let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
-    if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
-        match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
-            Ok(()) => e2ee_timeout(node.publish_secure(&sp), "secure publish").await?,
-            Err(e) => eprintln!("share {id}: blob re-key after invite: {e}"),
+    // failure must not abort the invite — the interval hoster leg retries. Only
+    // the hosting device holds the doc + PDFs; after a co-admin invite the
+    // host's Re-key repairs blob epochs if the invitee's PDFs stay locked.
+    if side == E2eeSide::Hosted {
+        let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
+        if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
+            match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
+                Ok(()) => e2ee_timeout(node.publish_secure(&sp), "secure publish").await?,
+                Err(e) => eprintln!("share {id}: blob re-key after invite: {e}"),
+            }
         }
     }
     if let Some(m) = list.iter_mut().find(|m| m.member_id_hex == hex) {
         m.role = role_s.into();
-        m.name = name;
+        // Blank name on a re-mint keeps the stored one.
+        if name.is_some() {
+            m.name = name;
+        }
         m.revoked = false;
         m.invite = Some(invite.clone());
     } else {
         list.push(MemberEntry {
-            member_id_hex: hex,
+            member_id_hex: hex.clone(),
             name,
             role: role_s.into(),
             invited_at: chrono::Utc::now().to_rfc3339(),
@@ -1349,62 +1752,204 @@ async fn invite(
             format!("could not persist members sidecar: {e}"),
         ));
     }
+    // Shared roster entry so other admin-tier devices can list + manage this
+    // member; `invited_by` records the delegation lineage revocations need.
+    // A re-invite preserves the existing entry's name fallback, timestamp,
+    // and lineage — the upsert replaces the whole entry, and rewriting
+    // `invited_by` would corrupt the chain `lineage_allows` checks.
+    let prior = roster.iter().find(|m| m.member_id == hex);
+    let meta = MemberMeta {
+        member_id: hex.clone(),
+        name: list
+            .iter()
+            .find(|m| m.member_id_hex == hex)
+            .and_then(|m| m.name.clone())
+            .or_else(|| prior.and_then(|p| p.name.clone())),
+        invited_at: prior
+            .map(|p| p.invited_at.clone())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        invited_by: match prior {
+            Some(p) => p.invited_by.clone(),
+            None => Some(standing.self_hex.clone()),
+        },
+    };
+    if let Err(e) = e2ee_timeout(node.upsert_member_meta(id, meta), "roster").await {
+        eprintln!("share {id}: roster entry for {hex}: {}", e.detail);
+    }
+    push_membership_change(&node, side, id, "invite").await;
     to_value(&InviteMinted { invite })
 }
 
-/// `GET /api/share/{id}/members` — the sidecar list, with a live `query_role`
-/// truth-check per invited entry (no role after having been invited = revoked).
+/// `GET /api/share/{id}/members` — the roster (synced doc metadata ∪ the local
+/// invite sidecar), each entry truth-checked with a live `query_role`.
 ///
-/// Co-admin (spec §1.1): keyhive can grant Admin, but the ops that force PCS
-/// rotation (revoke, downgrade) must run where the doc is hosted — so management
-/// stays Hoster-only and co-admin is deferred, not built UI. Roles offered here
-/// and on the role route are viewer/editor only.
+/// Co-admin: management ops run on whichever admin-tier device issues them —
+/// keyhive delegation and PCS rotation happen locally and propagate through
+/// the session preamble — so this and the other member routes accept hosted
+/// AND received e2ee shares. A hosted store-only state (no node; tests)
+/// degrades to the sidecar-only legacy listing.
 async fn members(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
-    ensure_e2ee_hosted(&dir, id)?;
-    let node = share.node().await;
-    let members = load_members(&dir, id);
-    // One concurrent truth-check per live invited entry, so budgets don't stack
-    // (entries × budget). `Some(revoked_now)` = answered; `None` = keep sidecar.
-    let checks = futures_util::future::join_all(members.iter().map(|m| async {
-        if m.revoked || m.role == "hoster" {
-            return None;
+    let side = e2ee_side(&dir, id)?;
+    let sidecar = load_members(&dir, id);
+    let Some(node) = share.node().await else {
+        if side == E2eeSide::Received {
+            return Err(ApiError::new(503, "share transport not initialized"));
         }
-        let (Some(node), Some(mid)) = (&node, member_id_from_hex(&m.member_id_hex)) else {
-            return None;
-        };
-        match e2ee_timeout(node.query_role(id, mid), "member query").await {
-            Ok(role) => Some(role.is_none()),
-            Err(_) => None,
+        let out = sidecar
+            .into_iter()
+            .map(|m| MemberRow {
+                member_id: m.member_id_hex,
+                name: m.name,
+                // No marker readable without the node; the hosting device is
+                // THE ADMIN on the legacy path.
+                verified: m.role == "hoster",
+                role: if m.role == "hoster" {
+                    "admin".into()
+                } else {
+                    m.role
+                },
+                invited_at: m.invited_at,
+                revoked: m.revoked,
+                invite: if m.revoked { None } else { m.invite },
+            })
+            .collect();
+        return to_value(&MembersListing {
+            members: out,
+            self_member_id: None,
+            self_role: None,
+        });
+    };
+    let roster = fetch_roster(&node, &dir, id).await;
+    let standing = admin_standing(&node, side, id, &roster).await?;
+    standing.require_admin_tier()?;
+
+    // Union keyed by member id: roster (synced) first, then sidecar-only rows
+    // (pre-roster invites). Local sidecar names win over synced ones.
+    struct Entry {
+        hex: String,
+        name: Option<String>,
+        invited_at: String,
+        sidecar: Option<MemberEntry>,
+        in_roster: bool,
+    }
+    let mut entries: Vec<Entry> = roster
+        .iter()
+        .map(|m| Entry {
+            hex: m.member_id.clone(),
+            name: m.name.clone(),
+            invited_at: m.invited_at.clone(),
+            sidecar: None,
+            in_roster: true,
+        })
+        .collect();
+    for s in sidecar {
+        match entries.iter_mut().find(|e| e.hex == s.member_id_hex) {
+            Some(e) => {
+                if s.name.is_some() {
+                    e.name = s.name.clone();
+                }
+                e.sidecar = Some(s);
+            }
+            None => entries.push(Entry {
+                hex: s.member_id_hex.clone(),
+                name: s.name.clone(),
+                invited_at: s.invited_at.clone(),
+                sidecar: Some(s),
+                in_roster: false,
+            }),
         }
+    }
+    if !entries.iter().any(|e| e.hex == standing.self_hex) {
+        entries.push(Entry {
+            hex: standing.self_hex.clone(),
+            name: None,
+            invited_at: String::new(),
+            sidecar: None,
+            in_roster: false,
+        });
+    }
+    // Migration self-heal: hosted sidecar rows predating the synced roster get
+    // written into it, so co-admins elsewhere see the full membership.
+    if side == E2eeSide::Hosted {
+        for e in entries.iter().filter(|e| !e.in_roster) {
+            let is_self = e.hex == standing.self_hex;
+            if e.sidecar.as_ref().is_some_and(|s| s.revoked) || e.hex.is_empty() {
+                continue;
+            }
+            let meta = MemberMeta {
+                member_id: e.hex.clone(),
+                name: e.name.clone(),
+                invited_at: e.invited_at.clone(),
+                invited_by: (!is_self).then(|| standing.self_hex.clone()),
+            };
+            if let Err(err) = e2ee_timeout(node.upsert_member_meta(id, meta), "roster").await {
+                eprintln!("share {id}: roster backfill for {}: {}", e.hex, err.detail);
+            }
+        }
+    }
+
+    // One concurrent truth-check per entry, so budgets don't stack
+    // (entries × budget). `Some(role)` = answered; `None` = keep fallbacks.
+    let checks = futures_util::future::join_all(entries.iter().map(|e| async {
+        let mid = member_id_from_hex(&e.hex)?;
+        e2ee_timeout(node.query_role(id, mid), "member query")
+            .await
+            .ok()
     }))
     .await;
     let mut out = Vec::new();
-    for (m, check) in members.into_iter().zip(checks) {
-        let mut revoked = m.revoked;
-        let mut verified = m.role == "hoster";
-        if let Some(revoked_now) = check {
-            revoked = revoked_now;
+    for (e, check) in entries.into_iter().zip(checks) {
+        let side_role = e.sidecar.as_ref().map(|s| s.role.clone());
+        let mut revoked = e.sidecar.as_ref().is_some_and(|s| s.revoked);
+        let mut verified = false;
+        let mut role = match side_role.as_deref() {
+            Some("hoster") => standing
+                .label_for(Role::Admin, &e.hex)
+                .expect("admin maps")
+                .to_string(),
+            Some(other) => other.to_string(),
+            // Roster-only with no live answer below: least privilege, and
+            // `verified: false` says the key layer hasn't confirmed it.
+            None => "viewer".to_string(),
+        };
+        if let Some(live) = check {
             verified = true;
+            match live.and_then(|r| standing.label_for(r, &e.hex)) {
+                Some(label) => {
+                    revoked = false;
+                    role = label.to_string();
+                }
+                None => revoked = true,
+            }
         }
         out.push(MemberRow {
-            member_id: m.member_id_hex,
-            name: m.name,
-            role: m.role,
-            invited_at: m.invited_at,
+            member_id: e.hex,
+            name: e.name,
+            role,
+            invited_at: e.invited_at,
             revoked,
             verified,
-            invite: if revoked { None } else { m.invite },
+            invite: if revoked {
+                None
+            } else {
+                e.sidecar.and_then(|s| s.invite)
+            },
         });
     }
-    to_value(&MembersListing { members: out })
+    to_value(&MembersListing {
+        members: out,
+        self_member_id: Some(standing.self_hex.clone()),
+        self_role: Some(standing.role_label()),
+    })
 }
 
-/// `POST /api/share/{id}/member/{mid}/role {role: "editor"|"viewer"}` — change
-/// an invited member's role on a hoster-owned e2ee share. The capability layer
-/// revokes + regrants (a downgrade rotates the project key), so stored PDF blobs
-/// re-key + republish afterwards, then the sidecar entry updates. Anything but
-/// viewer/editor is refused: co-admin is app-deferred (see `members`).
+/// `POST /api/share/{id}/member/{mid}/role {role: "editor"|"viewer"|"co-admin"}`
+/// — change a member's role on an e2ee share, from any admin-tier device. The
+/// capability layer revokes + regrants (a downgrade rotates the project key),
+/// so on the hosting device stored PDF blobs re-key + republish afterwards.
+/// Admin-tier targets and the co-admin grant are THE ADMIN's alone; THE ADMIN
+/// itself only changes role via `transfer_admin`.
 async fn set_member_role(
     state: &AppState,
     share: &ShareState,
@@ -1413,7 +1958,7 @@ async fn set_member_role(
     body: Option<&Value>,
 ) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
-    ensure_e2ee_hosted(&dir, id)?;
+    let side = e2ee_side(&dir, id)?;
     let role_s = body
         .and_then(|b| b.get("role"))
         .and_then(Value::as_str)
@@ -1421,47 +1966,90 @@ async fn set_member_role(
     let role = match role_s {
         "editor" => Role::Edit,
         "viewer" => Role::Read,
-        // keyhive-supported, app-deferred (co-admin / relay, spec §1.1).
-        "admin" | "hoster" | "relay" => {
-            return Err(ApiError::new(400, "role must be \"editor\" or \"viewer\""))
+        "co-admin" => Role::Admin,
+        "admin" => {
+            return Err(ApiError::new(
+                409,
+                "THE ADMIN role moves via POST /api/share/{id}/transfer_admin",
+            ))
         }
-        _ => return Err(ApiError::new(422, "role must be \"editor\" or \"viewer\"")),
+        "hoster" | "relay" => {
+            return Err(ApiError::new(
+                422,
+                "role must be \"editor\", \"viewer\" or \"co-admin\"",
+            ))
+        }
+        _ => {
+            return Err(ApiError::new(
+                422,
+                "role must be \"editor\", \"viewer\" or \"co-admin\"",
+            ))
+        }
     };
     let member =
         member_id_from_hex(mid).ok_or_else(|| ApiError::new(422, "malformed member id"))?;
     let canon_hex = member_id_hex(&member);
-    let active = load_members(&dir, id)
-        .into_iter()
-        .find(|m| m.member_id_hex == canon_hex && !m.revoked)
-        .ok_or_else(|| ApiError::new(404, "member not found on this share"))?;
-    if active.role == "hoster" {
-        return Err(ApiError::new(409, "cannot change the host's role"));
-    }
     let node = live_node(share).await?;
-    if node.self_member_id().map(|s| s == member).unwrap_or(false) {
-        return Err(ApiError::new(409, "cannot change your own role as host"));
-    }
+    // Standing and target checks all run under the write lock: a concurrent
+    // local transfer_admin must not leave a just-demoted device acting on a
+    // stale THE-ADMIN snapshot.
     let _lock = share.lock_writes(id).await;
-    // A concurrent unpublish may have parked the doc since the entry check above.
-    ensure_e2ee_hosted(&dir, id)?;
-    // Re-check under the lock: after a concurrent revoke, set_role on a member
-    // with no live delegation is a fresh grant, silently re-admitting them.
-    if !load_members(&dir, id)
-        .iter()
-        .any(|m| m.member_id_hex == canon_hex && !m.revoked)
-    {
+    // A concurrent unpublish/leave may have parked the doc before the lock.
+    e2ee_side(&dir, id)?;
+    let roster = fetch_roster(&node, &dir, id).await;
+    let standing = admin_standing(&node, side, id, &roster).await?;
+    standing.require_admin_tier()?;
+    if canon_hex == standing.self_hex {
+        return Err(ApiError::new(409, "cannot change your own role"));
+    }
+    if standing.admin_hex.as_deref() == Some(canon_hex.as_str()) {
+        return Err(ApiError::new(
+            409,
+            "cannot change THE ADMIN's role; transfer the admin role first",
+        ));
+    }
+    if role == Role::Admin && !standing.the_admin {
+        return Err(ApiError::new(
+            403,
+            "only THE ADMIN can promote a member to co-admin",
+        ));
+    }
+    // Live truth under the lock: after a concurrent revoke, set_role on a
+    // member with no delegation is a fresh grant, silently re-admitting them.
+    let current = e2ee_timeout(node.query_role(id, member), "member query").await?;
+    let Some(current) = current else {
         return Err(ApiError::new(404, "member not found on this share"));
+    };
+    if current == Role::Admin && !standing.the_admin {
+        return Err(ApiError::new(403, "only THE ADMIN can demote a co-admin"));
+    }
+    if current == role {
+        // Idempotent no-op: set_role would revoke + regrant (rotating the
+        // project key) for no state change, and outside the caller's lineage
+        // it would surface as a raw keyhive error instead of a clean 409.
+        return to_value(&RoleChanged {
+            member_id: canon_hex,
+            role: role_s.into(),
+        });
+    }
+    // set_role revokes + regrants, which keyhive only lets causal ancestors do.
+    if !lineage_allows(&roster, side, &standing.self_hex, &canon_hex) {
+        return Err(seniority_err());
     }
     // ShareError::LastReader surfaces as 409 via fetch_error.
     e2ee_timeout(node.set_role(id, member, role), "role change").await?;
     // A downgrade rotated the project key, so old-epoch blobs must re-key +
     // republish. The role change already happened, so a re-key failure must not
     // abort the request — the interval hoster leg retries (as in `invite`).
-    let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
-    if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
-        match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
-            Ok(()) => e2ee_timeout(node.publish_secure(&sp), "secure publish").await?,
-            Err(e) => eprintln!("share {id}: blob re-key after role change: {e}"),
+    // Only the hosting device holds the doc + PDFs; elsewhere the host's
+    // interval leg (or its Re-key button) repairs blob epochs.
+    if side == E2eeSide::Hosted {
+        let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
+        if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
+            match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
+                Ok(()) => e2ee_timeout(node.publish_secure(&sp), "secure publish").await?,
+                Err(e) => eprintln!("share {id}: blob re-key after role change: {e}"),
+            }
         }
     }
     let mut list = load_members(&dir, id);
@@ -1473,39 +2061,98 @@ async fn set_member_role(
     if let Err(e) = save_members(&dir, id, &list) {
         eprintln!("share {id}: could not persist members sidecar: {e}");
     }
+    // Push the rotation to the host now (received side), so the revoke+regrant
+    // and any key rotation don't sit local-only until the interval sync.
+    if side == E2eeSide::Received {
+        if let Err(e) = e2ee_timeout(node.sync_e2ee(id), "role-change sync").await {
+            eprintln!("share {id}: pushing role change to host: {}", e.detail);
+        }
+    }
     to_value(&RoleChanged {
         member_id: canon_hex,
         role: role_s.into(),
     })
 }
 
+/// Shared admission for revoke/remove: parse the target, resolve standing, and
+/// run the co-admin role matrix (self/THE-ADMIN/tier/seniority checks).
+async fn revocation_checks(
+    node: &ShareNode,
+    side: E2eeSide,
+    id: &str,
+    hex: &str,
+) -> Result<
+    (
+        linxiv_share::MemberId,
+        String,
+        Vec<MemberMeta>,
+        Option<Role>,
+    ),
+    ApiError,
+> {
+    let mid = member_id_from_hex(hex).ok_or_else(|| ApiError::new(422, "malformed member id"))?;
+    let canon_hex = member_id_hex(&mid);
+    let roster = e2ee_timeout(node.member_meta(id), "roster")
+        .await
+        .unwrap_or_default();
+    let standing = admin_standing(node, side, id, &roster).await?;
+    standing.require_admin_tier()?;
+    if canon_hex == standing.self_hex {
+        return Err(ApiError::new(409, "cannot revoke yourself"));
+    }
+    if standing.admin_hex.as_deref() == Some(canon_hex.as_str()) {
+        return Err(ApiError::new(
+            409,
+            "cannot revoke THE ADMIN; transfer the admin role first",
+        ));
+    }
+    let target_role = e2ee_timeout(node.query_role(id, mid), "member query").await?;
+    if target_role == Some(Role::Admin) && !standing.the_admin {
+        return Err(ApiError::new(403, "only THE ADMIN can revoke a co-admin"));
+    }
+    if target_role.is_some() && !lineage_allows(&roster, side, &standing.self_hex, &canon_hex) {
+        return Err(seniority_err());
+    }
+    Ok((mid, canon_hex, roster, target_role))
+}
+
+/// Push a received-side membership change (and its PCS rotation) to the host
+/// now instead of waiting for the interval sync. Best-effort.
+async fn push_membership_change(node: &ShareNode, side: E2eeSide, id: &str, what: &str) {
+    if side == E2eeSide::Received {
+        if let Err(e) = e2ee_timeout(node.sync_e2ee(id), what).await {
+            eprintln!("share {id}: pushing {what} to host: {}", e.detail);
+        }
+    }
+}
+
 /// `POST /api/share/{id}/revoke {member_id}` — revoke a member (the project key
-/// rotates) and mark the sidecar entry.
+/// rotates), mark the sidecar entry, and drop them from the synced roster.
+/// Admin-tier op, from the hosting device or a co-admin's.
 async fn revoke_member(
     share: &ShareState,
     id: &str,
     body: Option<&Value>,
 ) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
-    ensure_e2ee_hosted(&dir, id)?;
+    let side = e2ee_side(&dir, id)?;
     let hex = body
         .and_then(|b| b.get("member_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::new(422, "missing `member_id` in body"))?;
-    let mid = member_id_from_hex(hex).ok_or_else(|| ApiError::new(422, "malformed `member_id`"))?;
     let node = live_node(share).await?;
-    if node.self_member_id().map(|s| s == mid).unwrap_or(false) {
-        return Err(ApiError::new(409, "cannot revoke yourself as host"));
-    }
-    let canon_hex = member_id_hex(&mid);
-    if load_members(&dir, id)
-        .iter()
-        .any(|m| m.member_id_hex == canon_hex && m.role == "hoster")
-    {
-        return Err(ApiError::new(409, "cannot revoke the host"));
-    }
     let _lock = share.lock_writes(id).await;
-    e2ee_timeout(node.revoke(id, mid), "revoke").await?;
+    // A concurrent unpublish may have parked the doc before the lock.
+    e2ee_side(&dir, id)?;
+    // The whole matrix runs under the write lock: a concurrent promotion or
+    // admin transfer must not let a stale snapshot revoke an admin-tier
+    // member (same window set_member_role re-checks under its lock).
+    let (mid, canon_hex, _, target_role) = revocation_checks(&node, side, id, hex).await?;
+    // query_role == None: keyhive already dropped them (a concurrent revoke
+    // elsewhere); skip the revoke and just mark the rows, like remove_member.
+    if target_role.is_some() {
+        e2ee_timeout(node.revoke(id, mid), "revoke").await?;
+    }
     let mut list = load_members(&dir, id);
     for m in list.iter_mut().filter(|m| m.member_id_hex == canon_hex) {
         m.revoked = true;
@@ -1514,7 +2161,91 @@ async fn revoke_member(
     if let Err(e) = save_members(&dir, id, &list) {
         eprintln!("share {id}: could not persist members sidecar: {e}");
     }
+    if let Err(e) = e2ee_timeout(node.remove_member_meta(id, &canon_hex), "roster").await {
+        eprintln!("share {id}: roster removal for {canon_hex}: {}", e.detail);
+    }
+    // Refresh the mirror so live_member_count stops counting them now, not
+    // on the next members fetch.
+    fetch_roster(&node, &dir, id).await;
+    push_membership_change(&node, side, id, "revoke").await;
     to_value(&RevokedReceipt { revoked: true })
+}
+
+/// `POST /api/share/{id}/transfer_admin {member_id}` — hand THE ADMIN role to
+/// a co-admin. One marker write in the doc: an automerge LWW register, so two
+/// concurrent transfers still converge to exactly one THE ADMIN. The old admin
+/// keeps keyhive Admin and is a co-admin from here on — powers travel with the
+/// marker, hosting stays where it is.
+async fn transfer_admin(
+    share: &ShareState,
+    id: &str,
+    body: Option<&Value>,
+) -> Result<Value, ApiError> {
+    let dir = share.share_dir().to_path_buf();
+    let side = e2ee_side(&dir, id)?;
+    let hex = body
+        .and_then(|b| b.get("member_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::new(422, "missing `member_id` in body"))?;
+    let mid = member_id_from_hex(hex).ok_or_else(|| ApiError::new(422, "malformed `member_id`"))?;
+    let canon_hex = member_id_hex(&mid);
+    let node = live_node(share).await?;
+    // Checked under the write lock, symmetric with revoke_member: a revoke
+    // landing between check and marker write would crown a revoked member and
+    // strand the admin tier.
+    let _lock = share.lock_writes(id).await;
+    e2ee_side(&dir, id)?;
+    let roster = fetch_roster(&node, &dir, id).await;
+    let standing = admin_standing(&node, side, id, &roster).await?;
+    // Excluding self keeps THE ADMIN naming itself on the 409 below instead
+    // of a pointless full re-seal through the idempotent branch.
+    if standing.admin_hex.as_deref() == Some(canon_hex.as_str()) && canon_hex != standing.self_hex {
+        // A prior transfer already moved the marker (its flush may have
+        // failed): re-flush and report success — true idempotence. Admin-tier
+        // only, so non-admins can't probe the marker through this route.
+        standing.require_admin_tier()?;
+        flush_admin_marker(&node, side, id).await?;
+        return to_value(&AdminTransferred {
+            transferred: true,
+            admin: canon_hex,
+        });
+    }
+    if !standing.the_admin {
+        return Err(ApiError::new(403, "only THE ADMIN can transfer the role"));
+    }
+    if canon_hex == standing.self_hex {
+        return Err(ApiError::new(
+            409,
+            "this device already holds THE ADMIN role",
+        ));
+    }
+    if e2ee_timeout(node.query_role(id, mid), "member query").await? != Some(Role::Admin) {
+        return Err(ApiError::new(
+            409,
+            "the transfer target must be a co-admin; promote them first",
+        ));
+    }
+    e2ee_timeout(node.set_admin_marker(id, &canon_hex), "admin transfer").await?;
+    // A flush failure here leaves the transfer effective in memory; the retry
+    // takes the marker-already-moved branch above and re-flushes.
+    flush_admin_marker(&node, side, id).await?;
+    to_value(&AdminTransferred {
+        transferred: true,
+        admin: canon_hex,
+    })
+}
+
+/// Make a moved admin marker durable + visible now, not on the next interval
+/// pass: member side pushes a sync; the hosting side has no dial target, so
+/// it re-seals (the one exposed op that flushes a hosted doc).
+async fn flush_admin_marker(node: &ShareNode, side: E2eeSide, id: &str) -> Result<(), ApiError> {
+    match side {
+        E2eeSide::Received => e2ee_timeout(node.sync_e2ee(id), "admin transfer")
+            .await
+            .map(|_| ())?,
+        E2eeSide::Hosted => e2ee_timeout(node.rekey_e2ee(id), "admin transfer").await?,
+    }
+    Ok(())
 }
 
 /// `POST /api/share/{id}/rekey` — re-encrypt a hosted e2ee share's history
@@ -1551,37 +2282,43 @@ async fn rekey(state: &AppState, share: &ShareState, id: &str) -> Result<Value, 
     })
 }
 
-/// `POST /api/share/{id}/member/{mid}/remove` — revoke, then drop the sidecar row
-/// entirely, so a re-invite of the same device starts clean (a revoked row keeps
-/// its stale role and dead invite string). Revoking is what withdraws the
-/// capability; the row is bookkeeping. Already-revoked members skip to the row
-/// delete.
+/// `POST /api/share/{id}/member/{mid}/remove` — revoke, then drop the sidecar
+/// row and roster entry entirely, so a re-invite of the same device starts
+/// clean (a revoked row keeps its stale role and dead invite string). Revoking
+/// is what withdraws the capability; the rows are bookkeeping. Already-revoked
+/// members skip to the row delete. Same admin-tier matrix as `revoke_member`.
 async fn remove_member(share: &ShareState, id: &str, mid: &str) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
-    ensure_e2ee_hosted(&dir, id)?;
-    let member =
-        member_id_from_hex(mid).ok_or_else(|| ApiError::new(422, "malformed member id"))?;
-    let canon_hex = member_id_hex(&member);
-    let entry = load_members(&dir, id)
-        .into_iter()
-        .find(|m| m.member_id_hex == canon_hex)
-        .ok_or_else(|| ApiError::new(404, "member not found on this share"))?;
-    if entry.role == "hoster" {
-        return Err(ApiError::new(409, "cannot remove the host"));
-    }
+    let side = e2ee_side(&dir, id)?;
     let node = live_node(share).await?;
-    if node.self_member_id().map(|s| s == member).unwrap_or(false) {
-        return Err(ApiError::new(409, "cannot remove yourself as host"));
-    }
     let _lock = share.lock_writes(id).await;
-    ensure_e2ee_hosted(&dir, id)?;
-    if !entry.revoked {
+    e2ee_side(&dir, id)?;
+    // Under the write lock, like revoke_member: the tier/seniority matrix
+    // must see any concurrent promotion, not a pre-lock snapshot.
+    let (member, canon_hex, roster, target_role) = revocation_checks(&node, side, id, mid).await?;
+    let known = load_members(&dir, id)
+        .iter()
+        .any(|m| m.member_id_hex == canon_hex)
+        || roster.iter().any(|m| m.member_id == canon_hex)
+        || target_role.is_some();
+    if !known {
+        return Err(ApiError::new(404, "member not found on this share"));
+    }
+    // target_role == None: keyhive already dropped them; just clear the rows.
+    // (Queried by revocation_checks under this same lock.)
+    if target_role.is_some() {
         e2ee_timeout(node.revoke(id, member), "revoke").await?;
     }
     let mut list = load_members(&dir, id);
     list.retain(|m| m.member_id_hex != canon_hex);
     save_members(&dir, id, &list)
         .map_err(|e| ApiError::new(500, format!("could not persist members sidecar: {e}")))?;
+    if let Err(e) = e2ee_timeout(node.remove_member_meta(id, &canon_hex), "roster").await {
+        eprintln!("share {id}: roster removal for {canon_hex}: {}", e.detail);
+    }
+    // Refresh the mirror so live_member_count stops counting them now.
+    fetch_roster(&node, &dir, id).await;
+    push_membership_change(&node, side, id, "remove").await;
     to_value(&RemovedReceipt {
         removed: true,
         member_id: canon_hex,
@@ -2236,58 +2973,104 @@ mod tests {
         let share = ShareState::new(dir.path());
         let viewer = json!({ "role": "viewer" });
 
-        // Not a hosted e2ee share → 404.
+        // Not an e2ee share on this device → 404.
         let err = set_member_role(&state, &share, SID, "ab", Some(&viewer))
             .await
             .unwrap_err();
         assert_eq!(err.status, 404);
 
         save(&e2ee_dir(dir.path()), &remote_shared(SID, "b")).unwrap();
-        // Admin/relay targets refused: co-admin is app-deferred (spec §1.1).
+        // THE ADMIN never moves through the role route — transfer only.
         let err = set_member_role(&state, &share, SID, "ab", Some(&json!({ "role": "admin" })))
             .await
             .unwrap_err();
-        assert_eq!(err.status, 400);
-        // Unknown role word → 422.
-        let err = set_member_role(&state, &share, SID, "ab", Some(&json!({ "role": "owner" })))
-            .await
-            .unwrap_err();
-        assert_eq!(err.status, 422);
+        assert_eq!(err.status, 409);
+        assert!(err.detail.contains("transfer_admin"), "{}", err.detail);
+        // Unknown / unsupported role words → 422.
+        for word in ["owner", "hoster", "relay"] {
+            let err = set_member_role(&state, &share, SID, "ab", Some(&json!({ "role": word })))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, 422, "role {word:?}");
+        }
         // Malformed member id → 422.
         let err = set_member_role(&state, &share, SID, "zz", Some(&viewer))
             .await
             .unwrap_err();
         assert_eq!(err.status, 422);
-        // Well-formed id that was never invited → 404 (never a blind grant).
+        // Any real change (co-admin promotion included) needs the live key
+        // layer — membership truth is keyhive, not the sidecar → 503 here.
         let hex = "aa".repeat(32);
-        let err = set_member_role(&state, &share, SID, &hex, Some(&viewer))
+        for role in ["viewer", "co-admin"] {
+            let err = set_member_role(&state, &share, SID, &hex, Some(&json!({ "role": role })))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, 503, "role {role:?}");
+        }
+        // Received-side e2ee docs take the same route (co-admin devices manage
+        // members too): validation reaches the node requirement, not a 404.
+        let dir2 = tempfile::tempdir().unwrap();
+        let share2 = ShareState::new(dir2.path());
+        save(&e2ee_received_dir(dir2.path()), &remote_shared(SID, "b")).unwrap();
+        let err = set_member_role(&state, &share2, SID, &hex, Some(&viewer))
             .await
             .unwrap_err();
-        assert_eq!(err.status, 404);
-        // Invited member, but store-only state has no live node → 503.
-        save_members(
-            dir.path(),
-            SID,
-            &[MemberEntry {
-                member_id_hex: hex.clone(),
-                name: None,
-                role: "viewer".into(),
-                invited_at: chrono::Utc::now().to_rfc3339(),
-                revoked: false,
-                invite: None,
-            }],
-        )
-        .unwrap();
-        let err = set_member_role(
-            &state,
-            &share,
-            SID,
-            &hex,
-            Some(&json!({ "role": "editor" })),
-        )
-        .await
-        .unwrap_err();
         assert_eq!(err.status, 503);
+    }
+
+    // Transfer-route input validation, cheap (no node, store-only state).
+    #[tokio::test]
+    async fn transfer_admin_validates_before_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let share = ShareState::new(dir.path());
+
+        let body = json!({ "member_id": "aa".repeat(32) });
+        // Not an e2ee share on this device → 404.
+        let err = transfer_admin(&share, SID, Some(&body)).await.unwrap_err();
+        assert_eq!(err.status, 404);
+
+        save(&e2ee_dir(dir.path()), &remote_shared(SID, "b")).unwrap();
+        // Missing / malformed member id → 422.
+        let err = transfer_admin(&share, SID, Some(&json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 422);
+        let err = transfer_admin(&share, SID, Some(&json!({ "member_id": "zz" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 422);
+        // The marker lives in the live doc → 503 on a store-only state.
+        let err = transfer_admin(&share, SID, Some(&body)).await.unwrap_err();
+        assert_eq!(err.status, 503);
+    }
+
+    /// Wire pins: members-listing self fields vanish on the legacy path and
+    /// append after `members`; the transfer receipt shape.
+    #[test]
+    fn members_listing_and_transfer_wire_shapes() {
+        let legacy = MembersListing {
+            members: vec![],
+            self_member_id: None,
+            self_role: None,
+        };
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), r#"{"members":[]}"#);
+        let live = MembersListing {
+            members: vec![],
+            self_member_id: Some("aa".into()),
+            self_role: Some("co-admin"),
+        };
+        assert_eq!(
+            serde_json::to_string(&live).unwrap(),
+            r#"{"members":[],"self_member_id":"aa","self_role":"co-admin"}"#
+        );
+        let receipt = AdminTransferred {
+            transferred: true,
+            admin: "bb".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&receipt).unwrap(),
+            r#"{"transferred":true,"admin":"bb"}"#
+        );
     }
 
     #[tokio::test]
@@ -2396,10 +3179,14 @@ mod tests {
         assert_eq!(entry["e2ee"], json!(true));
         assert_eq!(entry["role"], json!("viewer"));
 
-        // members: hoster + live-checked viewer.
+        // members: hoster + live-checked viewer. The hoster device is THE
+        // ADMIN (marker seeded at publish), so its row and self_role say so.
         let m = slow(members(&share_a, SID)).await.unwrap();
+        assert_eq!(m["self_role"], json!("admin"));
         let list = m["members"].as_array().unwrap().clone();
         assert_eq!(list.len(), 2);
+        let admin = list.iter().find(|m| m["role"] == json!("admin")).unwrap();
+        assert_eq!(admin["member_id"], m["self_member_id"]);
         let viewer = list.iter().find(|m| m["role"] == json!("viewer")).unwrap();
         assert_eq!(viewer["name"], json!("Bee"));
         assert_eq!(viewer["revoked"], json!(false));
@@ -2456,5 +3243,255 @@ mod tests {
 
         share_a.shutdown().await.unwrap();
         share_b.shutdown().await.unwrap();
+    }
+
+    // The co-admin role matrix end-to-end over loopback: promotion, a
+    // co-admin device inviting a third member itself (keyhive delegation off
+    // the hosting device — the distributed-admin core), the THE-ADMIN
+    // transfer with its demote-to-co-admin semantics, a co-admin-side revoke
+    // with local PCS rotation, and the seniority/tier refusals.
+    // Three devices' worth of delegations + reseals make keyhive's event-graph
+    // rebuild recurse past the default 2 MiB thread stacks in debug builds, so
+    // the scenario gets its own runtime with roomier threads.
+    #[test]
+    fn co_admin_promote_transfer_and_manage_over_loopback() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_stack_size(16 * 1024 * 1024)
+                    .build()
+                    .unwrap()
+                    .block_on(co_admin_scenario())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn co_admin_scenario() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let c_dir = tempfile::tempdir().unwrap();
+
+        let mut conn = storage::open_in_memory().unwrap();
+        storage::init_db(&conn).unwrap();
+        let pid = linxiv_share::import_shared_project(&mut conn, &remote_shared(SID, "b")).unwrap();
+        let state_a = AppState::from_parts(conn, std::env::temp_dir(), std::env::temp_dir());
+        let state_b = empty_state();
+        let state_c = empty_state();
+
+        let share_a = ShareState::with_node(
+            a_dir.path(),
+            ShareNode::bind_offline(a_dir.path(), &a_dir.path().join("p2p"))
+                .await
+                .unwrap(),
+        );
+        let share_b = ShareState::with_node(
+            b_dir.path(),
+            ShareNode::bind_offline(b_dir.path(), &b_dir.path().join("p2p"))
+                .await
+                .unwrap(),
+        );
+        let share_c = ShareState::with_node(
+            c_dir.path(),
+            ShareNode::bind_offline(c_dir.path(), &c_dir.path().join("p2p"))
+                .await
+                .unwrap(),
+        );
+
+        slow(publish_secure(&state_a, &share_a, &pid.to_string()))
+            .await
+            .unwrap();
+
+        // Invite B as editor and join.
+        let code_b = member_code(&share_b).await.unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = json!({ "member_code": code_b, "role": "editor", "name": "Bee" });
+        let inv = slow(invite(&state_a, &share_a, SID, Some(&body)))
+            .await
+            .unwrap()["invite"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        slow(join(&share_b, Some(&json!({ "ticket": inv }))))
+            .await
+            .unwrap();
+        let m = slow(members(&share_a, SID)).await.unwrap();
+        let b_hex = m["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == json!("Bee"))
+            .unwrap()["member_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // An editor is not admin-tier: B cannot list or manage members yet.
+        let err = slow(members(&share_b, SID)).await.unwrap_err();
+        assert_eq!(err.status, 403);
+
+        // Promote B to co-admin; B learns its Admin delegation on sync.
+        let changed = slow(set_member_role(
+            &state_a,
+            &share_a,
+            SID,
+            &b_hex,
+            Some(&json!({ "role": "co-admin" })),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(changed["role"], json!("co-admin"));
+        slow(share_sync::sync_share(&state_b, &share_b, SID))
+            .await
+            .unwrap();
+        let m = slow(members(&share_b, SID)).await.unwrap();
+        assert_eq!(m["self_role"], json!("co-admin"));
+        assert_eq!(m["self_member_id"], json!(b_hex.clone()));
+
+        // The distributed-admin core: B (co-admin, NOT the hosting device)
+        // invites C itself — keyhive delegation runs on B and the invite
+        // points C at B's own address.
+        let code_c = member_code(&share_c).await.unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = json!({ "member_code": code_c, "role": "viewer", "name": "Cee" });
+        let inv_c = slow(invite(&state_b, &share_b, SID, Some(&body)))
+            .await
+            .unwrap()["invite"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let joined = slow(join(&share_c, Some(&json!({ "ticket": inv_c }))))
+            .await
+            .unwrap();
+        assert_eq!(joined["share_id"], json!(SID));
+        assert_eq!(joined["paper_count"], json!(1), "content served by B");
+        let m = slow(members(&share_b, SID)).await.unwrap();
+        let c_hex = m["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == json!("Cee"))
+            .unwrap()["member_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A co-admin cannot mint co-admins or transfer THE ADMIN.
+        let err = slow(set_member_role(
+            &state_b,
+            &share_b,
+            SID,
+            &c_hex,
+            Some(&json!({ "role": "co-admin" })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 403);
+        let err = slow(transfer_admin(
+            &share_b,
+            SID,
+            Some(&json!({ "member_id": c_hex })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 403);
+
+        // Transfer THE ADMIN to B: the marker moves, A demotes to co-admin.
+        slow(transfer_admin(
+            &share_a,
+            SID,
+            Some(&json!({ "member_id": b_hex })),
+        ))
+        .await
+        .unwrap();
+        let m = slow(members(&share_a, SID)).await.unwrap();
+        assert_eq!(m["self_role"], json!("co-admin"), "old admin demoted");
+        let a_hex = m["self_member_id"].as_str().unwrap().to_string();
+        slow(share_sync::sync_share(&state_b, &share_b, SID))
+            .await
+            .unwrap();
+        let m = slow(members(&share_b, SID)).await.unwrap();
+        assert_eq!(
+            m["self_role"],
+            json!("admin"),
+            "powers travel with the role"
+        );
+
+        // A (now co-admin) cannot touch the admin tier.
+        let err = slow(set_member_role(
+            &state_a,
+            &share_a,
+            SID,
+            &b_hex,
+            Some(&json!({ "role": "editor" })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 409, "THE ADMIN only changes via transfer");
+        let err = slow(revoke_member(
+            &share_a,
+            SID,
+            Some(&json!({ "member_id": b_hex })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 409);
+        // A (now co-admin) cannot transfer the role onward…
+        let err = slow(transfer_admin(
+            &share_a,
+            SID,
+            Some(&json!({ "member_id": c_hex })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 403);
+        // …but re-requesting the transfer that already happened is an
+        // idempotent success (the retry path after a failed flush).
+        let again = slow(transfer_admin(
+            &share_a,
+            SID,
+            Some(&json!({ "member_id": b_hex })),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(again["admin"], *b_hex);
+
+        // B (THE ADMIN) revokes C from B's device: keyhive revocation + PCS
+        // rotation run on the co-admin side. C's next sync is refused.
+        slow(revoke_member(
+            &share_b,
+            SID,
+            Some(&json!({ "member_id": c_hex })),
+        ))
+        .await
+        .unwrap();
+        let err = slow(share_sync::sync_share(&state_c, &share_c, SID))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404, "revoked member is refused");
+
+        // B (THE ADMIN) revoking A pre-empts on keyhive causal seniority: A's
+        // root delegation is not in B's subtree, so the op cannot succeed and
+        // the route says so instead of surfacing a NoProof transport error.
+        let err = slow(revoke_member(
+            &share_b,
+            SID,
+            Some(&json!({ "member_id": a_hex })),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 409);
+        assert!(err.detail.contains("seniority"), "{}", err.detail);
+
+        share_a.shutdown().await.unwrap();
+        share_b.shutdown().await.unwrap();
+        share_c.shutdown().await.unwrap();
     }
 }
