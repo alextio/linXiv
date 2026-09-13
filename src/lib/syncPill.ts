@@ -1,7 +1,8 @@
 import type { SharedSummary, SyncReason } from "../api/share";
 
-/** Every ShareCard sync and the pill's sync-all register under this key, so
- * `useIsMutating` can answer "is any share sync in flight?" globally. */
+/** Every ShareCard sync (suffixed with its share_id) and the pill's sync-all
+ * register under this key prefix, so `useIsMutating` can answer "is any share
+ * sync in flight?" globally. */
 export const SHARE_SYNC_MUTATION_KEY = ["share", "sync"];
 
 /** `syncShare` resolves (does not throw) for most failures, reporting them as
