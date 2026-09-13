@@ -744,6 +744,116 @@ impl ShareNode {
     }
 }
 
+// ── distributed admin metadata (co-admin spec) ──────────────────────────────
+// Two root props ride the e2ee doc BESIDE the SharedProject fields (a struct
+// reconcile only touches its own keys, pinned by lib.rs tests), so membership
+// metadata syncs to every member through the ordinary beelay path:
+//  - `admin_member`: THE ADMIN's member id (hex). An automerge LWW register,
+//    so two concurrent admin transfers converge to exactly one THE ADMIN.
+//  - `member_meta`: the shared roster ([`MemberMeta`]), keyed by member id.
+
+#[cfg(feature = "sync-beelay")]
+const ADMIN_PROP: &str = "admin_member";
+#[cfg(feature = "sync-beelay")]
+const MEMBER_META_PROP: &str = "member_meta";
+
+/// The doc's THE-ADMIN marker; `None` on pre-co-admin docs.
+#[cfg(feature = "sync-beelay")]
+pub fn doc_admin_marker(doc: &Automerge) -> Option<String> {
+    autosurgeon::hydrate_path(doc, &automerge::ROOT, [ADMIN_PROP.into()])
+        .ok()
+        .flatten()
+}
+
+/// The doc's shared member roster; empty on pre-co-admin docs.
+#[cfg(feature = "sync-beelay")]
+pub fn doc_member_meta(doc: &Automerge) -> Vec<crate::MemberMeta> {
+    autosurgeon::hydrate_path(doc, &automerge::ROOT, [MEMBER_META_PROP.into()])
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "sync-beelay")]
+fn write_prop<R: autosurgeon::Reconcile>(doc: &mut Automerge, prop: &str, value: R) -> Result<()> {
+    let mut tx = doc.transaction();
+    autosurgeon::reconcile_prop(&mut tx, automerge::ROOT, prop, value).map_err(super::crdt)?;
+    tx.commit();
+    Ok(())
+}
+
+#[cfg(feature = "sync-beelay")]
+impl ShareNode {
+    /// THE ADMIN's member id (hex) from the live beelay doc (hosted or
+    /// adopted). `None` = pre-co-admin doc, where the hoster is THE ADMIN.
+    pub async fn admin_marker(&self, share_id: &str) -> Result<Option<String>> {
+        let doc = self.e2ee_doc(share_id).await?;
+        Ok(doc_admin_marker(&doc))
+    }
+
+    /// Point the THE-ADMIN marker at `member_hex`. The transfer op: powers
+    /// travel with the marker, the old admin keeps keyhive Admin (= co-admin).
+    pub async fn set_admin_marker(&self, share_id: &str, member_hex: &str) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            write_prop(doc, ADMIN_PROP, member_hex.to_owned())
+        })
+        .await
+    }
+
+    /// The shared member roster from the live beelay doc.
+    pub async fn member_meta(&self, share_id: &str) -> Result<Vec<crate::MemberMeta>> {
+        let doc = self.e2ee_doc(share_id).await?;
+        Ok(doc_member_meta(&doc))
+    }
+
+    /// Insert or update `entry` in the shared roster (matched by member id).
+    pub async fn upsert_member_meta(&self, share_id: &str, entry: crate::MemberMeta) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            let mut list = doc_member_meta(doc);
+            match list.iter_mut().find(|m| m.member_id == entry.member_id) {
+                Some(m) => *m = entry,
+                None => list.push(entry),
+            }
+            write_prop(doc, MEMBER_META_PROP, list)
+        })
+        .await
+    }
+
+    /// Drop `member_hex` from the shared roster (revoke/remove bookkeeping).
+    pub async fn remove_member_meta(&self, share_id: &str, member_hex: &str) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            let mut list = doc_member_meta(doc);
+            list.retain(|m| m.member_id != member_hex);
+            write_prop(doc, MEMBER_META_PROP, list)
+        })
+        .await
+    }
+
+    async fn e2ee_doc(&self, share_id: &str) -> Result<Automerge> {
+        if !valid_share_id(share_id) {
+            return Err(ShareError::NotFound(share_id.to_string()));
+        }
+        self.beelay()?
+            .doc(share_id)
+            .await
+            .ok_or_else(|| ShareError::NotFound(share_id.to_string()))
+    }
+
+    async fn with_e2ee_doc(
+        &self,
+        share_id: &str,
+        f: impl FnOnce(&mut Automerge) -> Result<()>,
+    ) -> Result<()> {
+        if !valid_share_id(share_id) {
+            return Err(ShareError::NotFound(share_id.to_string()));
+        }
+        self.beelay()?
+            .with_doc(share_id, f)
+            .await
+            .ok_or_else(|| ShareError::NotFound(share_id.to_string()))?
+    }
+}
+
 /// The doc-internal `share_id`, hydrated alone — the host-controlled-id guard's
 /// one input, so the check never materializes the full SharedProject subgraphs.
 #[cfg(feature = "sync-beelay")]
@@ -965,6 +1075,75 @@ mod tests {
 
         a.shutdown().await.unwrap();
         b.shutdown().await.unwrap();
+    }
+
+    #[cfg(feature = "sync-beelay")]
+    mod admin_meta {
+        use super::*;
+        use crate::MemberMeta;
+
+        fn meta(id: &str) -> MemberMeta {
+            MemberMeta {
+                member_id: id.into(),
+                name: Some(format!("dev-{id}")),
+                invited_at: "2026-09-13T00:00:00Z".into(),
+                invited_by: None,
+            }
+        }
+
+        // The marker/roster props ride BESIDE the SharedProject fields; a
+        // publish's struct reconcile must not clobber them.
+        #[test]
+        fn admin_props_survive_project_reconcile() {
+            let mut doc = Automerge::new();
+            write_prop(&mut doc, ADMIN_PROP, "aa".repeat(32)).unwrap();
+            write_prop(&mut doc, MEMBER_META_PROP, vec![meta("bb")]).unwrap();
+
+            let mut tx = doc.transaction();
+            autosurgeon::reconcile(&mut tx, sample("7", "P")).unwrap();
+            tx.commit();
+
+            assert_eq!(doc_admin_marker(&doc), Some("aa".repeat(32)));
+            assert_eq!(doc_member_meta(&doc), vec![meta("bb")]);
+            let sp: SharedProject = autosurgeon::hydrate(&doc).unwrap();
+            assert_eq!(sp.name, "P");
+        }
+
+        // Two concurrent transfers are two writes to one LWW register: both
+        // merge orders converge on the SAME single winner.
+        #[test]
+        fn concurrent_transfers_converge_to_one_admin() {
+            let mut a = Automerge::new();
+            write_prop(&mut a, ADMIN_PROP, "aa".to_string()).unwrap();
+            let mut b = a.fork();
+            write_prop(&mut a, ADMIN_PROP, "bb".to_string()).unwrap();
+            write_prop(&mut b, ADMIN_PROP, "cc".to_string()).unwrap();
+
+            a.merge(&mut b).unwrap();
+            b.merge(&mut a).unwrap();
+
+            let winner = doc_admin_marker(&a).unwrap();
+            assert_eq!(doc_admin_marker(&b), Some(winner.clone()));
+            assert!(winner == "bb" || winner == "cc", "winner={winner}");
+        }
+
+        // Concurrent roster edits (two admins inviting different members)
+        // keep both entries — the list is keyed by member id.
+        #[test]
+        fn concurrent_roster_inserts_both_survive() {
+            let mut a = Automerge::new();
+            write_prop(&mut a, MEMBER_META_PROP, vec![meta("host")]).unwrap();
+            let mut b = a.fork();
+            write_prop(&mut a, MEMBER_META_PROP, vec![meta("host"), meta("x")]).unwrap();
+            write_prop(&mut b, MEMBER_META_PROP, vec![meta("host"), meta("y")]).unwrap();
+
+            a.merge(&mut b).unwrap();
+            let ids: std::collections::BTreeSet<String> = doc_member_meta(&a)
+                .into_iter()
+                .map(|m| m.member_id)
+                .collect();
+            assert!(ids.contains("x") && ids.contains("y"), "{ids:?}");
+        }
     }
 
     #[cfg(feature = "sync-beelay")]

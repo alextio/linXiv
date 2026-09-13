@@ -82,6 +82,24 @@ pub struct SharedAnnotation {
     pub updated_at: Option<String>,
 }
 
+/// One member's shared roster entry, living beside the content in the e2ee doc
+/// so every admin-tier device can list and manage the full membership. Names
+/// here are visible to all members. Bearer secrets (invite strings) never go
+/// in the doc — they stay in the inviting device's local sidecar.
+#[derive(Debug, Clone, PartialEq, Reconcile, Hydrate, serde::Serialize, serde::Deserialize)]
+pub struct MemberMeta {
+    /// Keyhive member id, lowercase hex; CRDT list key.
+    #[key]
+    pub member_id: String,
+    pub name: Option<String>,
+    pub invited_at: String,
+    /// Member id (hex) of the inviting device; `None` = the project creator.
+    /// Mirrors the keyhive delegation lineage: revocation needs causal
+    /// seniority, so this chain is what says who can revoke whom.
+    #[autosurgeon(missing = "Default::default")]
+    pub invited_by: Option<String>,
+}
+
 /// Lightweight listing view — counts only, never a hydrated subgraph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedSummary {
