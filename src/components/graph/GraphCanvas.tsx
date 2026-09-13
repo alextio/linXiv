@@ -1,14 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import cytoscape from "cytoscape";
 import type { Core, NodeSingular } from "cytoscape";
-import {
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-  forceX,
-  forceY,
-} from "d3-force";
+import { forceLink, forceSimulation, forceX, forceY } from "d3-force";
 import type { ForceLink, Simulation, SimulationLinkDatum, SimulationNodeDatum } from "d3-force";
 
 import { isTauri } from "../../api/client";
@@ -16,6 +9,7 @@ import type { ThemeColors } from "../../lib/theme";
 import type { GraphIndex, GraphNodeType, GraphView } from "../../lib/graph/model";
 import type { GraphMatch } from "../../lib/graph/filter";
 import { layoutIds } from "../../lib/graph/filter";
+import { f32Collide, f32ManyBody } from "../../lib/graph/f32forces";
 import type { ForceSettings } from "../../lib/graph/layout";
 import { layoutRng, randomizePositions, seedPositions } from "../../lib/graph/layout";
 import { fitViewport, placeFloatingBox, FIT_PADDING } from "../../lib/graph/fit";
@@ -182,14 +176,13 @@ const GraphCanvas = forwardRef<GraphCanvasHandle, GraphCanvasProps>(function Gra
    *  zero radius leaves the member taking none of it. */
   const chargeForce = useCallback(() => {
     const { match: m, forces: f } = latest.current;
-    const ids = layoutIds(m);
-    return forceManyBody<SimNode>().strength((n) => (ids.has(n.id) ? -f.repel : 0));
+    return f32ManyBody<SimNode>(layoutIds(m), f.repel);
   }, []);
 
-  const collideForce = useCallback(() => {
-    const ids = layoutIds(latest.current.match);
-    return forceCollide<SimNode>().radius((n) => (ids.has(n.id) ? COLLIDE_RADIUS : 0));
-  }, []);
+  const collideForce = useCallback(
+    () => f32Collide<SimNode>(layoutIds(latest.current.match), COLLIDE_RADIUS),
+    []
+  );
 
   const applyStyles = useCallback(() => {
     const cy = cyRef.current;
