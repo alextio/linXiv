@@ -953,6 +953,7 @@ export type FsResult = {
 export type SummaryRow = {
   share_id: string,
   name: string,
+  description?: string,
   paper_count: number,
   note_count: number,
   tag_count: number,
