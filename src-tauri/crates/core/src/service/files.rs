@@ -1,15 +1,15 @@
-//! files service — pure-FS helpers over the managed PDF dir.
+//! files service — FS helpers over the managed PDF dir, plus the dest-resolving
+//! wrapper around the SSRF-safe `sources::download`.
 //!
-//! DI: every fn takes the resolved managed `pdf_dir: &Path`; this module NEVER
-//! reads `config::pdf_dir()` itself. `download_pdf` (the SSRF-safe HTTP downloader)
-//! resolves the managed dest here and delegates the network/SSRF work to `sources::download`.
+//! DI: callers pass the resolved managed `pdf_dir: &Path` (or a dest under it);
+//! this module NEVER reads `config::pdf_dir()` itself.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{CoreError, Result};
 
-/// Standard managed PDF location for a (paper_id, version): `<pdf_dir>/<safe_id>v<n>.pdf`.
+/// Managed PDF location for a (paper_id, version): `<pdf_dir>/<safe_id>v<n>.pdf`.
 fn pdf_file(pdf_dir: &Path, paper_id: &str, version: i64) -> PathBuf {
     pdf_dir.join(crate::service::paper::pdf_on_disk_name(paper_id, version))
 }
@@ -25,7 +25,7 @@ pub struct PdfLocation {
 }
 
 /// Local path to a paper's PDF if the file is actually present, else `None`. Checks
-/// `custom_path` first (the value stored on the paper row), then the standard managed location.
+/// `custom_path` (the paper row's stored path) first, then the standard managed location.
 pub fn pdf_path(
     pdf_dir: &Path,
     paper_id: &str,
@@ -70,13 +70,12 @@ fn walk_pdf_storage_bytes(pdf_dir: &Path) -> u64 {
 }
 
 /// Total bytes of all managed `*.pdf` files in `pdf_dir` — the basis of the
-/// `pdf_save_limit_mb` cap. Walks the dir ONCE per process (lazy init), then
-/// serves the running total maintained by the write/delete seams.
+/// `pdf_save_limit_mb` cap. Sums `PDF_STORAGE`, walking the dir to seed it when
+/// the entry is absent (first read, or after a rename dropped it).
 ///
-/// ponytail: files changed outside this process's seams (manual deletes in the
-/// folder, crash orphans, an init walk racing a concurrent write, and writes by a
-/// sibling linxiv process — CLI/MCP against the same library) drift the total until
-/// process restart, when the next walk re-seeds it; move the total into the DB if
+/// ponytail: files changed outside this process's seams (manual deletes, crash
+/// orphans, writes by a sibling linxiv process — CLI/MCP against the same
+/// library) drift the total until the next seeding walk; move it into the DB if
 /// cross-process accuracy ever matters.
 pub fn pdf_storage_bytes(pdf_dir: &Path) -> u64 {
     let mut cache = PDF_STORAGE.lock().unwrap_or_else(|p| p.into_inner());
@@ -128,10 +127,9 @@ pub fn remove_pdf_counted(path: &Path) {
 }
 
 /// Rename a managed PDF, moving its cache entry under ONE lock acquisition so a
-/// concurrent quota check never observes the forgotten-but-not-yet-recorded gap.
-/// Size is re-stat'd post-rename, falling back to the old cached size. Cache keys
-/// use the caller's `pdf_dir` spelling, not the raw parents of `from`/`to`;
-/// both files must live in `pdf_dir` — callers gate on that.
+/// concurrent quota check never sees the forgotten-but-not-yet-recorded gap. Size
+/// is re-stat'd post-rename, falling back to the old cached size. Keyed by the
+/// caller's `pdf_dir`, not `from`/`to`'s parents; both must live in it (callers gate).
 pub fn rename_pdf_counted(pdf_dir: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)?;
     let stat_size = std::fs::metadata(to).ok().map(|m| m.len());
@@ -184,15 +182,14 @@ pub struct SavedPdf {
     pub source_id: String,
     pub source_fk: i64,
     pub title: String,
-    /// Always >= 1: rows whose PDF is missing on disk are skipped.
+    /// The paper's latest version, from `list_pdf_papers`.
     pub version: i64,
     pub size_bytes: u64,
 }
 
 /// Saved-PDF listing rows from `paper::list_pdf_papers` output: stat each paper's
 /// on-disk PDF (dropping rows whose file is missing), sorted size desc then source_id
-/// asc. Uncapped; the route and MCP cap at 200, the CLI lists everything.
-/// Backs `GET /api/pdfs`, CLI `pdf list`, and MCP `list_pdfs`.
+/// asc. Uncapped here; the route and MCP cap at 200, the CLI lists everything.
 pub fn saved_pdf_sizes(pdf_dir: &Path, papers: Vec<crate::models::PaperDetails>) -> Vec<SavedPdf> {
     let mut out: Vec<SavedPdf> = Vec::new();
     for p in papers {
@@ -218,10 +215,9 @@ pub fn saved_pdf_sizes(pdf_dir: &Path, papers: Vec<crate::models::PaperDetails>)
     out
 }
 
-/// Delete a PDF only if it resolves to a location inside the managed `pdf_dir`. Returns
-/// `true` if the path is inside the managed dir (deleting it if present; a missing file
-/// is a no-op success), `false` if the path escapes the managed dir. SECURITY BOUNDARY:
-/// never let a caller-supplied path delete a file outside `pdf_dir`.
+/// SECURITY BOUNDARY: deletes `path` only if it resolves inside the managed `pdf_dir`.
+/// `true` = inside (removed if present; a missing file is an idempotent success),
+/// `false` = outside, or either path unresolvable.
 pub fn delete_pdf(pdf_dir: &Path, path: &str) -> bool {
     // Canonicalize the managed root (resolves symlinks + `..`). If it can't be resolved
     // (dir absent), nothing is managed → refuse. Conservative for a trust boundary.
@@ -247,10 +243,8 @@ pub fn delete_pdf(pdf_dir: &Path, path: &str) -> bool {
     if !target.starts_with(&managed) {
         return false;
     }
-    // Inside the boundary: remove if present, ignore a missing file (idempotent delete).
-    // A removed direct child comes out of the cached storage total, keyed by `pdf_dir`
-    // as the readers spell it (the canonicalized parent may not match); nested or
-    // non-.pdf targets were never in it.
+    // A removed direct child leaves the cached total, keyed by `pdf_dir` as readers
+    // spell it (the canonicalized parent may not match); nested ones were never in it.
     if std::fs::remove_file(&target).is_ok() && target.parent() == Some(managed.as_path()) {
         if let Some(name) = target.file_name() {
             forget_pdf(pdf_dir, name);
@@ -259,12 +253,11 @@ pub fn delete_pdf(pdf_dir: &Path, path: &str) -> bool {
     true
 }
 
-/// SSRF-safe HTTP downloader: resolve the managed dest under the DI'd `pdf_dir`, then hand off
-/// to `sources::download::download_pdf` (scheme allowlist, host-resolves-to-public check,
-/// per-hop redirect re-check, content-type + size caps, atomic tmp→dest rename).
+/// Resolve the managed dest under the DI'd `pdf_dir`, then hand the fetch and its
+/// SSRF/size guards to `sources::download::download_pdf`.
 /// `max_total_bytes` is the `pdf_save_limit_mb` TOTAL-storage cap: the downloader gets
-/// whatever the PDFs already in `pdf_dir` leave of it (the fixed `sources::download` ceiling
-/// still applies on top). An already-downloaded dest is returned as-is, never quota-blocked.
+/// whatever the PDFs already in `pdf_dir` leave of it, capped again by that module's
+/// fixed per-download ceiling. An existing dest is returned as-is, never quota-blocked.
 pub async fn download_pdf(
     pdf_dir: &Path,
     paper_id: &str,
@@ -355,7 +348,7 @@ mod tests {
         // Empty dir → 0.0 (own dir: the total is cached per dir on first read).
         assert_eq!(pdf_storage_mb(tempfile::tempdir().unwrap().path()), 0.0);
 
-        // 1 MB + 0.5 MB of pdf, plus a non-pdf that must be ignored.
+        // 1 + 0.5 MiB of pdf, plus a non-pdf that must be ignored.
         write_pdf(pdf_dir, "a v1.pdf", 1024 * 1024);
         write_pdf(pdf_dir, "bv1.pdf", 512 * 1024);
         write_pdf(pdf_dir, "notes.txt", 9_000_000);
@@ -380,7 +373,7 @@ mod tests {
         assert_eq!(pdf_storage_bytes(pdf_dir), 50);
         assert_eq!(pdf_storage_bytes(pdf_dir), walk_pdf_storage_bytes(pdf_dir));
 
-        // Counted cleanup helper (rollback/attach failure paths) → same.
+        // Write seam, then the counted remove (import rollback) → same.
         let c = write_pdf(pdf_dir, "cv1.pdf", 30);
         note_pdf_written(&c, 30); // as the import/attach write seams do
         assert_eq!(pdf_storage_bytes(pdf_dir), 80);
@@ -429,8 +422,8 @@ mod tests {
 
     #[tokio::test]
     async fn download_pdf_returns_managed_dest_when_present() {
-        // Valid PDF already at the managed (pdf_dir, paper_id, version) location → returned with
-        // no network call, proving the dest mapping. The full network happy-path lives in
+        // A file already at the managed (pdf_dir, paper_id, version) dest → returned with no
+        // network call, proving the dest mapping. The network happy-path lives in
         // sources::download's wiremock tests; the public-IP SSRF guard rejects loopback, so a
         // wiremock host can't drive the real guarded download without weakening that guard.
         let dir = tempfile::tempdir().unwrap();
@@ -491,7 +484,7 @@ mod tests {
     async fn download_pdf_refuses_ssrf_and_leaves_no_file() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        // wiremock binds 127.0.0.1; the SSRF public-IP guard must refuse it before any body lands.
+        // wiremock binds 127.0.0.1; the SSRF guard must refuse it before any body lands.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/evil.pdf"))

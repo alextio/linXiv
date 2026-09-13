@@ -1,13 +1,12 @@
 //! Idempotent startup migrations. Plan §5.3 + D6.
 //!
 //! NON-NEGOTIABLE: every migration here runs on EVERY startup against real user
-//! DBs, so each MUST be idempotent — guarded by `PRAGMA table_info` (missing
-//! column) or by index existence. Re-running them is the normal case, not the
-//! exception (in practice the column/index already exists and each is a no-op).
+//! DBs, so each MUST be idempotent — via a `PRAGMA`/index guard below or
+//! `IF NOT EXISTS` in the SQL. Re-running is the normal case: usually all no-op.
 //!
-//! The migration SQL itself lives in `crates/core/sql/migrations/` (ground
-//! truth) and is embedded here with `include_str!`; this file is guard logic
-//! (has the column/index already been added?) plus call order, not SQL text.
+//! Ground-truth SQL lives in `crates/core/sql/` (`migrations/`, plus `tables/`
+//! for tables added post-schema), embedded with `include_str!`; this file is
+//! guard logic plus call order, not SQL text.
 
 use std::collections::HashMap;
 
@@ -16,8 +15,8 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Run all idempotent post-schema migrations in order. Call between
-/// `apply_tables` and `apply_views` (views reference columns these add) — see
-/// `super::init_db`, which also runs `dedup_project_to_paper` BEFORE apply_tables.
+/// `apply_tables` and `apply_views` (views select columns these add); see
+/// `super::init_db`, which runs `dedup_project_to_paper` before apply_tables.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     paper_roots_soft_delete(conn)?;
     paper_meta_provider(conn)?;
@@ -126,7 +125,7 @@ fn tag_label_unique_index(conn: &Connection) -> Result<()> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    // canonical = min TAG_FK per lowercased label (first seen wins; rows are FK-ordered).
+    // canonical = min TAG_FK per lowercased label (rows are FK-ordered).
     let mut canonical: HashMap<String, i64> = HashMap::new();
     for (fk, tag) in &rows {
         if let Some(t) = tag {
@@ -190,9 +189,8 @@ fn project_to_tag_unique_index(conn: &Connection) -> Result<()> {
 // ── 6. PROJECT_TO_PAPER unique (PROJECT_FK, SOURCE_FK) ───────────────────────
 
 /// Creates the unique index whose duplicates `dedup_project_to_paper` (run
-/// BEFORE apply_tables) has already cleared. Deliberately NOT in
-/// PROJECT_TO_PAPER.sql (apply_tables would run it before the dedup); MUST stay
-/// before `paper_to_reading_cascade_fk`, whose INSERT needs this parent-key index.
+/// BEFORE apply_tables) already cleared. Kept out of PROJECT_TO_PAPER.sql, which
+/// runs pre-dedup; MUST precede `paper_to_reading_cascade_fk`'s parent-key INSERT.
 fn project_to_paper_unique_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!(
         "../../sql/migrations/06_project_to_paper_unique_index.sql"
@@ -203,9 +201,8 @@ fn project_to_paper_unique_index(conn: &Connection) -> Result<()> {
 /// Pre-schema dedup of PROJECT_TO_PAPER — the one migration that MUST run
 /// BEFORE `apply_tables`: once PAPER_TO_READING's composite FK exists, ANY DML
 /// on PROJECT_TO_PAPER with an unindexed parent key fails "foreign key
-/// mismatch". Idempotent: no-ops when the table doesn't exist yet or the unique
-/// index already does. Pinned by
-/// `schema::tests::dedup_project_to_paper_must_run_before_apply_tables`.
+/// mismatch". No-ops when the table is missing or the unique index exists.
+/// Pinned by `schema::tests::dedup_project_to_paper_must_run_before_apply_tables`.
 pub fn dedup_project_to_paper(conn: &Connection) -> Result<()> {
     let table_exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='PROJECT_TO_PAPER'",
@@ -233,9 +230,9 @@ fn author_full_name_index(conn: &Connection) -> Result<()> {
 
 // ── 8. ANNOTATION table (PDF highlights) ─────────────────────────────────────
 
-/// Added after the initial schema, so created here (not TABLE_DDL) so existing
-/// DBs gain it on startup; `CREATE TABLE IF NOT EXISTS` keeps it idempotent.
-/// FK referents come from apply_tables, which runs before migrations.
+/// Added after the initial schema, so created here (not TABLE_DDL) to reach
+/// existing DBs; `CREATE TABLE IF NOT EXISTS` keeps it idempotent. Its FK
+/// referents come from apply_tables, which runs first.
 fn annotation_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("../../sql/tables/ANNOTATION.sql"))?;
     Ok(())
@@ -244,7 +241,7 @@ fn annotation_table(conn: &Connection) -> Result<()> {
 // ── 9. VERSION_CHECK table (arXiv new-version monitoring) ──────────────────────
 
 /// Per-root poll bookkeeping for the version monitor: LAST_CHECKED_AT drives the
-/// stalest-first rotation, NEW_VERSION flags an un-acknowledged discovery.
+/// stalest-first rotation, NEW_VERSION holds an un-acknowledged discovery.
 fn version_check_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!(
         "../../sql/migrations/09_version_check_table.sql"
@@ -280,9 +277,8 @@ fn project_reading_list_flag(conn: &Connection) -> Result<()> {
 
 /// Rebuilds PAPER_TO_READING with a composite `ON DELETE CASCADE` FK to
 /// PROJECT_TO_PAPER so reading status drops with project membership (SQLite has
-/// no ADD CONSTRAINT; fresh installs get the FK from the table DDL and the
-/// guard no-ops). MUST run after `project_to_paper_unique_index` — the INSERT
-/// needs that parent-key index. The JOIN drops rows already orphaned pre-migration.
+/// no ADD CONSTRAINT; fresh installs get it from TABLE_DDL, guard no-ops). MUST
+/// follow `project_to_paper_unique_index`; the JOIN drops pre-existing orphans.
 fn paper_to_reading_cascade_fk(conn: &Connection) -> Result<()> {
     if paper_to_reading_has_cascade_fk(conn)? {
         return Ok(());
@@ -295,8 +291,7 @@ fn paper_to_reading_cascade_fk(conn: &Connection) -> Result<()> {
 
 // ── 13. PROJECT.SHARE_ID (persisted share identity, uuid v4) ─────────────────
 
-/// Set lazily on first publish (`project::ensure_share_id`),
-/// never at project creation.
+/// Set lazily by `ensure_share_id`/`adopt_share_id`, never at creation.
 fn project_share_id(conn: &Connection) -> Result<()> {
     if !has_column(conn, "PROJECT", "SHARE_ID")? {
         conn.execute_batch(include_str!(
@@ -375,11 +370,11 @@ fn rss_cache_entry_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-// ── 18. Library sort indexes (PAPER.TITLE/CREATED_AT, PAPER_META.PUBLISHED) ──
+// ── 18. Library sort indexes (PAPER.TITLE/SOURCE_FK, PAPER_META.PUBLISHED) ──
 
-/// The `PaperSort` orderings. Live here (not table DDL) because TABLE_DDL runs
-/// before the column-adding migrations; guarded on the column existing, since
-/// skipping the purely-for-speed indexes on a stripped legacy DB is the harmless branch.
+/// The `PaperSort` orderings. Live here (not TABLE_DDL, which runs before the
+/// column-adding migrations); guarded on PUBLISHED existing — skipping
+/// speed-only indexes on a stripped legacy DB is the harmless branch.
 fn paper_sort_indexes(conn: &Connection) -> Result<()> {
     if has_column(conn, "PAPER_META", "PUBLISHED")? {
         conn.execute_batch(include_str!(
@@ -402,8 +397,7 @@ fn link_table_indexes(conn: &Connection) -> Result<()> {
 
 // ── 20. PAPER(SOURCE_FK, VERSION) lookup index ──────────────────────────────
 
-/// Purely-for-speed index on PAPER's root-FK column (see the SQL file);
-/// CREATE INDEX IF NOT EXISTS is the only guard needed.
+/// PAPER root-FK speed index. A no-op today — the name collides with 18's.
 fn paper_source_fk_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!(
         "../../sql/migrations/20_paper_source_fk_index.sql"
@@ -583,9 +577,9 @@ mod tests {
         let fresh = crate::storage::db::open_in_memory().unwrap();
         crate::storage::init_db(&fresh).unwrap();
 
-        // Simulate a pre-fix DB: PROJECT without IS_READING_LIST, PAPER_TO_READING
-        // with the old single-column (non-cascading-to-membership) FKs. Everything
-        // else is created fresh by apply_tables below, same as any real upgrade.
+        // Pre-fix DB: PROJECT without IS_READING_LIST, PAPER_TO_READING with the
+        // old single-column (non-cascading-to-membership) FKs. Everything else is
+        // created fresh by apply_tables below, same as any real upgrade.
         let legacy = crate::storage::db::open_in_memory().unwrap();
         legacy
             .execute_batch(
@@ -632,8 +626,8 @@ mod tests {
         );
     }
 
-    /// A DB predating SHARE_ID / NOTE_UUID / ANNOTATION_UUID gains the columns and
-    /// unique indexes on startup; every pre-existing row is backfilled with a distinct uuid.
+    /// A DB predating SHARE_ID / NOTE_UUID / ANNOTATION_UUID gains the columns
+    /// and unique indexes on startup; every pre-existing row gets a distinct uuid.
     #[test]
     fn legacy_db_without_share_and_uuid_columns_upgrades() {
         let conn = crate::storage::db::open_in_memory().unwrap();
@@ -804,16 +798,12 @@ mod tests {
         assert_eq!(hits, 1);
     }
 
-    // The tests below close the gap left by `migrations_are_idempotent`: that
-    // test builds its DB via `schema::apply_tables`. For the column/FK guards,
-    // TABLE_DDL already has the column (kept in sync deliberately for fresh
-    // installs), so only the no-op branch runs. For the three index guards the
-    // tests below target (idx_tag_label_unique, idx_project_to_tag_unique,
-    // idx_author_full_name), TABLE_DDL has no such index, so the real CREATE
-    // INDEX runs there too -- just against an empty table, so the two guards
-    // with remap/dedup DML never exercise it there. Each test here hand-crafts
-    // the genuinely pre-migration shape, seeded with rows
-    // where relevant, so the real data-touching path actually runs once.
+    // These close the gap left by `migrations_are_idempotent`, which builds its
+    // DB via `schema::apply_tables`: for the column/FK guards TABLE_DDL already
+    // has the column (deliberately, for fresh installs), so only the no-op
+    // branch runs; the tag/project_to_tag/author indexes do get created there,
+    // but against an empty table, so the remap/dedup DML never fires. Each test
+    // below hand-crafts the real pre-migration shape, seeded where it matters.
 
     #[test]
     fn paper_roots_soft_delete_backfills_legacy_rows() {
@@ -1081,13 +1071,11 @@ mod tests {
         crate::storage::init_db(&conn).unwrap();
 
         assert!(index_exists(&conn, "idx_author_full_name").unwrap());
-        // `COLLATE NOCASE` in the query above would make the comparison
-        // case-insensitive regardless of the index's own collation (or with no
-        // index at all) -- that only proves SQLite can do case-insensitive
-        // matching, not that this index is built for it. Assert the index's own
-        // stored DDL instead: that's what makes it actually usable for the
-        // case-insensitive lookups the app runs against it without a query-side
-        // COLLATE override.
+        // `COLLATE NOCASE` in the plan query below makes the comparison
+        // case-insensitive regardless of the index's collation (or with no index
+        // at all), so it proves nothing about this index. Assert the stored DDL
+        // instead: a NOCASE index is what serves the app's case-insensitive
+        // lookups without a query-side COLLATE override.
         let index_sql: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_author_full_name'",
@@ -1100,11 +1088,10 @@ mod tests {
             "idx_author_full_name must be built COLLATE NOCASE, got: {index_sql}"
         );
 
-        // The DDL check above is necessary but not sufficient -- a NOCASE index
-        // only makes a case-insensitive lookup fast, it doesn't prove SQLite will
-        // actually pick it (a mismatched collation falls back to a full SCAN).
-        // Query plan "detail" text names the index only when it's genuinely used;
-        // this is what makes the two seeded case-variant rows earn their place.
+        // Necessary but not sufficient -- a NOCASE index only makes the lookup
+        // fast, it doesn't prove SQLite picks it (a mismatched collation falls
+        // back to a full SCAN). The plan's "detail" names the index only when
+        // it's genuinely used -- what earns the two seeded case-variant rows.
         let plan: Vec<String> = conn
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT * FROM AUTHOR \
@@ -1317,13 +1304,13 @@ mod tests {
 
     /// Replays the REAL last pre-port schema: table DDL captured verbatim from
     /// the v0.2.0 tag (commit a9b66700313e8dea67cea16babd88e320083715d), plus
-    /// the 4 index migrations every v0.2.0 startup already ran. Views are not
+    /// the 4 index migrations every v0.2.0 startup already ran. Views aren't
     /// replayed — init_db DROP+CREATEs them unconditionally.
     ///
-    /// Every DDL string below is FROZEN HISTORY, not a copy of the current
-    /// `sql/` files — never "dedupe" against `sql/` or update on schema change.
-    /// v0.1.0's flat lowercase `papers` model is out of scope: it was only ever
-    /// upgraded by a manual one-off tool, never an automatic startup migration.
+    /// Every DDL string below is FROZEN HISTORY — never "dedupe" it against the
+    /// current `sql/` files or update it on schema change. v0.1.0's flat
+    /// lowercase `papers` model is out of scope: only a manual one-off tool ever
+    /// upgraded it, never an automatic startup migration.
     #[test]
     fn real_v0_2_0_database_upgrades_cleanly() {
         let conn = crate::storage::db::open_in_memory().unwrap();
@@ -1530,9 +1517,9 @@ mod tests {
         assert!(has_column(&conn, "PROJECT", "SHARE_ID").unwrap());
         assert!(has_column(&conn, "NOTE", "NOTE_UUID").unwrap());
 
-        // The upgraded PROJECT table must be column-for-column identical to a
-        // fresh install -- the same invariant `fresh_install_matches_upgraded_via_migration`
-        // checks, now against the real historical shape instead of a hand-built one.
+        // Same invariant as `fresh_install_matches_upgraded_via_migration`, now
+        // against the real historical shape instead of a hand-built one: PROJECT
+        // must match a fresh install column-for-column.
         let fresh = crate::storage::db::open_in_memory().unwrap();
         crate::storage::init_db(&fresh).unwrap();
         assert_eq!(
@@ -1541,9 +1528,9 @@ mod tests {
             "PROJECT upgraded from a real v0.2.0 database must match a fresh install column-for-column"
         );
 
-        // Every seeded row survives the upgrade untouched (title/name/label), and
-        // the new columns are correctly backfilled -- an upgrade that silently
-        // dropped or corrupted real user data would fail here.
+        // Every seeded row must survive untouched and the new columns be
+        // backfilled -- an upgrade that silently dropped or corrupted real user
+        // data fails here.
         let (name, is_reading_list, share_id): (String, i64, Option<String>) = conn
             .query_row(
                 "SELECT NAME, IS_READING_LIST, SHARE_ID FROM PROJECT WHERE PROJECT_FK = 1",

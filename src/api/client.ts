@@ -1,9 +1,7 @@
-/**
- * Backend client. In the packaged app the backend runs IN-PROCESS — requests go
- * through the `api` Tauri command (and PDFs/graph over the linxiv:// scheme), so
- * there is no HTTP base. In browser dev, Vite proxies `/api` to a dev backend
- * (D32), so an empty base URL lets the proxy handle it.
- */
+/** Backend client. Packaged, the backend is IN-PROCESS: requests go through the
+ *  `api` Tauri command (PDFs over linxiv://), so there is no HTTP base. In
+ *  browser dev Vite proxies `/api` to the dev shim (D32), which an empty base
+ *  lets through. */
 import type {
   ApiError as WireApiError,
   ApiRequest,
@@ -13,8 +11,7 @@ import type {
 export const isTauri =
   typeof window !== "undefined" && window.__TAURI_INTERNALS__ !== undefined;
 
-// Empty base: the in-process app never builds an HTTP URL (it uses invoke +
-// linxiv://); the browser-dev `fetch` path relies on the Vite `/api` proxy.
+// Empty base: only the browser-dev `fetch` path builds a URL, and Vite proxies it.
 export const BASE_URL = "";
 
 // Webviews can't send a multipart body through Tauri `invoke`, so file uploads
@@ -32,16 +29,14 @@ export class ApiError extends Error {
 }
 
 // ── Library Backend addressing (CONTEXT.md: Library Backend / Remote Query
-// Mode). Every request is addressed to a backend: `null` = the local
-// in-process backend, otherwise a registered remote node reached through the
-// `api_remote` command. The backend is a PARAMETER of the request — this
-// module holds no default and reads no UI state. The PoC "default backend"
-// lives in stores/backend.ts, whose `libraryFetch` passes it explicitly for
-// library queries; every other call is local.
+// Mode). Every request names a backend: `null` = local in-process, otherwise a
+// registered remote node reached via `api_remote`. It is a PARAMETER — this
+// module holds no default and reads no UI state; the PoC "default backend"
+// lives in stores/backend.ts, whose `libraryFetch` passes it for library
+// queries.
 
-/** One registered remote Library Backend. Twin of `Backend` in
- *  src-tauri/src/remote_backend.rs — the app crate, which the linxiv-core
- *  ts_bindings generator can't reach; hand-kept in sync. */
+/** One registered remote Library Backend. Hand-kept twin of `Backend` in
+ *  src-tauri/src/remote_backend.rs; the app crate is out of ts_bindings' reach. */
 export interface RemoteBackend {
   id: string;
   label: string;
@@ -57,9 +52,9 @@ export const UNREACHABLE_MESSAGE =
   "Can't reach this node — it may be offline, or this device isn't admitted yet. " +
   "Check Settings → Remote backends and send your member code to the node operator.";
 
-/** Shared mapping of an `api_remote`/`remote_*` invoke rejection (the
- *  generated `RemoteError` union, tagged by `kind`) to the app-wide
- *  `ApiError`. Junk that isn't a `RemoteError` degrades to a 500. */
+/** Maps an `api_remote`/`remote_*` rejection (the generated `RemoteError`
+ *  union, tagged by `kind`) to `ApiError`. `transport` and junk both fall
+ *  through to the default 500. */
 export function mapRemoteError(e: unknown): ApiError {
   const err = e as RemoteError | { kind?: undefined; detail?: string } | null;
   switch (err?.kind) {
@@ -75,7 +70,7 @@ export function mapRemoteError(e: unknown): ApiError {
 }
 
 /** The invoke() command + args for a request — pure, so addressing is testable:
- *  local hits the existing `api` command unchanged, remote `api_remote`. */
+ *  local uses `api`, remote `api_remote`. */
 export function buildInvoke(
   path: string,
   init: RequestInit | undefined,
@@ -90,10 +85,8 @@ export function buildInvoke(
     : { cmd: "api", args: { req } };
 }
 
-// Packaged app: every request runs in-process through the `api` command, or —
-// addressed to a remote backend — through `api_remote`. (Tauri never sends
-// FormData here — file uploads send base64 JSON; the FormData branch below is
-// the browser-dev path only.)
+// Tauri never reaches here with FormData — uploads send base64 JSON, so the
+// FormData branch in apiFetch is the browser-dev path only.
 async function invokeApi<T>(
   path: string,
   init: RequestInit | undefined,

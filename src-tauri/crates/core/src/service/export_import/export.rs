@@ -150,7 +150,7 @@ fn collect_pdf_files(papers: &[PaperDetails], pdf_dir: &Path) -> Vec<(String, Pa
     pdf_files
 }
 
-/// Write a project to a `.lxproj` ZIP_DEFLATED archive at `dest_path` (`.lxproj`
+/// Write a project to a deflated `.lxproj` archive at `dest_path` (`.lxproj`
 /// is forced as the extension): `manifest.json` (pretty JSON) plus each bundled
 /// PDF under its archive name `pdfs/{source_id}_v{version}.pdf`.
 pub fn export_project(

@@ -1,6 +1,6 @@
 //! crossref — CrossRef REST API source. Plan §5.4. `api.crossref.org` only, no
-//! auth; every request carries the polite-pool UA built from the `mailto` DI
-//! param (shared with OpenAlex). `doi_resolve` reuses `parse_work`.
+//! auth; every request carries `http`'s polite-pool UA, built from the caller's
+//! `mailto`. `doi_resolve` calls `fetch_by_doi`.
 
 use chrono::NaiveDate;
 use serde_json::Value;
@@ -14,7 +14,7 @@ const CROSSREF_BASE: &str = "https://api.crossref.org/works";
 const ALLOW: &[&str] = &["api.crossref.org"];
 
 // ---------------------------------------------------------------------------
-// Pure parsers (sync, fixture-tested) — reused by doi_resolve.
+// Pure parsers (sync, fixture-tested), reused below.
 // ---------------------------------------------------------------------------
 
 /// Strip well-formed `<...>` tags: a tag needs `>` after at least one non-`>`
@@ -39,8 +39,8 @@ pub fn strip_jats_tags(s: &str) -> String {
     out
 }
 
-/// `date-parts: [[Y[, M[, D]]]]` -> a date, month/day defaulting to 1. `None`
-/// (caller falls back to today) when absent, empty, or any component is non-numeric.
+/// `date-parts: [[Y[, M[, D]]]]` -> a date; missing or non-numeric month/day
+/// default to 1. `None` (caller falls back to today) if absent or not a date.
 fn parse_published(msg: &Value) -> Option<NaiveDate> {
     let parts = msg
         .get("published")?
@@ -141,8 +141,8 @@ pub fn parse_work(msg: &Value, doi: &str) -> PaperMetadata {
     }
 }
 
-/// Parse a single-work response body (`{"message": {...}}`). `None` when the
-/// body is unparseable or the work has no title.
+/// Parse a single-work response body (`{"message": {...}}`). `None` unless
+/// it parses to a `message` with a title.
 pub fn parse_doi_body(body: &[u8], doi: &str) -> Option<PaperMetadata> {
     let v: Value = serde_json::from_slice(body).ok()?;
     let msg = v.get("message")?;
@@ -184,7 +184,7 @@ pub fn parse_search_body(body: &[u8]) -> Vec<PaperMetadata> {
 // ---------------------------------------------------------------------------
 
 /// Fetch CrossRef metadata for a DOI. `None` on any non-200 / network / parse
-/// error. `mailto` selects CrossRef's polite pool (DI param, not env).
+/// error. `mailto` selects CrossRef's polite pool (caller-injected).
 pub async fn fetch_by_doi(doi: &str, mailto: &str) -> Option<PaperMetadata> {
     fetch_by_doi_checked(doi, mailto).await.ok().flatten()
 }
@@ -310,8 +310,6 @@ pub async fn search_by_title_checked(
 mod tests {
     use super::*;
 
-    // fixtures live in testdata/crossref/, whitespace inside is load-bearing —
-    // never run a formatter over them.
     // The `{"message": {...}}` envelope api.crossref.org returns for one work.
     const WORK_BODY: &[u8] = include_bytes!("testdata/crossref/work_body.json");
 
@@ -334,8 +332,8 @@ mod tests {
 
     #[test]
     fn keeps_bare_lt_and_unclosed_tag_like_python_regex() {
-        // `<>` has zero chars before `>`, `<unclosed` never closes: regex matches
-        // neither, so both `<` survive.
+        // `<>` has zero chars before `>`; `< y` and `<unclosed` never close, so
+        // all three `<` survive.
         assert_eq!(strip_jats_tags("a<>b"), "a<>b");
         assert_eq!(strip_jats_tags("x < y"), "x < y");
         assert_eq!(strip_jats_tags("<unclosed"), "<unclosed");
@@ -435,7 +433,7 @@ mod tests {
 
     #[test]
     fn passed_doi_overrides_message_doi() {
-        // message DOI is 10.1000/xyz; caller passes a different one (search path).
+        // message DOI is 10.1000/xyz; the by-DOI fetch passes the requested one.
         let m = parse_work(&work(), "10.9999/test");
         assert_eq!(m.source_id, "doi:10.9999/test");
         assert_eq!(m.doi, Some("10.9999/test".into()));
@@ -485,7 +483,7 @@ mod tests {
         assert!(matches!(err, CoreError::Validation(_)), "got {err}");
     }
 
-    // ---- fetch_by_doi_checked: 404-vs-failure distinction the backfill route relies on ----
+    // ---- fetch_by_doi_checked: the 404-vs-failure split ORCID backfill needs ----
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

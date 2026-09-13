@@ -5,10 +5,6 @@ use std::path::Path;
 
 use super::extract::{extract_pdf_metadata, pdfium_lib_path, Extracted};
 
-// ---------------------------------------------------------------------------
-// Subprocess boundary — a native libpdfium crash kills the worker, not the app
-// ---------------------------------------------------------------------------
-
 /// The CLI subcommand the worker is invoked with (`linxiv pdf-meta <path>`).
 /// `crates/cli` names its clap command from this same constant, so renaming the
 /// subcommand is a one-const change both crates see at compile time.
@@ -244,7 +240,7 @@ mod tests {
         assert_eq!(got.title.as_deref(), Some("FROM_WORKER"));
         assert_eq!(got.year, Some(2024));
 
-        // Nonzero exit (what a segfaulted child looks like) -> None -> default.
+        // Nonzero exit (a shell's 139 for SIGSEGV) -> None -> default.
         let boom = fake_worker(dir.path(), "boom.sh", "exit 139");
         assert_eq!(extract_via_worker(&boom, b"junk", timeout), None);
         assert_eq!(

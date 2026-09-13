@@ -47,7 +47,7 @@ test("theme v0 -> v3 drops every glass field", () => {
   }
 });
 
-/** v1 is the same shape as v0 minus glassEffects. */
+/** v1: no glassEffects, glass tuning fields stay. */
 const themeV1 = () => ({
   preset: "Navy",
   mode: "dark",
@@ -308,8 +308,7 @@ test("ui migrate handles undefined / null / empty blobs at every version", () =>
     hideSingleAuthors: false,
     density: DEFAULT_DENSITY,
   };
-  // The same blob is reused across all three calls: migrateUi copies on entry,
-  // so no call's backfill can leak into the next assertion.
+  // migrateUi copies on entry, so reusing one blob across the calls is safe.
   for (const blob of [undefined, null, {}]) {
     assert.deepStrictEqual(migrateUi(blob, 0), backfilled);
     assert.deepStrictEqual(migrateUi(blob, 1), backfilled);

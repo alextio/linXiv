@@ -39,7 +39,7 @@ export function SyncStatusPill({ shares }: { shares: SharedSummary[] }) {
       queryClient.invalidateQueries({ queryKey: ["share", "received"] });
     },
   });
-  // The "N shares failed" text describes the last sync-all pass; once any
+  // The failed-count text describes the last sync-all pass; once any
   // other share sync starts (a card-level "Sync") it goes stale, so drop it.
   // syncAll's own re-run resets its data on mutate.
   const { reset, isPending } = syncAll;

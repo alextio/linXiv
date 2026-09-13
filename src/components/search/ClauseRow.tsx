@@ -108,8 +108,8 @@ export function ClauseRow({
             if (e.key === "Enter") { setDropdownOpen(false); onSubmit(); }
             if (e.key === "Escape") setDropdownOpen(false);
           }}
-          // Delay close so onMouseDown on a suggestion item fires before blur removes the list.
-          // This works only because suggestion items use onMouseDown + e.preventDefault().
+          // Items pick on onMouseDown + preventDefault, so a pick never blurs the
+          // input; the delay only covers a real blur.
           onBlur={() => setTimeout(() => setDropdownOpen(false), 150)}
           onFocus={() => {
             if (clause.value.trim().length >= 1 && suggestions.length > 0) {

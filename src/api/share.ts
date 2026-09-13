@@ -33,17 +33,15 @@ export type {
   SyncReason,
 };
 
-/** Deliberately narrower than lib/errText: only ApiError messages surface in
- * the sharing UI — any other exception falls back to the generic string
- * rather than leaking its raw message. */
+/** Narrower than lib/errText: only ApiError messages surface in the sharing UI,
+ * so no other exception leaks its raw message. */
 export function shareErrText(e: unknown): string {
   return e instanceof ApiError ? e.message : "Unexpected sharing error";
 }
 
-// The share endpoints live behind their own `share_api` Tauri command (a front
-// door beside `api`, with its own ShareState + iroh node), NOT the main `/api`
-// route. The iroh node only runs in the packaged/desktop app, so these calls go
-// through `invoke` and are unavailable in browser dev.
+// The share endpoints live behind their own `share_api` Tauri command (its own
+// ShareState + iroh node), NOT the main `api` one. That node runs only in the
+// desktop app, so these `invoke` calls are unavailable in browser dev.
 async function shareApi<T>(
   method: string,
   path: string,
@@ -63,9 +61,8 @@ async function shareApi<T>(
 export const sharingAvailable = isTauri;
 
 // Most envelope types are generated from the Rust structs in
-// crates/server/src/route/share.rs and share_sync.rs (aliased above); only
-// shapes with no exact Rust twin (JoinResult, ReceivedPaper) stay
-// hand-written below.
+// crates/server/src/{route/share.rs, share_sync.rs} (aliased above); only
+// JoinResult and ReceivedPaper, which have no Rust twin, are hand-written.
 
 export type MemberRole = "hoster" | "editor" | "viewer";
 
@@ -88,25 +85,22 @@ export async function createShareTicket(projectId: number): Promise<string> {
   return res.ticket;
 }
 
-/** Outcome of {@link joinShare}. `pending` means the invite was accepted but
- *  its host was unreachable: it is saved and finishes syncing on a later pass,
- *  so there is no name or counts yet. {@link listReceived} lists it with
- *  `pending` set until that first sync lands. */
+/** Outcome of {@link joinShare}. `pending` means the invite was accepted but its
+ *  host was unreachable, so it has no name or counts until a later sync pass;
+ *  {@link listReceived} keeps `pending` set until that first sync lands. */
 export type JoinResult =
   | ({ pending?: false } & Omit<SharedSummary, "synced_at" | "paused">)
   | { pending: true; share_id: string; e2ee: true; reason: string };
 
-/** Shown once a join has been running long enough to look stuck. An offline
- *  host cannot be detected quickly — QUIC has no connection-refused, so the
- *  dial can only time out (15s, `DIAL_TIMEOUT` in the p2p crate). Deliberately
- *  conditional: a host that *refuses* this device fails and saves nothing, so
- *  this must not promise the invite was kept. */
+/** Shown once a join looks stuck. QUIC has no connection-refused, so an offline
+ *  host can only time out (15s, `DIAL_TIMEOUT` in the p2p crate). Stays
+ *  conditional: a host that *refuses* this device saves nothing. */
 export const JOIN_SLOW_HINT =
   "Connecting to the host… If they are offline this takes about 15 seconds, and the invite is saved to finish syncing later.";
 
-/** Dial a ticket's sender, fetch the shared project, and store it as a
- *  read-only mirror. Returns the joined project's summary (counts only), or a
- *  `pending` result when an e2ee invite's host could not be reached. */
+/** Dial a ticket's sender, fetch the shared project, store it as a read-only
+ *  mirror. Returns its summary (counts only), or `pending` when an e2ee
+ *  invite's host could not be reached. */
 export async function joinShare(ticket: string): Promise<JoinResult> {
   return shareApi("POST", "/api/share/join", { ticket });
 }
@@ -123,9 +117,9 @@ export async function importReceived(shareId: string): Promise<ImportedReceipt> 
   return shareApi("POST", `/api/share/received/${shareId}/import`);
 }
 
-/** Detach the linked local project from a received share. Membership, mirror,
- *  and the local project all stay; interval sync keeps the mirror fresh but
- *  stops importing until {@link importReceived} creates a new link. */
+/** Detach the linked local project from a received share. Membership, mirror and
+ *  project all stay; interval sync keeps refreshing the mirror but stops
+ *  importing until {@link importReceived} makes a new link. */
 export async function unlinkShare(shareId: string): Promise<UnlinkedReceipt> {
   return shareApi("POST", `/api/share/received/${shareId}/unlink`);
 }
@@ -135,11 +129,10 @@ export async function syncShare(shareId: string): Promise<SyncReceipt> {
   return shareApi("POST", `/api/share/${shareId}/sync`);
 }
 
-/** Drop a received mirror (+ ticket + settings) and forget the p2p
- *  registration behind it, so a rejoin adopts from scratch instead of reusing
- *  the old document. The linked local project, if imported, stays untouched.
- *  `forgotten: false` means the node was offline and the registration
- *  survived — a rejoin would reuse the old doc. */
+/** Drop a received mirror (+ ticket + settings) and forget the p2p registration
+ *  behind it, so a rejoin adopts from scratch. The linked local project stays.
+ *  `forgotten: false` means the node was offline and the registration survived,
+ *  so a rejoin would reuse the old doc. */
 export async function leaveShare(shareId: string): Promise<LeftReceipt> {
   return shareApi("POST", `/api/share/received/${shareId}/leave`);
 }
@@ -152,9 +145,8 @@ export async function unpublishShare(
   return shareApi("POST", `/api/share/${shareId}/unpublish`);
 }
 
-/** Rebinds the p2p node against whatever relay settings are currently saved
- *  (Settings → Sharing), without restarting the app. Save the settings first
- *  via `updateSettings`, then call this. */
+/** Rebind the p2p node against the saved relay settings (Settings → Sharing)
+ *  without restarting the app. Save via `updateSettings` first, then call this. */
 export async function reconnectRelay(): Promise<void> {
   await shareApi("POST", "/api/share/relay/reconnect");
 }
@@ -198,7 +190,7 @@ export async function listMembers(shareId: string): Promise<ShareMember[]> {
 }
 
 /** Change an invited member's role on a hosted e2ee share (viewer ↔ editor;
- *  admin is keyhive-supported but app-deferred, the route rejects it). */
+ *  the route rejects admin — keyhive-supported but app-deferred). */
 export async function setMemberRole(
   shareId: string,
   memberId: string,
@@ -209,17 +201,16 @@ export async function setMemberRole(
   });
 }
 
-/** Re-encrypt a hosted encrypted share's whole history (and its PDF blobs)
- *  under the current key, then republish. Repairs members who joined after the
- *  content was already encrypted and so can decrypt none of it — the symptom is
- *  their sync reporting `no_key > 0` with `applied` stuck at 0. */
+/** Re-encrypt a hosted share's whole history (and its PDF blobs) under the
+ *  current key, then republish. Repairs members who joined after the content was
+ *  encrypted and can decrypt none of it — their sync reports `no_key > 0` with
+ *  `applied` stuck at 0. */
 export async function rekeyShare(shareId: string): Promise<RekeyedReceipt> {
   return shareApi("POST", `/api/share/${shareId}/rekey`);
 }
 
-/** Revoke a member and drop their row entirely, so re-inviting the same device
- *  starts clean. Use over {@link revokeMember} when the invite is being redone
- *  rather than withdrawn. */
+/** Revoke a member and drop their row, so re-inviting the same device starts
+ *  clean. Use over {@link revokeMember} when the invite is redone, not withdrawn. */
 export async function removeMember(
   shareId: string,
   memberId: string

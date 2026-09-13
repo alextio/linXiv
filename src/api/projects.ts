@@ -67,7 +67,7 @@ export async function addPaperToProject(
   });
 }
 
-// Server caps source_ids at 10k per request; stay well under it.
+// No server-side count cap; core chunks ids at 900 internally.
 const BULK_ADD_CHUNK = 5_000;
 
 /** Bulk-add papers to a project. Partial success: unknown source_ids come

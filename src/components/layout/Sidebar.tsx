@@ -46,10 +46,9 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/tags", label: "Tags", icon: <Tag size={16} />, pageKey: "tags" },
   { to: "/authors", label: "Authors", icon: <Users size={16} /> },
   // The editor takes the Notes slot: editor projects ARE frontmatter-flagged
-  // notes (see service/editor_project.py), so the tab is governed by the
-  // existing "notes" sidebar toggle (ADR 0004) and will evolve into the full
-  // Notes page once note handling lands. (The old /notes stub route stays
-  // reachable by URL but had no page behind it.)
+  // notes (service/editor_project.rs), so the tab rides the existing "notes"
+  // sidebar toggle (ADR 0004). /notes stays reachable by URL with no page
+  // behind it.
   { to: "/editor", label: "Editor", icon: <FileCode size={16} />, pageKey: "notes" },
   { to: "/settings", label: "Settings", icon: <Settings size={16} /> },
 ];

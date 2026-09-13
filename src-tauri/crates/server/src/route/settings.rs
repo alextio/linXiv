@@ -1,5 +1,5 @@
-//! `/api/settings` routes. GET: the flat settings object with CROSSREF_MAILTO/
-//! OPENALEX_MAILTO env keys overlaid (no wrapper key); PATCH: batch `set(k, v)`.
+//! `/api/settings` + `PATCH /api/env`. GET: the flat settings object with
+//! CROSSREF_MAILTO/OPENALEX_MAILTO overlaid (no wrapper key); PATCH: batch `set`.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};

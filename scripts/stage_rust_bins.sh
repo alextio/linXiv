@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Build the Rust CLI + MCP binaries and stage them into src-tauri/binaries/ with
 # the Tauri target-triple suffix so `tauri build` bundles them (externalBin).
-# Replaces the old PyInstaller specs + stage_sidecar.py (no Python sidecar now).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

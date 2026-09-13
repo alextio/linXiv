@@ -1,5 +1,5 @@
-//! linXiv headless CLI. Command bodies live in `cmd::<group>::run`; this file
-//! only wires parsing → lazy `Ctx::open()` → dispatch.
+//! linXiv headless CLI: parsing → lazy `Ctx::open()` → dispatch to `cmd::*`,
+//! plus the two DB-free arms (`Restore`, `pdf-meta`).
 
 mod cmd;
 mod ctx;
@@ -117,8 +117,8 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Categories => cmd::misc::categories(ctx).await,
         Commands::Settings { cmd } => cmd::misc::settings(cmd, ctx).await,
         Commands::Backup { dest } => cmd::misc::backup(dest, ctx).await,
-        // `main` intercepts Restore and PdfMeta before Ctx::open()
-        // (see above); these arms exist only for match exhaustiveness.
+        // `main` intercepts both before `Ctx::open()`; these arms exist only
+        // so the match is exhaustive.
         Commands::Restore { .. } => unreachable!("restore is handled in main() before dispatch"),
         Commands::PdfMeta { .. } => unreachable!("pdf-meta is handled in main() before dispatch"),
     }
@@ -149,7 +149,7 @@ async fn main() {
             Err(e) => output::fail(e),
         },
         command => {
-            // Lazy: open the DB/data-dir once before dispatch (cheap, no network).
+            // Open the DB/data-dir once before dispatch; no network.
             let mut ctx = Ctx::open().unwrap_or_else(|e| output::fail(e));
             if let Err(e) = dispatch(command, &mut ctx).await {
                 output::fail(e);

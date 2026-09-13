@@ -49,7 +49,7 @@ pub enum TagCmd {
 
 pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
     match cmd {
-        // cmd_tag_add: prefix the id, UNION tags onto the paper; a miss is not found.
+        // Prefix the id, UNION tags onto the paper; a miss is not found.
         TagCmd::Add { source_id, tags } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             let updated = svc_paper::add_paper_tags(&mut ctx.conn, &source_id, &tags)
@@ -59,7 +59,6 @@ pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 tags: updated,
             });
         }
-        // cmd_tag_remove
         TagCmd::Remove { source_id, tags } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             let updated = svc_paper::remove_paper_tags(&mut ctx.conn, &source_id, &tags)
@@ -69,7 +68,7 @@ pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 tags: updated,
             });
         }
-        // cmd_tag_list: missing paper -> empty list (no error), matching get_paper_tags.
+        // Missing paper -> empty list (no error), matching get_paper_tags.
         TagCmd::List { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             let tags = svc_paper::get(&ctx.conn, &PaperRef::source(source_id.clone()))?
@@ -77,11 +76,9 @@ pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 .unwrap_or_default();
             output(&PaperTags { source_id, tags });
         }
-        // cmd_tag_list_all
         TagCmd::ListAll => {
             output(&svc_tag::list_all_tags(&ctx.conn)?);
         }
-        // cmd_tag_create
         TagCmd::Create { label } => {
             let tag_id = svc_tag::upsert(
                 &mut ctx.conn,
@@ -91,7 +88,6 @@ pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             )?;
             output(&CreatedTag { tag_id, label });
         }
-        // cmd_tag_delete
         TagCmd::Delete { tag_id } => {
             svc_tag::delete(
                 &mut ctx.conn,
@@ -104,19 +100,18 @@ pub async fn run(cmd: TagCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 deleted_tag_id: tag_id,
             });
         }
-        // cmd_tag_add_project: the service fn owns the resolve-or-fail guard.
+        // The service fn owns the resolve-or-fail guard.
         TagCmd::AddProject { project_id, tags } => {
             let updated = svc_project::add_project_tags(&mut ctx.conn, project_id, &tags)
                 .unwrap_or_else(|e| fail(e));
             output(&json!({ "project_id": project_id, "tags": updated }));
         }
-        // cmd_tag_remove_project
         TagCmd::RemoveProject { project_id, tags } => {
             let updated = svc_project::remove_project_tags(&mut ctx.conn, project_id, &tags)
                 .unwrap_or_else(|e| fail(e));
             output(&json!({ "project_id": project_id, "tags": updated }));
         }
-        // cmd_tag_list_project: tags come off the resolved project's details.
+        // Tags come off the resolved project's details.
         TagCmd::ListProject { project_id } => {
             let details =
                 svc_project::get_required(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));

@@ -244,7 +244,7 @@ fn propagate_removals(
     Ok(())
 }
 
-/// Bump mtime — the UI reads the doc file's mtime as synced_at.
+/// Bump mtime — route/share.rs reports it as `synced_at`.
 fn touch(p: &Path) {
     if let Ok(f) = std::fs::File::options().append(true).open(p) {
         let _ = f.set_modified(std::time::SystemTime::now());
@@ -629,7 +629,7 @@ pub const NUDGE_DEBOUNCE: Duration = Duration::from_secs(3);
 static NUDGE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// Poke the background sync loop after a write that may have touched shared
-/// content. Cheap and non-blocking; `route()` calls this on successful non-GETs.
+/// content. Cheap and non-blocking; `route()` calls it on mirroring writes.
 pub fn nudge() {
     NUDGE.notify_one();
     // The journal loop waits on its own Notify (notify_one wakes ONE waiter,

@@ -1,7 +1,7 @@
-//! In-process HTTP-shaped router. The webview's `apiFetch` calls the single `api`
+//! In-process HTTP-shaped router. The webview's `apiFetch` calls the `api`
 //! Tauri command with `{method, path, body}`; `route` matches `(method, decoded
-//! path segments)` and calls `linxiv-core`. Two front doors: `invoke("api", …)`
-//! in the packaged app, and the dev-only HTTP shim (D32).
+//! path segments)` and calls `linxiv-core`. Also entered by the dev HTTP shim
+//! (D32), the headless bin, and `remote_query`'s admitted peers.
 //!
 //! ## Pattern for adding a resource group
 //! Add `mod <group>;`, then route the group's first path segment to a `<group>::`
@@ -30,7 +30,7 @@ pub(crate) mod authors; // request-body structs rendered by ts_bindings
 pub(crate) mod editor; // request-body structs rendered by ts_bindings
 pub mod feed; // refresh reused by the headless bin's feed poll loop
 mod graph;
-pub(crate) mod history; // request-body structs rendered by ts_bindings
+pub(crate) mod history; // response + body types via ts_bindings
 pub(crate) mod notes; // request-body structs rendered by ts_bindings
 pub(crate) mod orcid; // request-body structs rendered by ts_bindings
 pub(crate) mod papers; // ingest_full_text reused by the background full-text worker
@@ -122,8 +122,8 @@ pub(crate) fn path_i64(seg: &str) -> Result<i64, ApiError> {
 }
 
 /// Should a successful request poke the debounced share-sync loop? Any non-GET
-/// may have touched shared mirrored content — except the read-only POST
-/// lookups/searches (arxiv search writes only when its body sets `save`).
+/// may have touched shared mirrored content — except the arms below (lookups,
+/// unmirrored state, external-file writes).
 fn nudges_share_sync(req: &ApiRequest) -> bool {
     if req.method == "GET" {
         return false;
@@ -145,7 +145,7 @@ fn nudges_share_sync(req: &ApiRequest) -> bool {
         // UI state, the LaTeX editor's vault) — status clicks, every search,
         // and editor file ops would otherwise dial peers a few seconds later.
         ["api", "reading-status", ..] | ["api", "search", "state"] | ["api", "editor", ..] => false,
-        // POSTs that only read the library and write an external file (or a
+        // POSTs that write no library row, only an external file (or a
         // throwaway temp): import preview, project export, DB backup.
         ["api", "projects", "import", "preview"]
         | ["api", "projects", _, "export"]
@@ -190,10 +190,9 @@ async fn route_inner(state: &AppState, req: &ApiRequest) -> Result<Value, ApiErr
         _ => {}
     }
 
-    // Resource groups: each owns its path subtree and returns None to pass. Arms
-    // match on exact (method, segment-count, literals), so order is independent —
-    // pdfs is listed before papers only for readability (it claims the more
-    // specific `/api/papers/{id}/pdf-path`).
+    // Resource groups return None to pass. No two claim the same (method, path)
+    // — pdfs, uploads and papers all hold `/api/papers/*` arms — so try order is
+    // free here; inside a group the generic `{id}` arms must come last.
     macro_rules! try_groups {
         ($($group:ident),+ $(,)?) => {$(
             if let Some(r) = $group::handle(state, &ctx).await {
@@ -244,8 +243,8 @@ fn categories(state: &AppState) -> Result<Value, ApiError> {
 
 // ── path/query helpers ──────────────────────────────────────────────────────
 
-/// Split a raw request path into percent-decoded, non-empty segments. Shared with
-/// the `share_api` command so both front doors parse paths identically.
+/// Split a raw request path into percent-decoded, non-empty segments. Shared
+/// by `share_api`, `remote_query` and the `linxiv://` handler.
 pub fn split_segments(raw_path: &str) -> Vec<String> {
     raw_path
         .trim_matches('/')
@@ -308,8 +307,7 @@ pub fn pct_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Shared test helpers for the per-group route test modules (each previously
-/// carried its own copy of `state`/`req`).
+/// Shared test helpers for the per-group route test modules.
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::*;

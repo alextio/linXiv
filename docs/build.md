@@ -12,7 +12,7 @@ Re-run `stage_rust_bins.sh` whenever `linxiv-cli`/`linxiv-mcp` source changes an
 
 ## Never release a stable tag whose core matches an already-shipped prerelease
 
-**After `v0.3.0-beta`, the next release is `v0.3.1` — not `v0.3.0`.**
+**Bump the patch: never ship a stable tag with a prerelease's core.**
 
 `release.yml` writes the tag verbatim into `tauri.conf.json`, so `v0.3.0-beta`
 ships as RPM `Version: 0.3.0-beta`. RPM has no notion of a semver prerelease —

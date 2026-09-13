@@ -72,7 +72,7 @@ pub enum Dir {
     Desc,
 }
 
-// cmd_search: search the source, dump the results as `SearchResultOut` — the
+// Search the source, dump the results as `SearchResultOut` — the
 // canonical remote-search wire shape all three surfaces emit (ADR-0011).
 // Two-line stderr on failure: `[search] {e}` prefix line, then the error JSON.
 // `--local` instead dumps the library rows (`PaperDetails`) that
@@ -108,7 +108,7 @@ pub async fn search(args: SearchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-// cmd_fetch: validate (arxiv only), fetch, persist, then render-or-dump.
+// Validate (arxiv only), fetch, persist, then render-or-dump.
 pub async fn fetch(args: FetchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
     if matches!(args.source, Source::Arxiv) {
         validate_arxiv_id(&args.source_id);
@@ -133,7 +133,7 @@ pub async fn fetch(args: FetchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-// cmd_list: latest-version rows, optional category/limit/offset filter, emitted
+// Latest-version rows, optional category/limit/offset filter, emitted
 // as `PaperDetails` (models.rs SERIALIZER 2) — the same wire shape route and MCP
 // list arms serialize. `full_text` never ships (skip_serializing on the model).
 pub async fn list(args: ListArgs, ctx: &mut Ctx) -> anyhow::Result<()> {

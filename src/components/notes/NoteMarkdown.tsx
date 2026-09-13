@@ -55,8 +55,8 @@ function withMath(
 const MATH_TAGS = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"] as const;
 
 // Built per NoteMarkdown render so each tag renderer closes over that
-// render's extracted math[]; MATH_COMPONENTS is rebuilt alongside it so its
-// reference-equality check matches these specific component instances.
+// render's extracted math[]; mathComponents holds those exact instances for
+// shouldSkipMathWalk's reference check.
 function createComponents(math: string[], forceInline: boolean): Components {
   const components: Components = Object.fromEntries(
     MATH_TAGS.map((tag) => [

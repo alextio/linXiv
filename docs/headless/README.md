@@ -41,7 +41,7 @@ podman run -d --name linxiv \
 
 The image binds `0.0.0.0:8000` inside the container, and the bin fails
 closed: a non-loopback `LINXIV_HTTP_ADDR` without `LINXIV_API_TOKEN`
-refuses to start. Every request then needs
+refuses to start. API requests then need
 `Authorization: Bearer <token>`:
 
 ```bash
@@ -62,7 +62,7 @@ docker compose -f docs/headless/docker-compose.yml up -d --build
 | Variable | Default | Purpose |
 |---|---|---|
 | `LINXIV_HTTP_ADDR` | `127.0.0.1:8000` | Listen address. Non-loopback requires the token. |
-| `LINXIV_API_TOKEN` | unset | Bearer token gating every request; required off loopback. |
+| `LINXIV_API_TOKEN` | unset | Bearer token gating API requests; required off loopback. |
 | `LINXIV_DATA_DIR` | per-user app dir | Database, PDFs, and vault location (shared with app/CLI/MCP). |
 | `LINXIV_P2P_PASSPHRASE` | unset | At-rest encryption for the p2p key store where no OS keychain exists (containers). |
 | `LINXIV_PDFIUM_LIB` | vendor path | Explicit `libpdfium` path; otherwise `scripts/fetch_pdfium.sh`'s output is found. |

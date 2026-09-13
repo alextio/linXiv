@@ -132,10 +132,9 @@ export default function ProjectDetailPage() {
     enabled: Boolean(project),
   });
 
-  // §7 viewer read-only: a project linked (share_id) to a received share where
-  // our capability is viewer renders with NO edit affordances (hidden, not
-  // disabled). Unknown role (offline / plain / hosted) → editable as today;
-  // the write boundary itself is enforced host+crypto side, this is UX.
+  // §7 viewer read-only: viewer capability on the share behind `share_id`
+  // hides every edit affordance (unmounted, not disabled). Unknown role →
+  // editable; receivedShareRole's doc covers why that's safe.
   const { data: receivedShares } = useQuery({
     queryKey: ["share", "received"],
     queryFn: listReceived,
@@ -156,8 +155,8 @@ export default function ProjectDetailPage() {
         color_hex: project.color_hex,
         project_tags: project.project_tags,
       });
-      // ponytail: copies project metadata + paper links; notes/annotations are
-      // library-global in linXiv, so they need no per-project copy.
+      // ponytail: copies project metadata + paper links; project-scoped
+      // notes/annotations stay with the original (NOTE/ANNOTATION.PROJECT_FK).
       // As in createProjectWithPapers: the project exists even when the add
       // rejects, so a reject counts as every id failing rather than escaping.
       let failed: string[] = [];
@@ -573,10 +572,8 @@ export default function ProjectDetailPage() {
         </div>
       </div>
 
-      {/* TODO: project-level notes */}
-      {/* Notes are available on individual paper detail pages within this project. */}
-      {/* A project-level notes panel could be added here once the API supports */}
-      {/* querying notes by project_id without requiring a source_id. */}
+      {/* TODO: project-level notes panel — GET /api/notes 422s without a
+          source_id, so notes are reachable only per paper. */}
 
       {/* Dialogs (edit affordances unmounted entirely on viewer shares) */}
       {project && (

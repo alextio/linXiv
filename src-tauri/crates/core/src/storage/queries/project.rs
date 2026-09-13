@@ -8,11 +8,11 @@ use crate::models::{ProjectDetails, Status};
 use crate::storage::db::{timestamp_from_sql, timestamp_to_sql, transaction};
 use crate::storage::query::Q;
 
-// Columns in fixed order; both queries share `raw_from_row` / `to_model`.
+// Column list + FROM, in the order `raw_from_row` indexes.
 const SELECT_COLS: &str =
     "PROJECT_FK, NAME, DESCRIPTION, COLOR, STATUS, CREATED_AT, UPDATED_AT, ARCHIVED_AT, SHARE_ID FROM PROJECT";
 
-/// Raw column values before decltype conversion (closure stays in rusqlite-error
+/// Raw column values as SQLite returns them (closure stays in rusqlite-error
 /// land; `to_model` does the CoreError-returning conversions).
 struct RawProject {
     id: i64,
@@ -59,8 +59,8 @@ pub(crate) fn status_to_sql(s: Status) -> &'static str {
     }
 }
 
-/// Maps a row to ProjectDetails. `source_fks` is left empty for the caller to
-/// fill via `load_source_fks`; `project_tags` stays empty too.
+/// Maps a row to ProjectDetails. `source_fks` and `project_tags` are left empty
+/// for the caller to fill.
 fn to_model(raw: RawProject) -> Result<ProjectDetails> {
     Ok(ProjectDetails {
         id: Some(raw.id),
@@ -101,7 +101,7 @@ pub fn ensure_share_id(
         .optional()?)
 }
 
-/// PROJECT_FK of the project claiming this SHARE_ID (hoster- or reader-linked).
+/// PROJECT_FK of the live (non-trashed) project claiming this SHARE_ID.
 pub fn find_by_share_id(conn: &Connection, share_id: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
@@ -237,8 +237,8 @@ pub fn get_project(
     Ok(Some(proj))
 }
 
-/// List projects by optional predicate. `load_sources = false` skips the
-/// membership load — list/graph paths fill counts via the bulk loader (no N+1).
+/// List projects by optional predicate. `load_sources = true` batches every
+/// project's membership into one chunked query (no N+1); `false` skips it.
 pub fn list_projects(
     conn: &Connection,
     condition: Option<Q>,
@@ -326,9 +326,8 @@ pub fn update_project_fields(
     Ok(n > 0)
 }
 
-/// Full membership replace, diffed against current rows (not a blanket
-/// delete-then-reinsert) so a retained paper's PAPER_TO_READING cascade FK never
-/// fires. Must run in the same transaction as `insert_project`.
+/// Full membership replace, diffed against current rows so a retained paper's
+/// PAPER_TO_READING cascade never fires (not a blanket delete-then-reinsert).
 pub fn save_source_fks(tx: &Transaction, project_fk: i64, source_fks: &[i64]) -> Result<()> {
     let existing: std::collections::HashSet<i64> = {
         let mut stmt =
@@ -386,8 +385,7 @@ pub fn replace_papers(conn: &mut Connection, project_fk: i64, source_fks: &[i64]
     transaction(conn, |tx| save_source_fks(tx, project_fk, &deduped))
 }
 
-/// PROJECT_FKs of every project containing this paper — any status.
-/// Callers filter to active themselves.
+/// PROJECT_FKs of every project containing this paper — any status, unfiltered.
 pub fn get_paper_project_fks(conn: &Connection, source_fk: i64) -> Result<Vec<i64>> {
     Ok(project_fks_by_source_fk(conn, &[source_fk])?
         .remove(&source_fk)
@@ -438,8 +436,8 @@ pub fn remove_paper_from_all_projects(conn: &mut Connection, source_fk: i64) -> 
 }
 
 /// Permanently remove a project + associations in ONE transaction. NULLs
-/// NOTE.PROJECT_FK rather than deleting notes, and leaves orphan TAG rows,
-/// per ADR-0009. No-ops cleanly if the project is absent.
+/// NOTE/ANNOTATION.PROJECT_FK instead of deleting them; orphan TAG rows stay
+/// (ADR-0009). No-ops if the project is absent.
 pub fn hard_delete_project(conn: &mut Connection, project_fk: i64) -> Result<()> {
     transaction(conn, |tx| {
         tx.execute(
@@ -686,14 +684,14 @@ mod tests {
             ReadingStatus::Read
         );
 
-        // (b) removing the paper from the project cascades to drop its reading row.
+        // removing the paper from the project cascades to drop its reading row.
         remove_papers(&conn, 1, &[10]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),
             ReadingStatus::Unread
         );
 
-        // (c) re-adding it starts fresh — no resurrected status from the orphaned row.
+        // re-adding it starts fresh — the cascade left nothing to resurrect.
         add_papers(&conn, 1, &[10]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),
@@ -766,7 +764,7 @@ mod tests {
         set_reading_status(&conn, 1, 10, ReadingStatus::Read).unwrap();
         set_reading_status(&conn, 1, 11, ReadingStatus::Reading).unwrap();
 
-        // no-op save (same set, same order): reading status for both survives.
+        // no-op save (same set): reading status for both survives.
         replace_papers(&mut conn, 1, &[10, 11]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),

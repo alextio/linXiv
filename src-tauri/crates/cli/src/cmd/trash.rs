@@ -22,11 +22,10 @@ pub enum TrashCmd {
 
 pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
     match cmd {
-        // cmd_trash_list — the canonical TrashListing envelope (core service::trash).
+        // The canonical TrashListing envelope (core service::trash).
         TrashCmd::List => {
             output(&linxiv_core::service::trash::list_trash(&ctx.conn)?);
         }
-        // cmd_trash_restore -> _do_paper_restore
         TrashCmd::Restore { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             svc_paper::require_trashed(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
@@ -39,12 +38,11 @@ pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 project_fks,
             });
         }
-        // cmd_trash_hard_delete -> require_trashed guard then _do_paper_hard_delete
         TrashCmd::HardDelete { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             svc_paper::require_trashed(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
-            // _do_paper_hard_delete: get_paper_root None -> not found; here unreachable
-            // after the guard, but mirror the message off hard_delete's None return.
+            // get_paper_root None -> not found; unreachable after the guard,
+            // but mirror the message off hard_delete's None return.
             if svc_paper::hard_delete(&mut ctx.conn, &PaperRef::source(source_id.clone()))?
                 .is_none()
             {
@@ -57,7 +55,6 @@ pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 hard_deleted: source_id,
             });
         }
-        // cmd_trash_restore_project
         TrashCmd::RestoreProject { project_id } => {
             svc_project::require_trashed(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));
             svc_project::restore(
@@ -71,7 +68,6 @@ pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 restored_project_id: project_id,
             });
         }
-        // cmd_trash_hard_delete_project
         TrashCmd::HardDeleteProject { project_id } => {
             svc_project::require_trashed(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));
             svc_project::hard_delete(

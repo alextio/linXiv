@@ -1,13 +1,13 @@
-//! Remote Query Mode, node half (CONTEXT.md: Remote Query Mode / Member / Node
-//! Address / Provider Access): the Member List with roles, the role gate enforced
-//! BEFORE `route()`, and the `linxiv-api/1` handler on the share node's endpoint.
+//! Remote Query Mode, node half (CONTEXT.md: Remote Query Mode / Member /
+//! Provider Access): the Member List with roles, the role gate enforced BEFORE
+//! `route()`, and the `linxiv-api/1` handler on the share node's endpoint.
 //! Only the headless bin wires this up; the desktop app never serves the ALPN.
 //!
-//! The Member List governs two doors at once (a known coupling): presence on
-//! the list grants relay admission — any role, including `none` — while the
-//! role grants query rights. Non-members and role-`none` members are refused
-//! at the transport (knock logged, connection closed unanswered), so an
-//! unadmitted device cannot tell "node offline" from "not admitted".
+//! The Member List governs two doors at once (a known coupling): presence
+//! grants relay admission (any role, including `none`); the role grants query
+//! rights. Non-members and role-`none` members are refused at the transport
+//! (knock logged, nothing answered), so an unadmitted device cannot tell
+//! "node offline" from "not admitted".
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -24,12 +24,11 @@ use linxiv_p2p::{
 use crate::route::{self, ApiRequest};
 use crate::state::AppState;
 
-/// Request cap for role `read` (design: ~1 MiB); the transport answers 413
-/// past it.
+/// Request cap for role `read` (1 MiB); the transport answers 413 past it.
 pub const MAX_API_REQUEST: usize = 1024 * 1024;
 
-/// Request cap for role `read-write`: `file_b64` PDF imports run up to
-/// 100 MB, ~140 MB as base64 plus envelope headroom.
+/// Request cap for role `read-write`: `file_b64` PDF imports cap at 100 MiB,
+/// ~133 MiB as base64 plus envelope headroom.
 pub const MAX_API_REQUEST_RW: usize = 150 * 1024 * 1024;
 
 /// `LINXIV_PDF_RATE_BPS` default: ~5 MB/s per member.
@@ -44,7 +43,7 @@ pub fn pdf_rate_bps() -> u64 {
         .unwrap_or(DEFAULT_PDF_RATE_BPS)
 }
 
-// --- wire types (shared with the client half, src/remote_backend.rs) --------
+// --- wire types (shared with the app's remote_backend client half) ---------
 
 /// linxiv-api/1 response envelope: `{status, body}` on success, `{status,
 /// detail}` on error.
@@ -120,8 +119,8 @@ impl Role {
 }
 
 /// One Member List entry: an admitted device (p2p endpoint id) + its role,
-/// plus attribution — an optional display name and the journal actor ids of
-/// this person's devices, paired by the operator in the admin panel.
+/// plus attribution — an optional display name and the journal actor ids the
+/// operator paired with it in the admin panel.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Member {
     pub id: String,
@@ -132,9 +131,9 @@ pub struct Member {
     pub actors: Vec<String>,
 }
 
-/// Wire forms: `{"id": .., "role": ..}`, or a legacy bare-string entry
-/// (pre-role allowlist files), which parses as role `none` — same relay
-/// admission, no query rights.
+/// Wire forms: an object (`id` + optional `role`/`name`/`actors`), or a
+/// pre-role bare string, which parses as role `none` — same relay admission,
+/// no query rights.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum MemberEntry {
@@ -188,9 +187,8 @@ pub fn member_list_path() -> PathBuf {
 }
 
 /// Missing file => empty list (deny everyone). A present-but-unparseable file
-/// is an error so access still denies (`unwrap_or_default`) but admin writes
-/// refuse to clobber it — e.g. a botched hand-edit must not be silently
-/// replaced with an empty list.
+/// is an error so access still denies (`unwrap_or_default`) while admin writes
+/// refuse to clobber it — a botched hand-edit must not become an empty list.
 pub fn load_members() -> Result<Vec<Member>, String> {
     match std::fs::read_to_string(member_list_path()) {
         Err(_) => Ok(Vec::new()),
@@ -204,7 +202,7 @@ fn parse_members(s: &str) -> Result<Vec<Member>, String> {
 }
 
 /// Sibling tmp + rename, same atomic-write pattern as `sources/download.rs`.
-/// Always writes the `{id, role}` form — a legacy file upgrades on first save.
+/// Always writes the object form — a legacy file upgrades on first save.
 pub fn save_members(list: &[Member]) -> std::io::Result<()> {
     let path = member_list_path();
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
@@ -288,7 +286,7 @@ pub enum TransferOutcomeKind {
     Aborted,
 }
 
-/// `GET /api/admin/transfers` entry — the sender's view of one transfer.
+/// One `GET /api/admin/transfers` entry.
 #[derive(Debug, Serialize)]
 pub struct TransferEntry {
     pub seq: u64,
@@ -332,9 +330,8 @@ impl TransferLog {
 // --- protocol handler -------------------------------------------------------
 
 /// Builds the `linxiv-api/1` handler: member gate at the transport, the role
-/// gate in front of `route()`, and the PDF byte lane. `transfer_log` fires
-/// exactly once per byte-lane answer; the builder wraps it to also close the
-/// per-member rate bookkeeping.
+/// gate in front of `route()`, and the PDF byte lane. `transfer_log` is
+/// wrapped to also close the per-member rate bookkeeping.
 pub fn build_api_proto(
     state: Arc<AppState>,
     member_check: MemberCheckFn<Member>,
@@ -422,8 +419,7 @@ async fn handle(
         }
     }
     // Mutating requests journal their delta under the member's endpoint id
-    // (a valid automerge actor), so remote writes are attributed to the
-    // authenticated member — no manual actor pairing needed for them.
+    // (a valid actor), so remote writes need no manual actor pairing.
     let result = if req.method == "GET" {
         route::route(state, req).await
     } else {
@@ -454,7 +450,7 @@ async fn pdf_lane(
     rate_bps: u64,
     active: &Arc<Mutex<HashMap<String, u64>>>,
 ) -> ApiResponse {
-    // Same `?version=` contract as `pdf-path`: absent → latest; else int >= 1 or 422.
+    // Same `?version=` contract as `pdf-path`: absent → latest, else 422.
     let version = match route::parse_query(raw_query).get("version") {
         None => None,
         Some(v) => match v.parse::<i64>().ok().filter(|&n| n >= 1) {
@@ -645,7 +641,7 @@ mod proto_tests {
         transfers: Arc<Mutex<TransferLog>>,
     }
 
-    /// Serve `state` behind an injected member map (never the on-disk list).
+    /// Serve `state` behind an injected member list, never the on-disk one.
     async fn serve(state: Arc<AppState>, members: Vec<Member>) -> Node {
         let knocks: Arc<Mutex<Vec<String>>> = Default::default();
         let transfers: Arc<Mutex<TransferLog>> = Default::default();

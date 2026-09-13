@@ -37,13 +37,13 @@ export type SearchResultOut = {
   summary: string,
   authors: Array<string>,
   /**
-   * "" when the published date is the `date.min` sentinel; else ISO date.
+   * "" when published is the `0001-01-01` sentinel; else ISO date.
    */
   published: string,
   paper_url: string,
   primary_category: string,
   /**
-   * The full namespaced source_id (kept, unlike the stripped `source_id`).
+   * The `source_id` verbatim; `source_id` above is namespace-stripped.
    */
   entry_id: string,
 };
@@ -232,7 +232,7 @@ export type MergeReceipt = {
   pdfs_renamed: number,
   /**
    * Loser PDFs that filled a PDF-less winner version — renamed in, or
-   * pointed at in place when stored outside the managed dir.
+   * pointed at in place when they cannot be moved.
    */
   pdfs_adopted: number,
   /**
@@ -241,7 +241,7 @@ export type MergeReceipt = {
   pdfs_deleted: number,
   /**
    * Duplicate loser PDFs left on disk because they live outside the
-   * managed PDF dir (never deleted there).
+   * managed PDF dir.
    */
   pdfs_kept_external: number,
   /**
@@ -326,8 +326,7 @@ export type GraphAuthor = {
    */
   label: string,
   /**
-   * Papers on THIS canvas joined to this author. The hover inspector reports
-   * it; the client has no other source for a degree.
+   * Papers on THIS canvas joined to this author — the hover inspector's degree line.
    */
   paper_count: number,
 };
@@ -342,8 +341,8 @@ export type GraphTag = {
    */
   key: string,
   /**
-   * `TAG.TAG`, the spelling the Tags index and TagPage show, falling back to the
-   * paper's own casing for the reserved reading-list marker (`list_all_tags` filters it out).
+   * `TAG.TAG`, the spelling the Tags page shows; a tag `list_all_tags` omits
+   * (the reading-list marker) keeps the paper's own casing.
    */
   label: string,
   paper_count: number,
@@ -380,7 +379,7 @@ export type GraphView = {
   tags: Array<GraphTag>,
   edges: Array<GraphEdge>,
   /**
-   * Distinct `PAPER.CATEGORY` values in the library, for the Category box.
+   * Distinct `latest_papers.category`, for the Category box.
    */
   categories: Array<string>,
   projects: Array<GraphProject>,
@@ -472,7 +471,7 @@ export type SavedPdf = {
   source_fk: number,
   title: string,
   /**
-   * Always >= 1: rows whose PDF is missing on disk are skipped.
+   * The paper's latest version, from `list_pdf_papers`.
    */
   version: number,
   size_bytes: number,
@@ -617,12 +616,12 @@ export type PaperMetadata = {
   url: string | null,
   tags: Array<string> | null,
   /**
-   * Backend that produced this record (must equal that source's `source_name`).
+   * Backend that produced this record; stored as PAPER_META.PROVIDER.
    */
   source: string | null,
   /**
    * Index-aligned with `authors` (same length when present); `None` per-author
-   * where the source didn't carry one. Only crossref/openalex populate this.
+   * where the source didn't carry one. crossref/openalex + import set it.
    */
   author_orcids: Array<string | null> | null,
 };
@@ -937,7 +936,7 @@ export type FsOp = {
 export type DirEntry = {
   name: string,
   /**
-   * "directory" | "file" (the guest re-joins each basename to the parent).
+   * The guest re-joins each basename to the parent.
    */
   kind: "file" | "directory",
 };

@@ -1,5 +1,5 @@
 //! Test-only generator and drift check for the checked-in `src/types/generated.ts`
-//! (regen: `npm run types:gen`). Lives here because this crate tops the dep graph.
+//! (regen: `npm run types:gen`). Lives here: it sees every wire type.
 
 use ts_rs::{Config, TS};
 
@@ -309,7 +309,7 @@ mod tests {
             return;
         }
         // Report the first differing line, not two full files: `assert_eq!` on
-        // 150 lines of TypeScript prints an escaped blob nobody can read.
+        // the whole of generated.ts prints an unreadable escaped blob.
         let (n, checked_in, generated) = have
             .lines()
             .map(Some)

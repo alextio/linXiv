@@ -22,7 +22,7 @@ use crate::storage::queries::tag::READING_LIST_TAG;
 const DEFAULT_PROJECT_COLOR: &str = "#5b8dee";
 
 /// The one normalization every tag comparison in the graph goes through: TRIM +
-/// lowercase (TAG.TAG is UNIQUE COLLATE NOCASE; `PAPER_META.TAGS` is stored verbatim).
+/// lowercase (idx_tag_label_unique is NOCASE; `PAPER_META.TAGS` is stored verbatim).
 /// Public: the frontend must fold typed filter text the same way before comparing
 /// against [`GraphPaper::tag_keys`].
 pub fn norm_tag(raw: &str) -> String {
@@ -77,8 +77,7 @@ pub struct GraphAuthor {
     /// `AUTHOR.AUTHOR_FULL_NAME` — the canonical spelling, so it follows renames
     /// and merges that `PAPER_META.AUTHORS` does not see.
     pub label: String,
-    /// Papers on THIS canvas joined to this author. The hover inspector reports
-    /// it; the client has no other source for a degree.
+    /// Papers on THIS canvas joined to this author — the hover inspector's degree line.
     pub paper_count: usize,
 }
 
@@ -89,8 +88,8 @@ pub struct GraphTag {
     pub id: String,
     /// [`norm_tag`] of the label — the key a tag filter row matches on.
     pub key: String,
-    /// `TAG.TAG`, the spelling the Tags index and TagPage show, falling back to the
-    /// paper's own casing for the reserved reading-list marker (`list_all_tags` filters it out).
+    /// `TAG.TAG`, the spelling the Tags page shows; a tag `list_all_tags` omits
+    /// (the reading-list marker) keeps the paper's own casing.
     pub label: String,
     pub paper_count: usize,
 }
@@ -126,14 +125,14 @@ pub struct GraphView {
     pub authors: Vec<GraphAuthor>,
     pub tags: Vec<GraphTag>,
     pub edges: Vec<GraphEdge>,
-    /// Distinct `PAPER.CATEGORY` values in the library, for the Category box.
+    /// Distinct `latest_papers.category`, for the Category box.
     pub categories: Vec<String>,
     pub projects: Vec<GraphProject>,
 }
 
 impl GraphView {
-    /// Papers + authors + tags. Zero means the LIBRARY is empty, which is the
-    /// page's empty state — never "filtered down to nothing".
+    /// Papers + authors + tags (tests only). Zero means no active paper — never
+    /// "filtered down to nothing".
     pub fn node_count(&self) -> usize {
         self.papers.len() + self.authors.len() + self.tags.len()
     }
@@ -194,15 +193,15 @@ fn author_rows_sql(exclude_single_authors: bool) -> String {
 pub fn graph_view(conn: &Connection, exclude_single_authors: bool) -> Result<GraphView> {
     let rows = paper_rows(conn)?;
 
-    // Canonical tag spellings, indexed by key. `list_all_tags` walks the whole
-    // TAG table, so this answers for tags no paper carries too — the narrowing
+    // Canonical tag spellings, indexed by key. `list_all_tags` walks the TAG
+    // table, so this answers for tags no paper carries too — the narrowing
     // below is what keeps those out of the payload.
     let canonical: HashMap<String, String> = svc_tag::list_all_tags(conn)?
         .into_iter()
         .map(|l| (norm_tag(&l), l.trim().to_string()))
         .collect();
 
-    // paper SOURCE_FK -> sorted active project ids.
+    // paper SOURCE_FK -> its active project ids.
     let active = project::get_many(
         conn,
         &Projects {
@@ -224,7 +223,7 @@ pub fn graph_view(conn: &Connection, exclude_single_authors: bool) -> Result<Gra
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut papers: Vec<GraphPaper> = Vec::with_capacity(rows.len());
     // key -> (display label, paper count). BTreeMap so tag nodes come out in a
-    // stable, sorted order rather than SQLite's scan order.
+    // stable, sorted order rather than first-seen order.
     let mut tag_acc: BTreeMap<String, (String, usize)> = BTreeMap::new();
     // Author node id -> papers joined to it, counted from the edges actually
     // emitted (so it is a degree on THIS canvas, not a library-wide total).
@@ -243,7 +242,7 @@ pub fn graph_view(conn: &Connection, exclude_single_authors: bool) -> Result<Gra
         on_graph_projects.extend(projects.iter().copied());
 
         // Tags: normalize, drop blanks, dedup on the key, and resolve the
-        // display spelling — the paper's own casing is not what the canvas draws.
+        // display spelling — the TAG table's casing wins where it has one.
         let mut tags = Vec::new();
         let mut tag_keys = Vec::new();
         for raw in &row.raw_tags {
@@ -556,8 +555,8 @@ mod tests {
     #[test]
     fn tag_the_tag_table_cannot_answer_for_keeps_the_papers_spelling() {
         let conn = conn();
-        // `list_all_tags` filters the reading-list marker out, so it is
-        // the one tag on a paper that this map has no entry for.
+        // `list_all_tags` filters the reading-list marker out, so no
+        // canonical spelling comes back for it.
         seed_paper(&conn, "arxiv:1", "[]", r#"["Reading-List"]"#);
         let v = graph_view(&conn, false).unwrap();
         assert_eq!(v.tags[0].label, "Reading-List");

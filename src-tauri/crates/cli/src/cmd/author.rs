@@ -45,18 +45,18 @@ fn by_id(author_id: i64) -> Author {
 
 pub async fn run(cmd: AuthorCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
     match cmd {
-        // cmd_author_list: every author + active-paper count (min_papers=0 default).
+        // Every author + active-paper count (min_papers=0 default).
         AuthorCmd::List => {
             output(&svc_author::list_with_paper_count(&ctx.conn, 0)?);
         }
-        // cmd_author_get: the canonical AuthorWithPapers composite.
+        // The canonical AuthorWithPapers composite.
         AuthorCmd::Get { author_id } => {
             let Some(detail) = svc_author::get_with_papers(&ctx.conn, author_id)? else {
                 fail(format!("Author {author_id} not found"))
             };
             output(&detail);
         }
-        // cmd_author_update: update_fields owns the "exists" + "at least one field" guards.
+        // update_fields owns the "exists" + "at least one field" guards.
         AuthorCmd::Update {
             author_id,
             full_name,
@@ -75,7 +75,7 @@ pub async fn run(cmd: AuthorCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             .unwrap_or_else(|e| fail(e));
             output(&json!({ "updated_author_id": author_id }));
         }
-        // cmd_author_delete: svc_author::delete owns the "exists" + "still linked" guards.
+        // svc_author::delete owns the "exists" + "still linked" guards.
         AuthorCmd::Delete { author_id } => {
             svc_author::delete(&ctx.conn, &by_id(author_id)).unwrap_or_else(|e| fail(e));
             output(&json!({ "deleted_author_id": author_id }));

@@ -1,6 +1,6 @@
-//! `/api/share` routes — quarantined CRDT "shared projects", dispatched only via
-//! the `share_api` command (a second front door beside `api`). Publishing only
-//! READS `papers.db`; the CRDT docs live under the injected share directory.
+//! `/api/share` routes — quarantined CRDT "shared projects", a second front door
+//! beside `api` (`share_api` command + headless bin). Publishing only READS
+//! `papers.db`; the CRDT docs live under the injected share directory.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 /// Cap on a single network op (mint ticket / fetch); past it the request returns
-/// 504 and releases the node lock so shutdown is not blocked.
+/// 504 instead of hanging on an unreachable peer.
 pub(crate) const SHARE_NET_TIMEOUT: Duration = Duration::from_secs(30);
 
 use linxiv_core::config;
@@ -31,14 +31,14 @@ use crate::route::{parse_query, path_i64, split_segments, to_value, ApiError, Ap
 use crate::share_sync;
 use crate::state::AppState;
 
-/// Managed beside `AppState` (never a field of it). Owns the injected `ShareStore`
+/// Managed beside `AppState` (never a field of it): owns the injected `ShareStore`
 /// over the share directory and, in the packaged app, the iroh `ShareNode`.
-/// `node` is `None` in store-only tests; the network arms then return 503.
+/// `None` in store-only tests, where the network arms return 503.
 pub struct ShareState {
     store: ShareStore,
-    // `Option` so store-only tests skip the async bind; `Mutex<Arc>` so a network
-    // arm clones the `Arc` and drops the guard before its `.await`, and `shutdown`
-    // can take the node out of a shared (`tauri::State`) value.
+    // `Option`: store-only tests skip the async bind. `Mutex<Arc>`: a network arm
+    // clones the `Arc` and drops the guard before `.await`, and `shutdown` can
+    // take the node out of a shared (`tauri::State`) value.
     node: Mutex<Option<Arc<ShareNode>>>,
     // Entries persist for the process lifetime.
     write_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -94,7 +94,7 @@ impl ShareState {
         self.node().await.map(|n| n.endpoint_id())
     }
 
-    /// Acquire the write lock for a specific share. Returns a guard on the per-share-id lock.
+    /// Acquire the per-share-id write lock.
     pub(crate) async fn lock_writes(&self, share_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let mut locks = self.write_locks.lock().await;
         let arc = locks
@@ -114,8 +114,8 @@ impl ShareState {
         Ok(())
     }
 
-    /// Marks the background interval-sync loop as started. Returns `true` only
-    /// for the caller that flips it, so exactly one loop ever runs.
+    /// Flips the interval-sync-loop latch. `true` only for the caller that wins
+    /// it, so exactly one loop ever runs.
     pub fn mark_sync_started(&self) -> bool {
         self.sync_started
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -153,10 +153,10 @@ impl ShareState {
     }
 }
 
-/// Resolve relay settings + bind the startup share node — shared by the app and
-/// the headless bin. Bind failure or a required-but-missing relay degrades to a
-/// store-only state (sharing disabled) with a warning. `dek` is resolved by the
-/// caller (keychain access is sync). Returns `(state, node_bound)`.
+/// Resolve relay settings + bind the startup share node (app + headless bin).
+/// Bind failure or a required-but-missing relay warns and degrades to a
+/// store-only state (sharing disabled). `dek` comes from the caller (keychain
+/// access is sync). Returns `(state, node_bound)`.
 pub async fn startup_share_state(dek: Option<[u8; 32]>) -> std::io::Result<(ShareState, bool)> {
     let share_dir = config::data_dir().join("share");
     std::fs::create_dir_all(&share_dir)?;
@@ -202,10 +202,9 @@ impl From<ShareError> for ApiError {
 }
 
 // ── typed envelopes ──────────────────────────────────────────────────────────
-// Rendered into src/types/api.ts by this crate's ts_bindings generator;
+// The `ts_rs::TS` ones render into src/types/generated.ts (ts_bindings);
 // src/api/share.ts import-aliases them (SummaryRow → SharedSummary, …).
-// Serialize field order IS the wire key order (serde_json preserve_order) —
-// do not reorder fields.
+// Serialize field order IS the wire key order (preserve_order) — never reorder.
 
 /// One row of `GET /api/share/{projects,received}` (`SharedSummary` in src/api/share.ts).
 #[derive(Debug, Serialize, ts_rs::TS)]
@@ -421,8 +420,8 @@ async fn dispatch_inner(
         body: req.body.as_ref(),
     };
 
-    // Network arms own iroh `.await`s, so they live in the async command rather
-    // than the sync `handle` dispatcher the Phase-0 store arms share.
+    // Arms that `.await` (iroh, the write lock) live here, not in the sync
+    // `handle` dispatcher below that the Phase-0 store arms share.
     match (ctx.method, ctx.segs) {
         ("POST", ["api", "share", "project", id, "ticket"]) => {
             return ticket(state, share, id).await
@@ -581,8 +580,8 @@ pub fn list_received(state: &AppState, share: &ShareState) -> Result<Value, ApiE
 
 /// Mirrors under `e2ee/received` whose doc holds no content yet: `accept_invite`
 /// writes an empty placeholder when the host is unreachable, and an empty doc
-/// never hydrates, so the listing above drops it and the join vanishes from the
-/// UI. Surfaced as `pending` so a user can retry the sync (or leave) by hand.
+/// never hydrates, so the listing above drops it and the join vanishes. Surfaced
+/// as `pending` so the user can retry the sync (or leave) by hand.
 fn pending_received(dir: &Path, listed: &[SummaryRow]) -> Vec<SummaryRow> {
     share_sync::doc_ids(&e2ee_received_dir(dir))
         .into_iter()
@@ -605,26 +604,24 @@ fn pending_received(dir: &Path, listed: &[SummaryRow]) -> Vec<SummaryRow> {
         .collect()
 }
 
-/// `list_received` plus the reader's own capability (spec §7): each e2ee
-/// entry gets `role` ("viewer" | "editor") from a live `query_role` against
-/// this device's member id. Absent when the node is offline or on plain
-/// mirrors — the GUI treats an unknown role as editable (no regression);
-/// enforcement is server+crypto, this field is UX only.
+/// `list_received` plus the reader's own capability (spec §7): each e2ee entry
+/// gets its `role` from a live `query_role` against this device's member id.
+/// Absent when the node is offline or on plain mirrors — the GUI treats an
+/// unknown role as editable; enforcement is server+crypto, this field is UX only.
 async fn list_received_with_role(state: &AppState, share: &ShareState) -> Result<Value, ApiError> {
     let mut rows = received_rows(state, share)?;
     if let Some(node) = share.node().await {
         if let Ok(me) = node.self_member_id() {
-            // Pending mirrors are skipped: there is no content for a role to
-            // gate, and one unanswered query per pending share would stall the
-            // whole listing.
+            // Pending mirrors are skipped: no content for a role to gate, and
+            // one unanswered query each would stall the whole listing.
             let targets: Vec<usize> = rows
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.e2ee == Some(true) && r.pending != Some(true))
                 .map(|(i, _)| i)
                 .collect();
-            // Queries run concurrently: each keeps its own timeout budget, but
-            // a slow relay no longer stalls the listing by (entries × budget).
+            // Concurrent so a slow relay can't stall the listing by
+            // (entries × budget); each query keeps its own timeout budget.
             let roles = futures_util::future::join_all(
                 targets
                     .iter()
@@ -715,18 +712,17 @@ pub(crate) struct MemberEntry {
     pub invited_at: String,
     #[serde(default)]
     pub revoked: bool,
-    /// The last invite string minted for this member, kept so the host can
-    /// re-send it without asking for the member code again. Absent on
-    /// pre-upgrade sidecars, and cleared whenever the grant changes (revoke /
-    /// role change) since the string that survives is then stale.
+    /// The last invite string minted for this member, so the host can re-send it
+    /// without asking for the member code again. Absent on pre-upgrade sidecars;
+    /// cleared when the grant changes (revoke / role change) — it goes stale.
     // ponytail: a bearer capability at rest in the share dir, beside the doc
     // and key store it grants against; upgrade: store it in the key store.
     #[serde(default)]
     pub invite: Option<String>,
 }
 
-/// Non-revoked, non-hoster sidecar rows — "how many devices this share is
-/// currently granted to", for the hoster sync line.
+/// Non-revoked, non-hoster sidecar rows — devices this share is granted to,
+/// for the hoster sync line.
 pub(crate) fn live_member_count(share_dir: &Path, share_id: &str) -> usize {
     load_members(share_dir, share_id)
         .iter()
@@ -785,8 +781,7 @@ fn restore_unpublished(dir: &Path, share_id: &str) {
 
 /// `POST /api/share/{id}/unpublish` — park the published doc as
 /// `<id>.automerge.unpublished` and delete its settings sidecar. An e2ee doc
-/// additionally revokes every active member first, which stops the beelay node
-/// serving it.
+/// revokes every active member first, which stops the beelay node serving it.
 async fn unpublish(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     if !valid_share_id(id) {
         return Err(ApiError::new(404, format!("share {id:?} not found")));
@@ -854,10 +849,9 @@ async fn unpublish(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     })
 }
 
-/// `POST /api/share/received/{id}/leave` — delete the mirror + ticket +
-/// settings, and drop the beelay registration behind an e2ee mirror so a later
-/// rejoin adopts from scratch. `forgotten: false` means the p2p node was down,
-/// so the registration survived: rejoining would reuse the old document.
+/// `POST /api/share/received/{id}/leave` — delete the mirror + ticket + settings,
+/// and drop the beelay registration behind an e2ee mirror so a later rejoin adopts
+/// from scratch. `forgotten: false` = node down, so a rejoin reuses the old doc.
 async fn leave(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     if !valid_share_id(id) {
         return Err(ApiError::new(404, format!("share {id:?} not found")));
@@ -972,8 +966,8 @@ async fn publish(state: &AppState, share: &ShareState, id: &str) -> Result<Value
 }
 
 /// Snapshot the project, refuse ids owned by a received or e2ee share, and save
-/// the plain doc under the share's write lock — the shared half of `publish` and
-/// `ticket`. The returned lock guard is held until the caller drops it.
+/// the plain doc under the returned write-lock guard — the shared half of
+/// `publish` and `ticket`.
 async fn publish_plain(
     state: &AppState,
     share: &ShareState,
@@ -1002,7 +996,7 @@ async fn publish_plain(
     Ok((sp, doc, lock))
 }
 
-// Clone the node Arc out from under the lock, then release it: the 30s network
+// Clone the node Arc out from under the lock, then release it: the network
 // op must not hold the guard `shutdown()` also needs.
 async fn live_node(share: &ShareState) -> Result<Arc<ShareNode>, ApiError> {
     share
@@ -1011,10 +1005,9 @@ async fn live_node(share: &ShareState) -> Result<Arc<ShareNode>, ApiError> {
         .ok_or_else(|| ApiError::new(503, "share transport not initialized"))
 }
 
-/// `POST /api/share/project/{id}/ticket` — ensure the project is published
-/// (Phase-0 publish, read-only over the canonical connection), then mint a
-/// pasteable ticket carrying the sender's address + share id; access is gated
-/// by whether that id is currently published, not a per-recipient secret.
+/// `POST /api/share/project/{id}/ticket` — publish the project if needed, then
+/// mint a pasteable ticket carrying the sender's address + share id. Access is
+/// gated by whether that id is currently published, not a per-recipient secret.
 async fn ticket(state: &AppState, share: &ShareState, id: &str) -> Result<Value, ApiError> {
     // `_` (not `_doc`): drop the saved doc now rather than holding it across the
     // network call — `ticket` re-reads it from disk anyway.
@@ -1103,9 +1096,8 @@ async fn join_invite(
         ));
     }
     let accepted = e2ee_timeout(node.accept_invite(raw), "share join").await?;
-    // Host asleep: the invite is saved and the share syncs on a later pass, so
-    // this is a success with nothing to summarize yet — no mirror to hydrate
-    // (it is an empty placeholder) and no counts to report.
+    // Host asleep: the invite is saved and syncs on a later pass — a success with
+    // nothing to summarize yet (the mirror is an empty placeholder).
     if accepted.pending {
         return to_value(&JoinPending {
             share_id: accepted.share_id,
@@ -1139,13 +1131,12 @@ async fn join_invite(
     })
 }
 
-/// Map a `fetch` failure to a status: a refused/unknown capability is a 404 (the
-/// peer answered, the doc just isn't served to us); any other failure during the
-/// live dial is an upstream/transport fault, surfaced as 502 — never a blanket 500.
+/// Map a `fetch` failure to a status: refused/unknown capability → 404 (the peer
+/// answered, the doc just isn't served to us); typed capability conflicts keep
+/// their 409; anything else in the live dial is a transport fault → 502, never 500.
 fn fetch_error(e: ShareError) -> ApiError {
     match e {
         ShareError::NotFound(_) => ApiError::new(404, e.to_string()),
-        // Typed capability conflicts keep their 409 through the live-dial path.
         ShareError::RoleConflict | ShareError::LastReader => ApiError::new(409, e.to_string()),
         _ => ApiError::new(502, e.to_string()),
     }
@@ -1193,9 +1184,9 @@ async fn reconnect_relay(
                 _ => None,
             };
             // Keychain access is sync (the Linux backend block_ons its own
-            // runtime and panics on a tokio worker thread) — resolve the DEK
-            // off the async worker. Join failure degrades to no DEK, same as
-            // an unavailable keychain.
+            // runtime and panics on a tokio worker thread), so the DEK resolves
+            // off the worker. Join failure degrades to no DEK, as an
+            // unavailable keychain would.
             let dek = tokio::task::spawn_blocking(p2p_config::p2p_dek)
                 .await
                 .unwrap_or(None);
@@ -1234,7 +1225,7 @@ async fn publish_secure(state: &AppState, share: &ShareState, id: &str) -> Resul
     let _lock = share.lock_writes(&sp.share_id).await;
     restore_unpublished(&e2ee_dir(&dir), &sp.share_id);
     if doc_path(&e2ee_dir(&dir), &sp.share_id).is_file() {
-        // Republish: doc still on disk, so populate reads its tickets before publish overwrites it.
+        // Republish: populate reads the doc's tickets before publish overwrites it.
         share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, false).await?;
         e2ee_timeout(node.publish_secure(&sp), "secure publish").await?;
     } else {
@@ -1308,7 +1299,7 @@ async fn invite(
         .map(String::from);
     let node = live_node(share).await?;
     let _lock = share.lock_writes(id).await;
-    // A concurrent unpublish may have parked the doc between the entry check and the lock.
+    // A concurrent unpublish may have parked the doc since the entry check above.
     ensure_e2ee_hosted(&dir, id)?;
     // A typed ShareError::RoleConflict surfaces as 409 via fetch_error.
     let (member, invite) = e2ee_timeout(node.invite_member(id, code, role), "invite").await?;
@@ -1317,10 +1308,9 @@ async fn invite(
     let hex = member_id_hex(&member);
     let mut list = load_members(&dir, id);
     let was_active = list.iter().any(|m| m.member_id_hex == hex && !m.revoked);
-    // Blobs stored before this grant are keyed to a pre-grant epoch: re-store
-    // them under the post-grant epoch and republish. The grant already
-    // happened, so a re-key failure must not abort the invite — the interval
-    // hoster leg re-runs population on its next pass.
+    // Blobs stored before this grant are keyed to a pre-grant epoch: re-store and
+    // republish under the post-grant one. The grant already happened, so a re-key
+    // failure must not abort the invite — the interval hoster leg retries.
     let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
     if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
         match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
@@ -1359,19 +1349,17 @@ async fn invite(
 /// `GET /api/share/{id}/members` — the sidecar list, with a live `query_role`
 /// truth-check per invited entry (no role after having been invited = revoked).
 ///
-/// Co-admin (spec §1.1): keyhive supports granting a member Admin, but
-/// management ops that force PCS rotation (revoke, downgrade) must run where
-/// the doc is hosted — so membership management stays Hoster-only in the app
-/// and co-admin is a supported-but-deferred capability, not built UI. Roles
-/// offered here and on the role route are viewer/editor only.
+/// Co-admin (spec §1.1): keyhive can grant Admin, but the ops that force PCS
+/// rotation (revoke, downgrade) must run where the doc is hosted — so management
+/// stays Hoster-only and co-admin is deferred, not built UI. Roles offered here
+/// and on the role route are viewer/editor only.
 async fn members(share: &ShareState, id: &str) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
     ensure_e2ee_hosted(&dir, id)?;
     let node = share.node().await;
     let members = load_members(&dir, id);
-    // One concurrent truth-check per live invited entry; each query keeps its
-    // own timeout budget instead of serially stacking (entries × budget).
-    // `Some(revoked_now)` = query answered; `None` = unqueryable, keep sidecar.
+    // One concurrent truth-check per live invited entry, so budgets don't stack
+    // (entries × budget). `Some(revoked_now)` = answered; `None` = keep sidecar.
     let checks = futures_util::future::join_all(members.iter().map(|m| async {
         if m.revoked || m.role == "hoster" {
             return None;
@@ -1408,9 +1396,9 @@ async fn members(share: &ShareState, id: &str) -> Result<Value, ApiError> {
 
 /// `POST /api/share/{id}/member/{mid}/role {role: "editor"|"viewer"}` — change
 /// an invited member's role on a hoster-owned e2ee share. The capability layer
-/// revokes + regrants (a downgrade rotates the project key), so stored PDF
-/// blobs are re-keyed + republished afterwards, then the sidecar entry updates.
-/// Admin/relay targets are refused: co-admin is app-deferred (see `members`).
+/// revokes + regrants (a downgrade rotates the project key), so stored PDF blobs
+/// re-key + republish afterwards, then the sidecar entry updates. Anything but
+/// viewer/editor is refused: co-admin is app-deferred (see `members`).
 async fn set_member_role(
     state: &AppState,
     share: &ShareState,
@@ -1448,11 +1436,10 @@ async fn set_member_role(
         return Err(ApiError::new(409, "cannot change your own role as host"));
     }
     let _lock = share.lock_writes(id).await;
-    // A concurrent unpublish may have parked the doc between the entry check and the lock.
+    // A concurrent unpublish may have parked the doc since the entry check above.
     ensure_e2ee_hosted(&dir, id)?;
-    // Re-check under the lock: a concurrent revoke may have landed after the
-    // entry check above — set_role on a member with no live delegation is a
-    // fresh grant in the capability layer, silently re-admitting them.
+    // Re-check under the lock: after a concurrent revoke, set_role on a member
+    // with no live delegation is a fresh grant, silently re-admitting them.
     if !load_members(&dir, id)
         .iter()
         .any(|m| m.member_id_hex == canon_hex && !m.revoked)
@@ -1461,10 +1448,9 @@ async fn set_member_role(
     }
     // ShareError::LastReader surfaces as 409 via fetch_error.
     e2ee_timeout(node.set_role(id, member, role), "role change").await?;
-    // A downgrade rotated the project key: blobs stored under the old epoch
-    // must re-key + republish. The role change already happened, so a re-key
-    // failure must not abort the request — the interval hoster leg re-runs
-    // population on its next pass (same contract as invite).
+    // A downgrade rotated the project key, so old-epoch blobs must re-key +
+    // republish. The role change already happened, so a re-key failure must not
+    // abort the request — the interval hoster leg retries (as in `invite`).
     let mut sp = linxiv_share::load(&e2ee_dir(&dir), id).map_err(fetch_error)?;
     if sp.papers.iter().any(|p| p.pdf_blob.is_some()) {
         match share_sync::populate_pdf_blobs(state, &node, &dir, &mut sp, true).await {
@@ -1529,9 +1515,9 @@ async fn revoke_member(
 /// under the current epoch, then republish it (and re-key its PDF blobs) so
 /// every current member can read everything.
 ///
-/// Invites re-seal on their own; this repairs shares whose members were invited
-/// after the content was already sealed, which leaves them fetching commits
-/// they hold no key for (keyhive #136) with no way out but this.
+/// Invites re-seal on their own; this repairs shares sealed before a member was
+/// invited, which leaves them fetching commits they hold no key for
+/// (keyhive #136) with no way out but this.
 async fn rekey(state: &AppState, share: &ShareState, id: &str) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
     ensure_e2ee_hosted(&dir, id)?;
@@ -1559,11 +1545,11 @@ async fn rekey(state: &AppState, share: &ShareState, id: &str) -> Result<Value, 
     })
 }
 
-/// `POST /api/share/{id}/member/{mid}/remove` — revoke, then drop the sidecar
-/// row entirely, so a re-invite of the same device starts from a clean slate
-/// (a revoked row keeps its stale role and dead invite string around).
-/// Revoking first is what actually withdraws the capability; the row is
-/// bookkeeping. Already-revoked members skip straight to the row delete.
+/// `POST /api/share/{id}/member/{mid}/remove` — revoke, then drop the sidecar row
+/// entirely, so a re-invite of the same device starts clean (a revoked row keeps
+/// its stale role and dead invite string). Revoking is what withdraws the
+/// capability; the row is bookkeeping. Already-revoked members skip to the row
+/// delete.
 async fn remove_member(share: &ShareState, id: &str, mid: &str) -> Result<Value, ApiError> {
     let dir = share.share_dir().to_path_buf();
     ensure_e2ee_hosted(&dir, id)?;
@@ -1704,8 +1690,8 @@ mod tests {
     };
     use linxiv_core::storage;
 
-    // Seed a canonical in-memory DB via the real service WRITE APIs, then hand the
-    // connection to AppState. Returns (AppState, project_id).
+    // Seed a canonical in-memory DB via the real service WRITE APIs. Returns
+    // (AppState, project_id).
     fn seeded_state() -> (AppState, i64) {
         let mut conn = storage::open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
@@ -1881,9 +1867,9 @@ mod tests {
         assert_eq!(entries[0]["synced_at"], Value::Null);
     }
 
-    // Needs one bound endpoint to resolve its own loopback addr; relays/discovery
-    // are off (bind_offline), so it never contacts an external host — gated like
-    // the crate's network tests (multi-thread runtime, no n0 relay).
+    // Needs one bound endpoint for its own loopback addr; relays/discovery are off
+    // (bind_offline), so it never contacts an external host. Gated like the
+    // crate's network tests: multi-thread runtime, no n0 relay.
     #[tokio::test(flavor = "multi_thread")]
     async fn ticket_route_mints_parseable_ticket() {
         let (state, pid) = seeded_state();
@@ -2162,7 +2148,7 @@ mod tests {
         assert_eq!(err.status, 422);
     }
 
-    // Route-level revocation: unpublish deletes the doc file, so a held ticket's
+    // Route-level revocation: unpublish parks the doc file, so a held ticket's
     // fetch is refused (existence-based access check) — offline loopback only.
     #[tokio::test(flavor = "multi_thread")]
     async fn unpublish_then_fetch_is_not_found() {

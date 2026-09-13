@@ -2,11 +2,9 @@
 //!
 //! Thin delegation over `storage::queries::reading_list`. Status is stored
 //! sparsely: the default `Unread` is the absence of a row, so setting a paper
-//! back to `Unread` deletes it. DB-touching fns take `conn: &Connection` first.
-//!
-//! `set` rejects a PROJECT_FK that is not a reading list (no reserved
-//! `reading-list` tag — see `is_reading_list_project` for the source-of-truth
-//! note); a missing PROJECT_FK still fails via the foreign key constraint.
+//! back to `Unread` deletes it. `set` rejects a PROJECT_FK with no reserved
+//! `reading-list` tag (see `is_reading_list_project`); an unknown one instead
+//! trips PAPER_TO_READING's composite FK, or no-ops if the status is `Unread`.
 
 use rusqlite::Connection;
 
@@ -37,21 +35,19 @@ pub fn set(
 // ── Global-per-paper view (the wire surface) ─────────────────────────────────
 //
 // The two keying models meet here. The frontend shows ONE status per paper —
-// the same pill in every list a paper appears in — while the table keys rows
-// per (PROJECT_FK, SOURCE_FK), and its composite FK means a row can only exist
+// the same pill in every list it appears in — while the table keys rows per
+// (PROJECT_FK, SOURCE_FK), and its composite FK means a row can only exist
 // where a membership row does. Resolution: `set_for_paper` fans one write out
-// to every reading list the paper belongs to, and `statuses` aggregates back
-// to one entry per paper (latest write wins where lists disagree, e.g. a paper
-// added to a second list after being marked). This preserves the shipped UX
-// (a status set in one list shows in all of them) without loosening the FK.
+// to every non-trashed reading list the paper is on, and `statuses` aggregates
+// back to one entry per paper — latest write wins where lists disagree, as a
+// restored list keeps the row a fan-out skipped while it was trashed.
 
-/// One status per paper across all reading lists, keyed by SOURCE_ID. Sparse:
-/// `Unread` papers are absent.
+/// One status per paper across non-trashed reading lists, keyed by SOURCE_ID.
 pub fn statuses(conn: &Connection) -> Result<Vec<(String, ReadingStatus)>> {
     q::statuses_by_source_id(conn)
 }
 
-/// `GET /api/reading-status` envelope (route/reading_status.rs) — a sparse `SOURCE_ID → status` map: unread papers are absent.
+/// `GET /api/reading-status` envelope — a sparse `SOURCE_ID → status` map (unread papers absent).
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct ReadingStatusesResponse {
     #[ts(type = "Record<string, \"reading\" | \"read\">")]
@@ -78,8 +74,8 @@ pub struct ReadingStatusReceipt {
 }
 
 /// Set `source_id`'s status in every non-trashed reading list it belongs to,
-/// atomically. Returns the number of lists written — 0 (a no-op, not an error)
-/// when the paper is on no reading list. `PaperNotFound` for an unknown id.
+/// in one transaction. Returns the number of lists written — 0 when there are
+/// none, a no-op rather than an error. `PaperNotFound` for an unknown id.
 pub fn set_for_paper(
     conn: &mut Connection,
     source_id: &str,

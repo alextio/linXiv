@@ -1,7 +1,7 @@
 //! Merge one paper root into another — the DB half of the paper/PDF dedupe.
 //! [`merge_plan`] classifies read-only; the service renames PDFs; [`merge_paper_roots`]
 //! is the one transaction re-pointing every dependent row and deleting the loser.
-//! The winner's metadata is canonical — never field-merged.
+//! Winner metadata is canonical; tags union, PDFs adopt.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -51,8 +51,8 @@ pub struct MergePlan {
     pub loser_snapshot: Vec<(i64, Option<String>)>,
 }
 
-/// Row counts of what the merge transaction actually moved — the DB half of
-/// the receipt (the service adds the file-op counts).
+/// What the merge transaction moved — the DB half of the receipt (the
+/// service adds the file-op counts).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MergeStats {
     pub notes_moved: usize,
@@ -65,7 +65,7 @@ pub struct MergeStats {
     pub tags_added: Vec<String>,
 }
 
-/// A root's (fk, id, status), or a typed miss.
+/// A root's (id, status), or a typed miss.
 fn require_root(conn: &Connection, source_fk: i64) -> Result<(String, String)> {
     conn.query_row(
         "SELECT SOURCE_ID, STATUS FROM PAPER_ROOTS WHERE SOURCE_FK = ?",
@@ -76,8 +76,8 @@ fn require_root(conn: &Connection, source_fk: i64) -> Result<(String, String)> {
     .ok_or_else(|| CoreError::PaperNotFound(source_fk.to_string()))
 }
 
-/// Non-empty stored PDF path for a version, if any. Treats NULL and `''` alike:
-/// both mean "no PDF" everywhere else in the schema.
+/// Non-empty stored PDF path for a version, if any — NULL and `''` both
+/// count as "no PDF".
 fn stored_pdf(path: Option<String>) -> Option<String> {
     path.filter(|p| !p.is_empty())
 }
@@ -117,8 +117,8 @@ fn version_snapshot(conn: &Connection, source_fk: i64) -> Result<Vec<(i64, Optio
 
 /// Classify every loser version against the winner's version set. Read-only.
 /// Guards: both roots must exist, be `active`, and be distinct (a trashed root
-/// must be restored first). `pdf_exists` is an injected file check: "has a PDF"
-/// is judged by a real file, so a ghost PDF_PATH loses to a real loser file.
+/// must be restored first). `pdf_exists` tests the WINNER's stored path only:
+/// a ghost winner pointer loses to the loser's real file.
 pub fn merge_plan(
     conn: &Connection,
     winner_fk: i64,
@@ -142,8 +142,8 @@ pub fn merge_plan(
 
     ensure_loser_not_shared(conn, loser_fk, &loser_id)?;
 
-    // (version -> pdf_path) for both roots; classifies collisions and is the
-    // drift baseline the transaction re-checks.
+    // Both roots' version rows: classifies collisions and is the drift
+    // baseline the transaction re-checks.
     let winner_versions = version_snapshot(conn, winner_fk)?;
     let loser_versions = version_snapshot(conn, loser_fk)?;
 
@@ -194,8 +194,8 @@ pub fn merge_plan(
 /// win); (4) memberships — overlap deleted, disjoint re-keyed child-first;
 /// (5) transplants re-keyed with PDF columns from the rename outcome;
 /// (6) adoptions take the renamed file; (7) tags unioned across surviving
-/// versions then relationally re-synced; (8) FTS loser dropped, winner rebuilt;
-/// (9) loser root deleted, collapsing rows by cascade.
+/// versions then relationally re-synced; (8) loser FTS row + root dropped
+/// (cascade collapses the rest); (9) winner FTS rebuilt.
 pub fn merge_paper_roots(
     conn: &mut Connection,
     plan: &MergePlan,
@@ -305,9 +305,9 @@ pub fn merge_paper_roots(
                 None => Ok(Vec::new()),
             }
         };
-        // Case-insensitive dedup: TAG.TAG is COLLATE NOCASE, so "ML" and "ml"
-        // resolve to one TAG_FK — treating them as distinct would write
-        // duplicate PAPER_TO_TAG rows for the same logical tag.
+        // Case-insensitive dedup: idx_tag_label_unique is NOCASE, so "ML"
+        // and "ml" are one TAG_FK — treating them as distinct would write
+        // duplicate PAPER_TO_TAG rows for one logical tag.
         let mut merged_tags = read_tags(w)?;
         for t in read_tags(l)? {
             if !merged_tags.iter().any(|m| m.eq_ignore_ascii_case(&t)) {
@@ -686,8 +686,8 @@ mod tests {
 
     // ── the transaction ─────────────────────────────────────────────────────
 
-    /// One fully-loaded fixture: overlapping + disjoint projects, every reading
-    /// status, pinned + unpinned notes, annotations, tags, transplanted full text.
+    /// Two roots: winner v1 (with PDF), loser v1 (collapses) + v2
+    /// (transplants), overlapping tags. Tests add their own children.
     fn loaded_fixture(conn: &Connection) -> (i64, i64) {
         let w = root(conn, "arxiv:W");
         let l = root(conn, "local:L");
@@ -1114,7 +1114,7 @@ mod tests {
         assert_eq!((path, has), (None, false), "ghost pointer must be cleared");
     }
 
-    /// "ML" and "ml" are one tag (TAG is COLLATE NOCASE): the union must not
+    /// "ML" and "ml" are one tag (NOCASE unique index): the union must not
     /// produce a case-duplicate JSON entry or a second PAPER_TO_TAG row.
     #[test]
     fn merge_tag_union_is_case_insensitive() {
@@ -1150,8 +1150,8 @@ mod tests {
         );
     }
 
-    /// A PDF attached to either root between plan and commit changes the
-    /// snapshot the classification relied on — the merge must refuse.
+    /// Any PDF_PATH change between plan and commit invalidates the
+    /// classification's snapshot — the merge must refuse.
     #[test]
     fn merge_refuses_when_a_pdf_was_attached_after_the_plan() {
         let mut conn = db();

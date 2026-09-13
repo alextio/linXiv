@@ -72,8 +72,8 @@ fn doc(state: &AppState, id: &str) -> Result<Value, ApiError> {
     serde_json::to_value(&doc).map_err(|e| ApiError::new(500, e.to_string()))
 }
 
-/// `POST /api/editor/vault/{note_id}/fs` — 404 if the note is not an editor
-/// project; then forward one FsOp. NotFound → 404, other FS-op errors → 400.
+/// `POST /api/editor/vault/{note_id}/fs` — parse the FsOp (422), 404 if the
+/// note is not an editor project, then run it. NotFound → 404, else 400.
 fn vault_fs(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let note_id = path_i64(id)?;
     let op: FsOp = ctx.parse_body()?;

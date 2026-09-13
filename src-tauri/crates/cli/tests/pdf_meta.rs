@@ -17,7 +17,7 @@ fn pdf_meta_missing_path_nonzero_exit() {
 fn pdf_meta_garbage_file_ok() {
     let bin = env!("CARGO_BIN_EXE_linxiv-cli");
 
-    // Create a small garbage file in /tmp with PID to avoid conflicts.
+    // Garbage file in the temp dir, PID-suffixed to avoid conflicts.
     let temp_file =
         std::env::temp_dir().join(format!("linxiv_test_garbage_{}.bin", std::process::id()));
     std::fs::write(&temp_file, b"not a pdf").expect("failed to write temp file");

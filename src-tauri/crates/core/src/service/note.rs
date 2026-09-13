@@ -13,8 +13,8 @@ pub struct Note {
 }
 
 /// Multi-note filter. Valid combos: `source_fk` (+ optional `project_fk`/
-/// `all_projects`), `paper_id` alone, or `project_fk` alone. Priority order
-/// (source_fk > paper_id > project_fk) is load-bearing.
+/// `all_projects`), `paper_id` alone, or `project_fk` alone. With both
+/// source_fk and project_fk set, source_fk picks the query.
 #[derive(Debug, Clone, Default)]
 pub struct Notes {
     pub source_fk: Option<i64>,
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].title, "pinned");
 
-        // source_fk takes priority over paper_id — but the combo is rejected.
+        // source_fk + paper_id is rejected, not prioritized.
         let err = get_many(
             &conn,
             &Notes {

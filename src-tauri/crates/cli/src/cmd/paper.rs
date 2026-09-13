@@ -97,14 +97,14 @@ fn paper(source_id: &str) -> svc_paper::PaperRef {
 
 pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
     match cmd {
-        // cmd_paper_get: resolve-or-exit, then dump the details dict.
+        // Resolve-or-exit, then dump the details.
         PaperCmd::Get { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             let details = resolve_paper_or_exit(ctx, &source_id);
             output(&details);
         }
 
-        // cmd_paper_delete: ensure it exists, soft-delete, report the id.
+        // Ensure it exists, soft-delete, report the id.
         PaperCmd::Delete { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             resolve_paper_or_exit(ctx, &source_id);
@@ -112,7 +112,7 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             output(&json!({ "deleted": source_id }));
         }
 
-        // cmd_paper_versions: all stored versions, or not-found.
+        // All stored versions, or not-found.
         PaperCmd::Versions { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             match svc_paper::get_all(&ctx.conn, &paper(&source_id))? {
@@ -123,7 +123,7 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             }
         }
 
-        // cmd_paper_repair: overwrite metadata in-place on the existing root.
+        // Overwrite metadata in-place on the existing root.
         PaperCmd::Repair {
             source_id,
             title,
@@ -165,7 +165,7 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             output(&resolve_paper_or_exit(ctx, &source_id));
         }
 
-        // cmd_paper_restore: only valid from trash; returns pdf path + project links.
+        // Only valid from trash; returns pdf path + project links.
         PaperCmd::Restore { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             svc_paper::require_trashed(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
@@ -178,7 +178,7 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             });
         }
 
-        // cmd_paper_hard_delete: permanently remove an existing paper.
+        // Permanently remove an existing paper.
         PaperCmd::HardDelete { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             svc_paper::resolve_source_fk(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
@@ -189,13 +189,13 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             });
         }
 
-        // cmd_paper_search: `svc_paper.search_papers` — the shared FTS + note-content
+        // `svc_paper::search_library` — the shared FTS + note
         // merge, so CLI, route and MCP return the same set.
         PaperCmd::Search { query, limit } => {
             output(&svc_paper::search_library(&ctx.conn, &query, limit)?);
         }
 
-        // cmd_paper_remove_from_all: drop the paper from every project it's in.
+        // Drop the paper from every project it's in.
         PaperCmd::RemoveFromAllProjects { source_id } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
             match svc_project::remove_paper_from_all_projects_by_id(&mut ctx.conn, &source_id)? {

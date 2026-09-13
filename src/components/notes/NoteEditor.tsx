@@ -36,9 +36,8 @@ export function NoteEditor({
   const isEditing = !!initialNote;
   const [title, setTitle] = useState(initialNote?.title ?? "");
   const [content, setContent] = useState(initialNote?.content ?? "");
-  // Scope is chosen at creation time only. The PATCH endpoint updates title and
-  // content but never reassigns PROJECT_FK, so when editing we render the
-  // existing scope read-only rather than offering a picker that can't take effect.
+  // Scope is chosen at creation time only: PATCH updates title and content but
+  // never reassigns PROJECT_FK, so when editing the existing scope is read-only.
   const [projectId, setProjectId] = useState<number | null>(
     initialNote ? initialNote.project_id : defaultProjectId,
   );
@@ -92,10 +91,8 @@ export function NoteEditor({
     }
   }
 
-  // Read-only scope when editing, or when the paper is confirmed (not still
-  // loading) to belong to no projects — global is then the only possible scope.
-  // While projects are loading we keep the picker shown (disabled) so the
-  // control type doesn't flip from a badge to a select once they arrive.
+  // Read-only when editing, or once the paper is confirmed (not still loading)
+  // to belong to no projects — global is then the only possible scope.
   const scopeReadOnly = isEditing || (!projectsLoading && projects.length === 0);
 
   const canSave = !saving && (!!title.trim() || !!content.trim());

@@ -38,7 +38,7 @@ export interface UiPersisted {
   hideSingleAuthors: boolean;
 }
 
-/** ui store, v1 -> v7. */
+/** ui store, v0 -> v7. */
 export function migrateUi(persisted: unknown, fromVersion: number): Partial<UiPersisted> {
   const state = { ...(persisted as Partial<UiPersisted>) };
   if (fromVersion < 1) {

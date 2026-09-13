@@ -239,7 +239,7 @@ pub fn parse_atom(xml: &[u8]) -> Result<Vec<PaperMetadata>> {
 }
 
 // ---------------------------------------------------------------------------
-// Network fetch (compiles against the http stub; integration-tested later)
+// Network fetch
 // ---------------------------------------------------------------------------
 
 const QUERY_URL: &str = "http://export.arxiv.org/api/query";
@@ -297,8 +297,8 @@ pub async fn fetch_by_id(source_id: &str, data_dir: &Path) -> Result<PaperMetada
         .ok_or_else(|| CoreError::ArxivNotFound(format!("Paper '{source_id}' not found on arXiv.")))
 }
 
-/// id_list for a batch query: strip namespaces, drop empties, join with commas,
-/// cap at `MAX_VERSION_CHECK_BATCH`. `None` when nothing survives.
+/// id_list for a batch query: cap at `MAX_VERSION_CHECK_BATCH`, strip namespaces,
+/// drop empties, join with commas. `None` when none survive.
 fn prepare_id_list(source_ids: &[String]) -> Option<(String, usize)> {
     let bare: Vec<String> = source_ids
         .iter()
@@ -330,7 +330,7 @@ pub async fn fetch_by_ids(source_ids: &[String], data_dir: &Path) -> Result<Vec<
 }
 
 // ---------------------------------------------------------------------------
-// Tests — parser against a representative recorded arXiv Atom feed.
+// Tests — parser + helpers against recorded arXiv Atom feeds.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

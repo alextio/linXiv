@@ -115,8 +115,7 @@ function UpdateMessage({
   installing: boolean;
   installError: string | null;
 }) {
-  // A result carrying an error compared nothing; falling through would report
-  // "You're on the latest version" for a check that never completed.
+  // A result carrying an error compared nothing, so show no verdict.
   if (result.error) return null;
   if (result.hasUpdate && result.latest) {
     return (
@@ -318,9 +317,8 @@ export function AboutSection() {
         {(checking || result || checkError) && (
           <SettingRow label="Update status">
             {checking ? (
-              // Shown while a check is in flight so arriving from the banner's
-              // Install link never lands on an empty row, and so a re-check
-              // doesn't leave the previous verdict on screen.
+              // The row renders whenever `checking`, and a re-check must not
+              // leave the previous verdict on screen.
               <span className="flex items-center gap-2 text-sm text-muted">
                 <Spinner size={14} /> Checking…
               </span>

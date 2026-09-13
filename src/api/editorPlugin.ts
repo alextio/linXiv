@@ -1,7 +1,6 @@
-// Typed JS API for tauri-plugin-texbrain (EDITOR_PLUGIN_PLAN.md §2.7).
-// Inlined from tauri-plugin-texbrain's guest-js (moved to tex-brain-tauri repo).
-// The host imports these from src/api/editorPlugin.ts (Phase 4) — command and
-// model shapes are LOCKED (§2.5); errors reject as PluginError { kind, message }.
+// Typed JS API for tauri-plugin-texbrain, inlined from its guest-js (the plugin
+// lives in linxiv-dev/tex-brain-linxiv-plugin). Command and model shapes are
+// LOCKED; errors reject as PluginError { kind, message }.
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -44,11 +43,9 @@ export async function checkUpdates(): Promise<UpdateCheck> {
   return await invoke('plugin:texbrain|check_updates')
 }
 
-/**
- * Download + verify + promote both artifacts (also the update path — ADR 0017
- * non-destructive). Streams `texbrain://install-progress` events while running;
- * resolves to the post-install status.
- */
+/** Download + verify + promote both artifacts; also the update path (ADR 0017,
+ *  non-destructive). Streams `texbrain://install-progress`; resolves to the
+ *  post-install status. */
 export async function install(): Promise<PluginStatus> {
   return await invoke('plugin:texbrain|install')
 }
@@ -67,19 +64,16 @@ export async function onInstallProgress(
   )
 }
 
-/**
- * Native directory picker for the embedded editor's "Open Folder" (ADR 0018).
- * Shows the native GNOME/macOS/Windows dialog and extends the fs plugin's
- * scope recursively for the picked folder. Returns the absolute path, or null
- * if the user cancelled.
- */
+/** Native directory picker for the editor's "Open Folder" (ADR 0020). Extends
+ *  the fs plugin's scope recursively over the picked folder; resolves to its
+ *  absolute path, or null if cancelled. */
 export async function pickFolder(): Promise<string | null> {
   return await invoke('plugin:texbrain|pick_folder')
 }
 
-/** Bridge protocol version(s) this host supports; drives EditorPage's non-fatal
- *  warning. Must match src/install.rs::SUPPORTED_BRIDGE_PROTOCOLS — the Rust
- *  side is the compat-gating authority. */
+/** Bridge protocols this host supports; drives EditorPage's non-fatal warning.
+ *  Must match SUPPORTED_BRIDGE_PROTOCOLS in tauri-plugin-texbrain's install.rs,
+ *  the compat-gating authority. */
 export const SUPPORTED_BRIDGE_PROTOCOLS: readonly number[] = [1]
 
 export function isSupportedBridgeProtocol(protocol: number): boolean {

@@ -3,7 +3,7 @@
 -- Run this AGAINST the new DB, AFTER the DDL files have created the schema.
 -- The old DB must be ATTACHed as `old` before running.
 --
--- Assumes (from your clarifications):
+-- Assumes:
 --   * old.papers.paper_id is a bare natural string id (e.g. '2401.12345')
 --   * (paper_id, version) is unique in old.papers
 --   * old.papers.authors / tags are JSON arrays of strings
@@ -18,13 +18,12 @@
 -- 'doi:10.48550/...', 'local:{hash}'. Bare old paper_ids are prefixed here.
 --
 -- Namespace prefix rules (applied consistently throughout):
---   old.source = 'arxiv'                         -> 'arxiv:'   || paper_id
---   old.source = 'openalex'                      -> 'openalex:'|| paper_id
---   old.source IN ('crossref','semanticscholar')  -> 'doi:'     || paper_id
+--   old.source = 'openalex'                       -> 'openalex:'|| paper_id
+--   old.source IN ('crossref','semanticscholar','doi') -> 'doi:' || paper_id
 --   old.source = 'pdf'                            -> 'local:'   || paper_id
 --     (if old paper_id starts with 'pdf:' the prefix is replaced, not doubled)
 --   old.source IS NULL                            -> 'linxiv:'  || paper_id (unknown source)
---   old.source = 'arxiv' or anything unrecognised -> source     || ':' || paper_id
+--   'arxiv' or anything unrecognised              -> source     || ':' || paper_id
 -- =============================================================================
 
 PRAGMA foreign_keys = OFF;
@@ -84,9 +83,8 @@ ORDER BY new_source_id;
 
 -- ---------------------------------------------------------------------------
 -- 2. AUTHOR: one row per distinct author name across all papers.
---    AUTHOR_FULL_NAME only; AUTHOR_FIRST / AUTHOR_LAST are populated by the
---    Python wrapper (SQLite has no reverse()/rinstr(), so a SQL-only split
---    is brittle).
+--    AUTHOR_FULL_NAME only; AUTHOR_FIRST / AUTHOR_LAST are left NULL (SQLite
+--    has no reverse()/rinstr(), so a SQL-only name split is brittle).
 -- ---------------------------------------------------------------------------
 
 INSERT INTO AUTHOR (AUTHOR_FULL_NAME)
@@ -272,16 +270,16 @@ FROM old.notes n
 JOIN map_source_id ms ON ms.old_paper_id = n.paper_id
 JOIN PAPER_ROOTS roots ON roots.SOURCE_ID = ms.new_source_id;
 
--- Notes with no paper_id (project-level notes): keep them, but they need a
--- SOURCE_FK which is NOT NULL in the new schema. Surface them for the wrapper.
+-- Notes with no paper_id (project-level) are dropped by the join above:
+-- SOURCE_FK is NOT NULL in the new schema. Counted here so the loss is visible.
 
 CREATE TEMP TABLE _orphan_notes_count AS
 SELECT COUNT(*) AS n FROM old.notes WHERE paper_id IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- 12. Rebuild papers_fts from PAPER_META.FULL_TEXT
---     paper_id column holds the namespaced SOURCE_ID so that
---     search_full_text's JOIN (p.source_id = fts.paper_id) resolves correctly.
+--     paper_id column holds the namespaced SOURCE_ID: search_full_text
+--     looks its FTS hits up in latest_papers by source_id.
 -- ---------------------------------------------------------------------------
 
 INSERT INTO papers_fts (rowid, paper_id, full_text)

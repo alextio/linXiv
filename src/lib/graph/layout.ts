@@ -1,8 +1,7 @@
 // Seed positions and force parameters for the graph's d3-force layout.
 //
-// Pure functions over plain `{id, x, y}` records, so the rules that decide where
-// a node starts — the one part of the layout that is not d3's business — are
-// testable without a canvas.
+// Pure functions over plain `{id, x, y}` records, so the start-position rules —
+// the one part of the layout that is not d3's business — are testable headless.
 
 /** The force-simulation knobs the Layout panel drives. */
 export interface ForceSettings {
@@ -19,27 +18,24 @@ export const DEFAULT_FORCES: ForceSettings = {
   linkStrength: 0.3,
 };
 
-/** The square of random start positions a cold load hands d3, centred on the
- *  world origin the centring force pulls towards. */
+/** Side of the random start-position square a cold load hands d3, centred on
+ *  the origin the centring force pulls towards. */
 export const SEED_SPREAD = 800;
-/** Spread around a neighbour centroid. Nodes seeded at the exact same point give
- *  the repulsion no direction to push them apart, and papers imported together
- *  share their whole neighbourhood. */
+/** Spread around a neighbour centroid: co-imported papers share a whole
+ *  neighbourhood, and identical seeds give the repulsion no direction. */
 export const SEED_JITTER = 40;
 /**
  * Rounds of "place every node that now has a placed neighbour". Two is what an
- * imported paper needs: the first puts the PAPER beside the authors and tags it
- * shares with the existing library, the second puts its brand-new author nodes
- * beside the paper. Anything still unreached is an entirely new island and keeps
- * its box seed, which is the honest answer — there is nothing to sit by.
+ * import needs: pass one puts the paper beside the authors and tags it shares
+ * with the library, pass two puts its brand-new authors beside the paper.
+ * Anything still unreached is a new island and keeps its box seed.
  */
 export const SEED_PASSES = 2;
 
 /**
- * Reproducible layout (opt-in). Initial positions are normally `Math.random()`,
- * which is fine for real use but makes a scripted demo recording a lottery. If
- * this localStorage key holds a value, a small deterministic PRNG is seeded from
- * it instead; absent — the default for every real user — nothing changes.
+ * Reproducible layout (opt-in), for scripted demo recordings. If this
+ * localStorage key holds a value, seed positions come from a deterministic PRNG
+ * instead of `Math.random()`; absent — the normal case — nothing changes.
  */
 export const LAYOUT_SEED_KEY = "linxiv-graph-seed";
 
@@ -53,8 +49,8 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
-/** Re-seeded fresh on each load and relayout, so "same seed" means "same
- *  sequence" regardless of how many times the page has reloaded. */
+/** Called fresh per load and per relayout, so "same seed" means "same sequence"
+ *  however many times the page has reloaded. */
 export function layoutRng(storage?: Pick<Storage, "getItem">): () => number {
   const store = storage ?? (typeof localStorage === "undefined" ? null : localStorage);
   const seed = store?.getItem(LAYOUT_SEED_KEY);
@@ -69,17 +65,13 @@ export interface SimNode {
 }
 
 /**
- * Start positions for one load.
- *
- * A node that survived the previous layout keeps its settled position. A node
- * that is NEW gets seeded at the centroid of the neighbours that do have one,
- * because the cold-load answer — a random point in an 800x800 box at the origin
- * — is the wrong one for it twice over: the force layout normally spreads the
- * graph far wider than that box, so a paper imported elsewhere in the app would
- * appear nowhere near the authors and tags it is joined to and then travel the
- * whole canvas under the link force; and every new node arriving in the same
- * clump at the centre shoves that settled neighbourhood apart, under a viewport
- * an in-place reload deliberately does not reframe.
+ * Start positions for one load. A node that survived the previous layout keeps
+ * its settled position; a NEW node is seeded at the centroid of the neighbours
+ * that have one, because the cold-load box is wrong for it twice over: the
+ * layout spreads far wider than SEED_SPREAD, so an imported paper would start
+ * nowhere near its authors and then cross the canvas under the link force, and
+ * a clump of new nodes at the origin shoves the settled neighbourhood apart
+ * under a viewport an in-place reload deliberately does not reframe.
  */
 export function seedPositions(
   ids: readonly string[],
@@ -108,8 +100,8 @@ function seedNewFromNeighbours(
 ): void {
   if (placed.size === 0 || placed.size === nodes.length) return;
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  // Undirected adjacency over THIS payload's edges: a new paper reaches its
-  // neighbours through the source side and a new author through the target side.
+  // Undirected adjacency over THIS payload's edges: every edge runs paper ->
+  // author/tag, so a new node of either kind needs both directions.
   const adjacency = new Map<string, string[]>();
   const link = (a: string, b: string) => {
     const list = adjacency.get(a);
@@ -123,9 +115,8 @@ function seedNewFromNeighbours(
   }
 
   for (let pass = 0; pass < SEED_PASSES; pass++) {
-    // Collected and applied per pass rather than as we go, so a node placed in
-    // this pass cannot seed another one in the same pass — the result would
-    // then depend on the order the payload happened to list nodes in.
+    // Applied per pass rather than as we go: a node placed in this pass must not
+    // seed another in the same pass, or the result depends on payload order.
     const seeded: string[] = [];
     for (const n of nodes) {
       if (placed.has(n.id)) continue;

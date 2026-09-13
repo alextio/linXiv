@@ -1,5 +1,5 @@
-//! RSS_PAPER_ROOTS / RSS_PAPER / RSS_FILTER_RULE queries: seen/dismissed feed
-//! entries and the keyword rules that auto-hide entries before the client sees them.
+//! RSS_PAPER_ROOTS / RSS_PAPER / RSS_CACHE_ENTRY / RSS_FILTER_RULE queries: the
+//! cached feed window, seen/dismissed entries, and rules that auto-hide them.
 
 use std::collections::HashSet;
 
@@ -11,7 +11,7 @@ use ts_rs::TS;
 
 use crate::error::Result;
 
-/// Record that a feed entry was seen (idempotent; upserts the root + version row).
+/// Record that a feed entry was seen: INSERT OR IGNORE the root + version row.
 /// Runs once per surviving entry on every feed page, so both statements are
 /// prepare_cached and the root's SOURCE_FK is read inside the version INSERT.
 pub fn upsert_seen(conn: &Connection, source_id: &str, version: i64, title: &str) -> Result<()> {
@@ -25,7 +25,7 @@ pub fn upsert_seen(conn: &Connection, source_id: &str, version: i64, title: &str
     Ok(())
 }
 
-/// Hide a feed entry. `permanent` blocks the whole paper forever
+/// Hide a feed entry. `permanent` blocks the whole paper
 /// (`RSS_PAPER_ROOTS.REMOVAL_TYPE = 'DOI'`); otherwise dismisses just this
 /// version (`RSS_PAPER.REMOVAL_TYPE = 'VER'`) -- a later version resurfaces.
 pub fn dismiss(conn: &Connection, source_id: &str, version: i64, permanent: bool) -> Result<()> {
@@ -92,8 +92,7 @@ pub fn prune_dismissed(conn: &Connection, cache_retention_days: i64) -> Result<(
            AND REMOVED_AT < datetime('now', '-' || ?1 || ' hours')",
         [ver_cutoff_hours],
     )?;
-    // 'NOT' (never-dismissed) rows: nothing reads them once the cache window
-    // that "seen" was tracking against has itself moved past them.
+    // 'NOT' (never-dismissed) rows: only the orphan check below reads them.
     conn.execute(
         "DELETE FROM RSS_PAPER
          WHERE REMOVAL_TYPE = 'NOT'
@@ -125,7 +124,7 @@ pub fn prune_dismissed(conn: &Connection, cache_retention_days: i64) -> Result<(
 
 /// A freshly-fetched feed entry ready to persist into `RSS_CACHE_ENTRY`.
 /// `dedup_key` is arxiv `id+version` when available, else link/title (see
-/// `feed.rs::to_cache_entry`). `source_id` is stored for reference only.
+/// `service::feed::to_cache_entry`); `source_id` is never read back.
 pub struct CacheEntry {
     pub dedup_key: String,
     pub source_id: Option<String>,
@@ -167,10 +166,10 @@ pub fn merge_cache_entries(
 /// Cap on rows loaded per feed GET -- above the 200 `annotate_and_filter` keeps.
 const MAX_LOADED_ENTRIES: i64 = 500;
 
-/// Cached entries for `feed_url` within the retention window, newest-published-
-/// first. Windowed by `FETCHED_AT`, not `PUBLISHED_AT` -- a just-fetched v2/v3
-/// of an old paper must not age out on the fetch that added it. Malformed
-/// stored JSON is logged and skipped rather than failing the whole response.
+/// Cached entries for `feed_url` within the retention window, newest first by
+/// `PUBLISHED_AT` (else `FETCHED_AT`). Windowed by `FETCHED_AT`, not
+/// `PUBLISHED_AT` -- a just-fetched v2/v3 of an old paper must not age out on
+/// the fetch that added it. Malformed stored JSON is logged and skipped.
 pub fn load_cache_entries(
     conn: &Connection,
     feed_url: &str,
@@ -215,9 +214,8 @@ pub fn prune_cache_entries(
     )?)
 }
 
-/// `RSS_FILTER_RULE.FIELD` -- closed set, so a real enum instead of `String`
-/// keeps `FilterRule` codegen-able (a bare `String` would flatten the
-/// frontend's hand-written `"TITLE"|"SUMMARY"|"AUTHOR"` union to `string`).
+/// `RSS_FILTER_RULE.FIELD` -- a real enum instead of `String` so ts-rs emits
+/// the `"TITLE"|"SUMMARY"|"AUTHOR"` union in generated.ts, not `string`.
 /// `rename_all` pins the wire strings to the on-disk `TEXT` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -569,8 +567,7 @@ mod tests {
         assert_eq!(remaining, 0);
     }
 
-    /// A fresh DOI root must survive delete #2 pruning its own 'NOT' child --
-    /// delete #4's REMOVAL_TYPE='NOT' filter must never reach a DOI root.
+    /// A fresh DOI root must survive delete #2 pruning its own 'NOT' child.
     #[test]
     fn prune_dismissed_keeps_fresh_doi_root_after_its_not_child_is_pruned() {
         let c = conn();

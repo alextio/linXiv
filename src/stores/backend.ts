@@ -3,9 +3,9 @@ import { persist } from "zustand/middleware";
 import { apiFetch, type RemoteBackend } from "../api/client.ts";
 
 // The PoC "default backend" control is UI-layer state (CONTEXT.md: Remote
-// Query Mode): this store owns it, and `libraryFetch` below is the ONE place
-// it becomes a request parameter. Transport (api/client.ts) holds no default
-// and never reads this store.
+// Query Mode): this store owns it, and `libraryFetch` below is its only
+// route into `apiFetch`. Transport (api/client.ts) holds no default and
+// never reads this store.
 
 interface BackendState {
   /** `null` = the local backend. The whole backend (not just an id) so the

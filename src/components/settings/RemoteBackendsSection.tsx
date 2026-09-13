@@ -60,8 +60,8 @@ export function RemoteBackendsSection() {
     },
   });
 
-  // Every cached view belongs to the backend it was fetched from, and query
-  // keys don't carry the backend — dump the cache on a switch so remote data
+  // Every cached view belongs to the backend it was fetched from, and library
+  // query keys don't carry it — dump the cache on a switch so remote data
   // never masquerades as local (or vice versa).
   function selectDefault(next: typeof defaultBackend) {
     if ((next?.id ?? null) === (defaultBackend?.id ?? null)) return;

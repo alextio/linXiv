@@ -5,7 +5,7 @@
 //!
 //! 1. Plan (read-only DB classification of the loser's versions).
 //! 2. FS phase: rename loser PDFs to the winner's on-disk names — reversible.
-//! 3. DB transaction: every dependent row re-pointed, loser root deleted.
+//! 3. DB transaction: rows re-pointed or collapsed, loser root deleted.
 //!    On failure the renames are undone (best-effort) and the error surfaces.
 //! 4. Post-commit only: unlink duplicate loser PDFs — the one irreversible
 //!    filesystem step goes last, and a failure there can no longer corrupt
@@ -16,9 +16,8 @@
 //!
 //! Accepted crash window (same class as `paper_import`'s rename-then-commit):
 //! a process kill between the FS renames and the DB commit leaves loser rows
-//! pointing at moved files. Nothing is lost — the files sit under the winner's
-//! on-disk names, and readers fall back from the stored path to the recomputed
-//! managed name — but a re-run is needed to reconcile the pointers.
+//! pointing at moved files. No bytes are lost — they sit under the winner's
+//! on-disk names — but a re-run is needed to reconcile the pointers.
 
 use crate::error::{CoreError, Result};
 use crate::service::paper::{pdf_on_disk_name, resolve_source_id, PaperRef};
@@ -53,12 +52,12 @@ pub struct MergeReceipt {
     /// Loser PDFs renamed to winner on-disk names in the managed dir.
     pub pdfs_renamed: usize,
     /// Loser PDFs that filled a PDF-less winner version — renamed in, or
-    /// pointed at in place when stored outside the managed dir.
+    /// pointed at in place when they cannot be moved.
     pub pdfs_adopted: usize,
     /// Duplicate loser PDFs unlinked after commit.
     pub pdfs_deleted: usize,
     /// Duplicate loser PDFs left on disk because they live outside the
-    /// managed PDF dir (never deleted there).
+    /// managed PDF dir.
     pub pdfs_kept_external: usize,
     /// Loser versions whose stored PDF path had no file behind it
     /// (transplants/adoptions found gone pre-rename, duplicates found gone
@@ -85,7 +84,7 @@ fn resolve_source_fk(conn: &Connection, paper: &PaperRef) -> Result<i64> {
     }
 }
 
-/// One executed (reversible) rename, kept so a failed DB phase can undo it.
+/// One executed (reversible) rename, kept so a later failure can undo it.
 struct DoneRename {
     from: PathBuf,
     to: PathBuf,
@@ -113,8 +112,7 @@ pub fn merge_papers(
     let mut pdfs_adopted = 0usize;
     let mut pdfs_missing = 0usize;
 
-    // Never move a file that lives outside the managed PDF dir (a hand-linked
-    // or legacy path): keep it where it is and let the DB keep pointing at it.
+    // Canonical managed dir; None (unresolvable) makes every path external.
     let managed = fs::canonicalize(pdf_dir).ok();
     let mut rename_for = |version: i64,
                           from_str: &str,
@@ -133,10 +131,9 @@ pub fn merge_papers(
                 .and_then(|p| fs::canonicalize(p).ok())
                 .is_some_and(|p| p == m)
         });
-        // Keep the file where it is (DB points at it) when it must not be
-        // moved: it lives outside the managed dir, or an unrelated file (e.g.
-        // an orphan from a crashed import) already occupies the destination —
-        // rename() would silently destroy that file's bytes.
+        // Leave the file put (DB points at it) when it must not move: outside
+        // the managed dir, or an unrelated file (a crashed import's orphan)
+        // already holds the destination, which rename() would overwrite.
         if !inside_managed || (from != to.as_path() && to.exists()) {
             renames.push((version, from_str.to_owned()));
             if adopt {
@@ -341,7 +338,7 @@ mod tests {
         assert_eq!(r.pdfs_deleted, 1); // duplicate v1
         assert_eq!(r.pdfs_missing, 0);
 
-        // Filesystem: winner names exist with the loser's bytes; loser names gone.
+        // Filesystem: all three under winner names; the loser's names are gone.
         let read = |n: &str| fs::read_to_string(dir.path().join(n)).unwrap();
         assert_eq!(read("arxiv_Wv1.pdf"), "winner-v1");
         assert_eq!(read("arxiv_Wv2.pdf"), "adopt-me");

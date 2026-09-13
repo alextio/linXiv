@@ -49,8 +49,7 @@ export default function AppShell() {
     }
   }, [pathname, sidebarPages, navigate]);
 
-  // Global zoom hotkeys (Ctrl/Cmd +/-/0) and other window-level shortcuts live
-  // in the central registry; this binds them.
+  // Binds the registry's window-bound shortcuts: the zoom hotkeys (Ctrl/Cmd +/-/0).
   useGlobalShortcuts();
 
   // Server is authoritative for theme overrides — restore on boot so that

@@ -101,7 +101,7 @@ fn export_text(
 }
 
 /// Canonical project wire shape — `service::project::to_out` (SERIALIZER 3;
-/// identical bytes on route, CLI and MCP). Shared with the tag-detail scan.
+/// identical bytes on route, CLI and MCP).
 pub(crate) fn project_out(conn: &Connection, p: ProjectDetails) -> Result<Value, ApiError> {
     serde_json::to_value(project::to_out(conn, p)?).map_err(|e| ApiError::new(500, e.to_string()))
 }

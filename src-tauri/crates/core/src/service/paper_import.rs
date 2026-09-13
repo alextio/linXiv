@@ -1,8 +1,8 @@
 //! paper_import service — `import_pdf`: a multi-branch rollback matrix over
-//! interleaved DB + filesystem writes, serialized by a process-global import-root lock.
+//! interleaved DB + filesystem writes, serialized by `IMPORT_ROOT_LOCK`.
 //!
-//! INJECTED SEAM (`resolve`): PDF metadata extraction (reqwest/pdf crates) must
-//! NOT enter `core`, so `import_pdf` takes a resolver. `external` is the optional
+//! INJECTED SEAM (`resolve`): the async network + pdfium work must not run under
+//! the DB lock, so `import_pdf` takes a resolver. `external` is the optional
 //! upstream `(source_id, version)` identity: `Some` ⇒ key on that arxiv/DOI
 //! identity, `None` ⇒ mint a fresh `local:<sha>` root — do not drop the Option.
 //!
@@ -19,30 +19,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Serializes the pre-existence check + insert in `import_pdf` so two concurrent
-/// imports of the same upstream paper can't race on check-then-upsert.
+/// Serializes `import_body`'s whole DB+FS write section against a concurrent
+/// import or `paper_merge` touching the same root.
 pub(crate) static IMPORT_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
-/// `POST /api/papers/import/pdf` envelope — a successful `import_pdf` result, emitted verbatim by MCP too.
+/// `POST /api/papers/import/pdf` envelope; MCP emits it verbatim.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct PaperImportResult {
     pub source_id: String,
     pub title: String,
 }
 
-/// State threaded through the import body so the rollback matrix in `import_pdf`
-/// can see exactly what was written. Each flag gates one rollback cell.
+/// What `import_body` actually wrote; each flag gates one rollback cell.
 #[derive(Default)]
 struct ImportState {
     /// Canonical on-disk path we wrote (or would have written) the PDF to.
     final_path: Option<PathBuf>,
     /// Root did NOT pre-exist → this import created it (rollback may hard-delete).
     inserted_new_root: bool,
-    /// We adopted a soft-deleted root; `save_paper_metadata` auto-restored it, so
-    /// rollback must re-soft-delete to restore prior state.
+    /// Adopted a soft-deleted root; `save_paper_metadata` auto-restored it, so
+    /// rollback must re-soft-delete.
     restored_deleted_root: bool,
-    /// We actually wrote a fresh file at `final_path` (distinct from "inserted a
-    /// row": a same-version adopt with NULL PDF_PATH writes a file but no new row).
+    /// Wrote a fresh file at `final_path` — distinct from "inserted a row": a
+    /// same-version adopt with NULL PDF_PATH writes a file but no new row.
     wrote_final_path: bool,
     source_id: Option<String>,
     version: Option<i64>,
@@ -51,26 +50,19 @@ struct ImportState {
 /// Save a PDF to disk, extract its metadata (via `resolve`), persist to the DB,
 /// and optionally link it to a project. Returns the imported `(source_id, title)`.
 ///
-/// Dedupe: when `resolve` returns an `external` arxiv/DOI identity, the import
-/// keys on it instead of minting a new `local:<sha>` root.
-/// Adopting an already-soft-deleted root auto-restores it; a later failure
-/// re-soft-deletes it.
+/// Dedupe: an `external` arxiv/DOI identity from `resolve` is keyed on instead of
+/// minting a `local:<sha>` root. Adopting a soft-deleted root auto-restores it.
 ///
 /// Rollback policy on storage/FS failure (the matrix):
-///   - Brand-new paper (root didn't exist): hard_delete under the import lock,
-///     but only if no concurrent import has since written a pdf_path for this
-///     version (re-check under the lock).
-///   - New version of an existing paper: leave the orphan PAPER row in place
-///     (deleting it could destroy pre-existing versions).
-///   - Re-import of an existing version: row left as-is; the orphan file written
-///     by the failed import is unlinked (the preserve-existing branch writes
-///     nothing, so there's nothing to clean).
-///   - Adopted into a soft-deleted root: re-soft-delete to restore prior state.
+///   - Brand-new paper (root didn't exist): hard_delete, but only if a re-check
+///     under the lock shows no concurrent import wrote a pdf_path for it.
+///   - Existing root: the PAPER row is left as-is (deleting it could destroy
+///     pre-existing versions); any file this import wrote is unlinked.
+///   - Adopted into a soft-deleted root: re-soft-delete.
 ///
 /// Project linking: the membership guard runs before any import work (missing →
 /// `ProjectNotFound`, deleted → `ProjectDeleted`), and again at link time — a
-/// project deleted mid-import surfaces there as `PaperLink`, with the paper
-/// already saved.
+/// project deleted mid-import surfaces there as `PaperLink`, paper already saved.
 pub fn import_pdf<R>(
     conn: &mut Connection,
     pdf_dir: &Path,
@@ -82,12 +74,11 @@ pub fn import_pdf<R>(
 where
     R: Fn(&[u8]) -> Result<(PaperMetadata, Option<(String, i64)>)>,
 {
-    // `pdf_save_limit_mb` enforcement (config::UserSettings::pdf_save_limit_bytes, DI'd by the
-    // caller — this module never reads config). Checked first, before any FS/DB write, so an
-    // upload that would push total PDF storage over the cap never touches disk.
+    // `pdf_save_limit_mb` enforcement; the caller DI's the resolved byte cap.
+    // First, before any FS/DB write, so an over-cap upload never touches disk.
     check_pdf_storage_quota(pdf_dir, content.len(), max_total_bytes)?;
 
-    // Pre-import membership guard: fail before mutating the library.
+    // Membership guard: fail before mutating the library.
     if let Some(pid) = project_id {
         crate::service::project::ensure_membership_writable(conn, pid)?;
     }
@@ -102,9 +93,8 @@ where
         CoreError::Internal(format!("import_pdf: write temp PDF failed: {e}"))
     })?;
 
-    // Metadata extraction failures become PdfImportError. This is BEFORE any DB
-    // write, so its only cleanup is the temp file — distinct from the rollback
-    // matrix below.
+    // BEFORE any DB write, so an extraction failure's only cleanup is the temp
+    // file — distinct from the rollback matrix below.
     let (meta, external) = match resolve(content) {
         Ok(v) => v,
         Err(e) => {
@@ -142,14 +132,12 @@ where
     })
 }
 
-/// The output of the import's resolve phase: extracted/enriched metadata plus
-/// the optional upstream `(source_id, version)` identity.
+/// Resolve-phase output: metadata plus the optional upstream identity.
 pub type ResolvedPdf = (PaperMetadata, Option<(String, i64)>);
 
-/// Fail-fast guard for the two-phase import: run under a short lock BEFORE
-/// [`resolve_import_pdf`], so a bad `project_id` is rejected without paying
-/// for the network resolve + pdfium parse. `import_pdf` re-checks under the
-/// commit lock (the project can vanish between the phases).
+/// Fail-fast guard: run BEFORE [`resolve_import_pdf`] so a bad `project_id` is
+/// rejected without paying for the network resolve + pdfium parse. `import_pdf`
+/// re-checks at commit (the project can vanish between the phases).
 pub fn precheck_import_pdf(conn: &Connection, project_id: Option<i64>) -> Result<()> {
     match project_id {
         Some(pid) => crate::service::project::ensure_membership_writable(conn, pid),
@@ -157,11 +145,10 @@ pub fn precheck_import_pdf(conn: &Connection, project_id: Option<i64>) -> Result
     }
 }
 
-/// Phase 1 of the two-phase import — must NOT hold the DB lock: the quota
-/// precheck and the network metadata resolve; hand the result to
-/// [`commit_import_pdf`] under the caller's lock. CrossRef mailto and
-/// `pdf_import_verify_identity_enabled` are read here so `sources::` stays pure
-/// DI; a settings-load failure defaults to `true` (verify).
+/// Phase 1, with NO DB lock held: quota precheck plus the network metadata
+/// resolve; hand the result to [`commit_import_pdf`] under the caller's lock.
+/// CrossRef mailto and `pdf_import_verify_identity_enabled` are read here so
+/// `sources::` stays pure DI; a settings-load failure defaults to `true`.
 pub async fn resolve_import_pdf(
     pdf_dir: &Path,
     content: &[u8],
@@ -181,8 +168,8 @@ pub async fn resolve_import_pdf(
     .await
 }
 
-/// PDF bytes → the metadata JSON record the out-of-process `pdf-meta` worker prints.
-/// Pure and offline (pdfium only); a service front door so the CLI avoids `sources::` (ADR-0010).
+/// PDF bytes → the JSON the out-of-process `pdf-meta` worker prints. Pure and
+/// offline (pdfium only); a front door so the CLI avoids `sources::` (ADR-0010).
 pub fn extract_pdf_metadata_json(bytes: &[u8]) -> String {
     crate::sources::pdf_metadata::extract_pdf_metadata_json(bytes)
 }
@@ -191,8 +178,8 @@ pub fn extract_pdf_metadata_json(bytes: &[u8]) -> String {
 /// `crates/cli` wires its clap command to the exact string core invokes.
 pub use crate::sources::pdf_metadata::PDF_META_SUBCOMMAND;
 
-/// Phase 2, under the caller's DB lock: the sync import (quota re-check, membership
-/// guard, rollback matrix) with already-resolved metadata; thin over `import_pdf`.
+/// Phase 2, under the caller's DB lock: `import_pdf` (quota re-check, membership
+/// guard, rollback matrix) with already-resolved metadata.
 pub fn commit_import_pdf(
     conn: &mut Connection,
     pdf_dir: &Path,
@@ -212,7 +199,7 @@ pub fn commit_import_pdf(
 }
 
 /// Both phases against one directly-held connection (the CLI's shape — no mutex
-/// to keep the await out from under).
+/// to keep the await out of).
 pub async fn import_pdf_default(
     conn: &mut Connection,
     pdf_dir: &Path,
@@ -233,8 +220,7 @@ pub async fn import_pdf_default(
     )
 }
 
-/// Receipt for a BibTeX import — the route's `/api/papers/import/bibtex` shape,
-/// emitted by all three surfaces.
+/// `POST /api/papers/import/bibtex` receipt; all three surfaces emit it.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct BibtexImportReceipt {
     pub saved_count: usize,
@@ -242,8 +228,8 @@ pub struct BibtexImportReceipt {
 }
 
 /// Import papers from BibTeX text, optionally linking them to a project. Guard
-/// order: membership guard before parsing, parse errors → `BadRequest`, and a
-/// project vanishing between guard and link → `PaperLink` with the papers kept.
+/// runs before parsing; parse errors → `BadRequest`; a project vanishing between
+/// guard and link → `PaperLink`, papers kept.
 pub fn import_bibtex(
     conn: &mut Connection,
     text: &str,
@@ -270,9 +256,9 @@ pub fn import_bibtex(
     })
 }
 
-/// The `pdf_save_limit_mb` TOTAL-storage check: reject `incoming_len` if it would push
-/// the PDFs already in `pdf_dir` over `max_total_bytes`. Route/MCP may run it early;
-/// `import_pdf` always re-runs it. A re-import already on disk is still checked (acceptable false reject).
+/// The `pdf_save_limit_mb` TOTAL-storage check: reject `incoming_len` if it would
+/// push the PDFs already in `pdf_dir` over `max_total_bytes`. Route/MCP run it in
+/// phase 1; `import_pdf` re-runs it. A re-import already on disk is still counted.
 pub fn check_pdf_storage_quota(
     pdf_dir: &Path,
     incoming_len: usize,
@@ -289,8 +275,8 @@ pub fn check_pdf_storage_quota(
     Ok(())
 }
 
-/// The DB + FS write section: any error triggers the rollback matrix in
-/// `import_pdf`; `st` records exactly what was written. Returns the resolved source_id.
+/// The DB + FS write section; `st` records what was written for the rollback
+/// matrix. Returns the resolved source_id.
 fn import_body(
     conn: &mut Connection,
     pdf_dir: &Path,
@@ -299,13 +285,12 @@ fn import_body(
     external: Option<(String, i64)>,
     st: &mut ImportState,
 ) -> Result<String> {
-    // Held for the whole write section (not just check-then-upsert): a merge
-    // holds this same lock end-to-end, and releasing it between the row insert
-    // and mark_pdf_saved would let a merge collapse the half-written root.
+    // Whole write section, not just check-then-upsert: a merge holds this same
+    // lock end-to-end, and releasing it between the row insert and
+    // mark_pdf_saved would let a merge collapse the half-written root.
     let _guard = IMPORT_ROOT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (sid, ver, pre_existing_pdf) = {
-        // If enrichment resolved an upstream identity (arXiv/DOI), key on it as
-        // this paper's Paper Root, not the content hash.
+        // An upstream identity (arXiv/DOI) is the Paper Root key, not the hash.
         if let Some((ext_id, ext_version)) = external {
             meta.source_id = ext_id;
             meta.version = ext_version;
@@ -316,8 +301,7 @@ fn import_body(
             .as_ref()
             .is_some_and(|r| r.status == "deleted")
         {
-            // save_paper_metadata's ensure_paper_root will auto-restore;
-            // record it so rollback can re-trash.
+            // ensure_paper_root will auto-restore; record it for rollback.
             st.restored_deleted_root = true;
         }
         let pre_existing_root = existing_root.is_some();
@@ -356,14 +340,13 @@ fn import_body(
     Ok(sid)
 }
 
-/// Roll back the right rows/files after a failed import (the matrix). Best-effort:
-/// each step ignores its own error — a failed rollback must not mask the original failure.
+/// Roll back rows/files after a failed import (the matrix). Best-effort: each
+/// step ignores its own error, so it can't mask the original failure.
 fn rollback(conn: &mut Connection, tmp_path: &Path, st: &ImportState) {
     let _ = fs::remove_file(tmp_path);
 
-    // restored_deleted_root and inserted_new_root are mutually exclusive: the
-    // former needs the root to have pre-existed (deleted), the latter needs it
-    // not to have existed at all.
+    // Mutually exclusive: restored_deleted_root needs the root to have
+    // pre-existed (deleted), inserted_new_root needs it to not have existed.
     if st.restored_deleted_root {
         if let Some(sid) = &st.source_id {
             // Adopt auto-restored a trashed root, then the import failed — re-trash.
@@ -371,9 +354,8 @@ fn rollback(conn: &mut Connection, tmp_path: &Path, st: &ImportState) {
         }
     } else if st.inserted_new_root {
         if let Some(sid) = &st.source_id {
-            // Re-check under the lock: only delete file + row if no concurrent
-            // import has since committed a pdf_path. Same guard for both keeps
-            // file and row from splitting brain.
+            // Only delete file + row if no concurrent import has since
+            // committed a pdf_path; one guard for both keeps them in step.
             let _guard = IMPORT_ROOT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             if let Ok(Some(row)) = store::get_paper(conn, sid, st.version) {
                 if row.pdf_path.is_none() {
@@ -386,25 +368,21 @@ fn rollback(conn: &mut Connection, tmp_path: &Path, st: &ImportState) {
         }
     }
 
-    // Independent file cleanup: if we wrote a fresh file and the inserted_new_root
-    // branch above isn't handling it (it has its own lock-guarded unlink), remove
-    // the orphan. Catches the restored_deleted_root + same-version cell where
-    // PDF_PATH was NULL — the re-soft-delete won't unlink, but the file is real.
+    // Orphan file the inserted_new_root branch above didn't handle (it has its
+    // own lock-guarded unlink). Catches the restored_deleted_root + same-version
+    // cell where PDF_PATH was NULL: the re-soft-delete won't unlink.
     if st.wrote_final_path && !st.inserted_new_root {
         if let Some(fp) = &st.final_path {
             crate::service::files::remove_pdf_counted(fp);
         }
     }
-    // A stranded new PAPER row (new version of a pre-existing root) is
-    // deliberately left in place to protect sibling versions.
+    // A stranded PAPER row (new version of a pre-existing root) stays, to
+    // protect sibling versions.
 }
 
-// ── project-membership guards ────────────────────────────────────────────────
-// The guard itself lives in `service::project::ensure_membership_writable`.
-
 /// Link a just-imported paper to a project (same write path as add_papers).
-/// Re-applies the guard (the project may have been deleted since the pre-import
-/// check); an id that doesn't resolve to a root is a no-op.
+/// Re-applies `ensure_membership_writable` (the project may have been deleted
+/// since the pre-import check); an unresolvable id is a no-op.
 fn link_imported(conn: &mut Connection, project_fk: i64, source_id: &str) -> Result<()> {
     crate::service::project::ensure_membership_writable(conn, project_fk)?;
     if let Some(root) = store::get_paper_root(conn, source_id)? {
@@ -413,7 +391,7 @@ fn link_imported(conn: &mut Connection, project_fk: i64, source_id: &str) -> Res
     Ok(())
 }
 
-/// Process-unique token for the temp upload filename. Avoids a `uuid` dependency.
+/// Collision-free token for the temp upload filename.
 fn unique_token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -433,12 +411,11 @@ mod tests {
     use crate::test_support::{db, meta};
     use tempfile::tempdir;
 
-    /// A generous cap for tests that aren't exercising the size limit itself —
-    /// every fixture PDF here is a few bytes.
+    /// A cap no fixture here (a few bytes each) can reach.
     const NO_LIMIT: u64 = 1_000_000;
 
-    /// The storage cap at the three points that matter: only `.pdf` files count,
-    /// and the comparison is `>`, so landing exactly on the limit is allowed.
+    /// Only `.pdf` files count, and the comparison is `>`, so landing exactly
+    /// on the limit is allowed.
     #[test]
     fn check_pdf_storage_quota_at_under_and_over_the_limit() {
         let dir = tempdir().unwrap();
@@ -475,8 +452,8 @@ mod tests {
         move |_| Ok((m.clone(), external.clone()))
     }
 
-    /// The fail-fast guard rejects a bad project BEFORE the network phase —
-    /// the regression here would be surfaces paying for the resolve first.
+    /// The guard rejects a bad project BEFORE the network phase; the regression
+    /// would be surfaces paying for the resolve first.
     #[test]
     fn precheck_import_pdf_rejects_missing_project_and_passes_none() {
         let conn = db();
@@ -554,8 +531,7 @@ mod tests {
     fn import_pdf_over_total_storage_limit_is_rejected_and_writes_nothing() {
         let mut conn = db();
         let dir = tempdir().unwrap();
-        // Existing PDFs consume most of the quota; the new file alone would fit,
-        // but existing + new pushes the TOTAL over → rejected.
+        // The new file alone would fit; existing + new pushes the TOTAL over.
         let seed = b"existing pdf consuming most of the quota";
         fs::write(dir.path().join("seedv1.pdf"), seed).unwrap();
         let content = b"%PDF-1.4 the last straw";
@@ -631,9 +607,8 @@ mod tests {
 
     #[test]
     fn import_resolving_to_new_arxiv_id_converges_with_later_direct_save() {
-        // "Imported earlier" case: the arxiv root does NOT yet exist when the PDF
-        // is imported. The import keys on the resolved arxiv identity, not the
-        // content hash.
+        // "Imported earlier": the arxiv root does NOT yet exist at import time,
+        // so the import keys on the resolved arxiv identity, not the hash.
         let mut conn = db();
         let dir = tempdir().unwrap();
 
@@ -686,9 +661,9 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
-    // Force a post-save failure by pre-creating a DIRECTORY at the canonical PDF
-    // path: `fs::rename(tmp -> dir)` fails. Valid only when pre_existing_version
-    // is false (else the preserve-existing branch short-circuits the write).
+    // Post-save failure injection: a DIRECTORY at the canonical PDF path makes
+    // `fs::rename(tmp -> dir)` fail. Only valid when pre_existing_version is
+    // false (else preserve-existing short-circuits the write).
     fn block_final_path(dir: &Path, name: &str) {
         fs::create_dir(dir.join(name)).unwrap();
     }
@@ -732,8 +707,8 @@ mod tests {
     fn rollback_restored_deleted_root_re_soft_deletes() {
         let mut conn = db();
         let dir = tempdir().unwrap();
-        // A soft-deleted root with NO version (so pre_existing_version is false
-        // and the failure-injection dir doesn't trip preserve-existing).
+        // No version, so pre_existing_version is false and the injected dir
+        // doesn't trip preserve-existing.
         paper::ensure_paper_root(&mut conn, "arxiv:dead").unwrap();
         store::soft_delete_paper(&mut conn, "arxiv:dead").unwrap();
         assert!(store::is_paper_deleted(&conn, "arxiv:dead").unwrap());
@@ -757,9 +732,9 @@ mod tests {
 
     #[test]
     fn rollback_restored_deleted_local_root_re_soft_deletes() {
-        // Same as above but for a content-hash (external=None) identity: re-importing
-        // a trashed local paper also auto-restores its root, so a failed import must
-        // re-trash it too, not leave it silently restored.
+        // Same, for a content-hash (external=None) identity: re-importing a
+        // trashed local paper auto-restores its root too, so a failed import
+        // must re-trash it.
         let mut conn = db();
         let dir = tempdir().unwrap();
         paper::ensure_paper_root(&mut conn, "local:dead").unwrap();
@@ -783,9 +758,8 @@ mod tests {
 
     #[tokio::test]
     async fn import_pdf_default_uses_real_resolver_and_mints_local_root() {
-        // Wiring check: the convenience entry resolves first (junk bytes extract
-        // no arXiv/DOI/title, so enrichment makes no network call), then mints a
-        // deterministic local:<sha> identity (None external).
+        // Wiring: resolve first (junk bytes extract no arXiv/DOI/title, so
+        // enrichment makes no network call), then mint a local:<sha> identity.
         let mut conn = db();
         let dir = tempdir().unwrap();
         let data_dir = tempdir().unwrap();

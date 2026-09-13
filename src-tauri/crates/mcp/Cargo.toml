@@ -19,7 +19,7 @@ rusqlite = "0.40"
 rmcp = { version = "1.8.0", features = ["transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 serde = { version = "1", features = ["derive"] }
-# preserve_order: tool results that are json! objects keep insertion order (Python parity).
+# preserve_order: tool results that are json! objects keep insertion order.
 serde_json = { version = "1", features = ["preserve_order"] }
 # Tool input schemas: derive JsonSchema on param structs. Must match the
 # version rmcp 1.8 re-exports (schemars 1.0) so derives line up.

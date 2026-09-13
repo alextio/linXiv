@@ -1,5 +1,5 @@
-//! Runtime paths + user settings. ADR-0014 (LINXIV_DATA_DIR is the single
-//! source of truth) + D24 (data-dir parity with Tauri).
+//! Runtime paths + user settings. ADR-0014 (all state resolves through
+//! `data_dir()`) + D24 (data-dir parity with Tauri).
 
 use std::env;
 use std::path::PathBuf;
@@ -14,18 +14,16 @@ const ENV_DATA_DIR: &str = "LINXIV_DATA_DIR";
 const APP_IDENTIFIER: &str = "com.linxiv.app";
 const USER_SETTINGS_FILE: &str = "user_settings.json";
 
-/// Bundled defaults, embedded at compile time from the canonical source file so the
-/// Rust defaults can never drift from `formats/default_settings.json`.
+/// Bundled defaults, compiled in from the canonical `assets/default_settings.json`.
 const BUNDLED_DEFAULTS: &str = include_str!("../assets/default_settings.json");
 
 /// Runtime data dir (DB, PDFs, user settings, vaults). Resolved on every call so it tracks
 /// LINXIV_DATA_DIR; the fallback byte-matches Tauri's `app_data_dir()` for the identifier.
 //
-// `BaseDirs::data_dir()` is the `directories`-crate equivalent of `dirs::data_dir()`:
+// `BaseDirs::data_dir()` — the base the identifier is appended to:
 //   Linux   $XDG_DATA_HOME or ~/.local/share
 //   macOS   ~/Library/Application Support
 //   Windows %APPDATA% (Roaming)
-// then we append the identifier as a single path segment, exactly like Tauri.
 pub fn data_dir() -> PathBuf {
     match env::var_os(ENV_DATA_DIR) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -70,8 +68,8 @@ pub fn crossref_mailto() -> String {
     mailto_setting("CROSSREF_MAILTO")
 }
 
-/// Env var wins, user-settings override is the fallback — the CLI and MCP server run as
-/// separate processes and never see `PATCH /api/env`. CR/LF stripped in `sources::http::polite_user_agent`.
+/// Env var wins, user settings the fallback — the CLI and MCP server are separate
+/// processes, never seeing `PATCH /api/env`. `polite_user_agent` keeps printable ASCII.
 fn mailto_setting(key: &str) -> String {
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => v,
@@ -120,7 +118,7 @@ impl UserSettings {
         self.overrides.get(key).or_else(|| self.defaults.get(key))
     }
 
-    /// Shallow merge `{**defaults, **overrides}` — the effective settings.
+    /// The effective settings: defaults with overrides layered on top.
     pub fn all(&self) -> Map<String, Value> {
         let mut merged = (*self.defaults).clone();
         for (k, v) in &self.overrides {
@@ -151,9 +149,9 @@ impl UserSettings {
         Ok(())
     }
 
-    /// `pdf_save_limit_mb` in bytes — the TOTAL-storage cap across all managed PDFs, enforced
-    /// before every new PDF write. Falls back to 1024 MB unless a positive integer, so a
-    /// hand-edited settings file can't silently disable the cap.
+    /// `pdf_save_limit_mb` as bytes — the TOTAL cap across all managed PDFs, checked by
+    /// every new-PDF write path. Non-positive or non-integer falls back to 1024 MiB, so
+    /// a hand-edited settings file can't disable the cap.
     pub fn pdf_save_limit_bytes(&self) -> u64 {
         let mb = self
             .get("pdf_save_limit_mb")
@@ -163,8 +161,8 @@ impl UserSettings {
         mb.saturating_mul(1024 * 1024)
     }
 
-    /// Days `RSS_CACHE_ENTRY` rows are kept; also floors `rss::prune_dismissed`'s VER cutoff
-    /// so a dismissal can't be forgotten before the cache entry it hides. Defaults to 30.
+    /// Days `RSS_CACHE_ENTRY` rows are kept; also floors `rss::prune_dismissed`'s VER and
+    /// DOI cutoffs, so a dismissal outlives the entry it hides. Defaults to 30.
     pub fn rss_cache_retention_days(&self) -> i64 {
         self.get("rss_cache_retention_days")
             .and_then(Value::as_i64)
@@ -172,8 +170,8 @@ impl UserSettings {
             .unwrap_or(30)
     }
 
-    /// Whether `resolve_from_extracted` may make its one network lookup to confirm a
-    /// text-scanned arXiv id/DOI before adopting it as dedupe identity; off = never. Defaults true.
+    /// Whether `resolve_from_extracted` may make its one lookup to confirm a text-scanned
+    /// arXiv id/DOI as dedupe identity. Does not gate enrichment. Defaults true.
     pub fn pdf_import_verify_identity_enabled(&self) -> bool {
         self.get("pdf_import_verify_identity_enabled")
             .and_then(Value::as_bool)
@@ -199,7 +197,7 @@ mod tests {
             data_dir().file_name().unwrap().to_str().unwrap(),
             APP_IDENTIFIER
         );
-        // And equals the BaseDirs base + identifier (the exact Tauri form).
+        // And the whole path, not just the leaf.
         let expect = BaseDirs::new().unwrap().data_dir().join(APP_IDENTIFIER);
         assert_eq!(data_dir(), expect);
 
@@ -219,17 +217,17 @@ mod tests {
         assert_eq!(s.get("pdf_save_limit_mb").unwrap().as_i64().unwrap(), 1024);
         assert!(s.get("tex_rendering_enabled").unwrap().as_bool().unwrap());
         assert_eq!(s.rss_cache_retention_days(), 30);
-        assert!(s.pdf_import_verify_identity_enabled()); // defaults to true
+        assert!(s.pdf_import_verify_identity_enabled());
         assert!(s.get("nope").is_none());
 
         // Override + save persists ONLY the override, then reloads merged.
         let mut s = s;
-        s.set("pdf_save_limit_mb", Value::from(42)).unwrap(); // write-through persists
+        s.set("pdf_save_limit_mb", Value::from(42)).unwrap();
         let raw: Map<String, Value> = serde_json::from_str(
             &std::fs::read_to_string(scratch.join(USER_SETTINGS_FILE)).unwrap(),
         )
         .unwrap();
-        assert_eq!(raw.len(), 1); // only the override written, not the defaults
+        assert_eq!(raw.len(), 1);
         assert_eq!(raw["pdf_save_limit_mb"], Value::from(42));
 
         // Override flips it off; falls back to true if the stored value isn't a bool.
@@ -252,8 +250,7 @@ mod tests {
         // Untouched default still resolves through the merge.
         assert!(s.all()["tex_rendering_enabled"].as_bool().unwrap());
 
-        // openalex_mailto: unset env falls back to the settings override, so the CLI
-        // and MCP processes see what `settings update` wrote; a set env var wins.
+        // openalex_mailto precedence: unset env -> settings override; a set env wins.
         env::remove_var("OPENALEX_MAILTO");
         assert_eq!(openalex_mailto(), "");
         let mut s = s;

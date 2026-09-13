@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS RSS_CACHE_ENTRY (
     ENTRY_JSON   TEXT      NOT NULL,
     PUBLISHED_AT TIMESTAMP,
     FETCHED_AT   TIMESTAMP NOT NULL DEFAULT (datetime('now')),
-    -- Also serves as the FEED_URL lookup index for the load/prune queries below
-    -- (leftmost-prefix match) -- no separate index on FEED_URL alone needed.
+    -- Leftmost prefix serves the FEED_URL = ? load/prune scans in
+    -- queries/rss.rs -- no separate index on FEED_URL alone needed.
     UNIQUE (FEED_URL, DEDUP_KEY)
 );

@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 # preserve_order: serde_json Value/Map keep insertion order (IndexMap), so UserSettings::all()
-# and any json! object byte-match Python's json.dump (insertion order), not alphabetical.
+# and any json! object emit keys as written, not alphabetically.
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 thiserror = "2.0.18"
 chrono = { version = "0.4", features = ["serde"] }
@@ -25,7 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }
 directories = "6"
 tracing = "0.1"
-# .lxproj is a ZIP_DEFLATED archive (Python uses zipfile); deflate-only, no extras.
+# .lxproj is a deflate-compressed ZIP; no other codecs needed.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Sources: HTTP + async + XML/PDF/tar parsing. rustls-tls = no OpenSSL system dep.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

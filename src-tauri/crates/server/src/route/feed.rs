@@ -143,7 +143,7 @@ fn create_rule(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     to_value(&CreatedFeedRule { rule_id })
 }
 
-/// `DELETE /api/feed/rules/{id}` — remove an auto-filter rule. 404 when unset.
+/// `DELETE /api/feed/rules/{id}` — remove an auto-filter rule. 404 if absent.
 fn delete_rule(state: &AppState, id: &str) -> Result<Value, ApiError> {
     let rule_id = crate::route::path_i64(id)?;
     state.with_conn(|conn| svc_feed::delete_rule(conn, rule_id))?;

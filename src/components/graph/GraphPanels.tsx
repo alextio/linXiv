@@ -280,11 +280,10 @@ function sameForces(a: ForceSettings, b: ForceSettings): boolean {
 }
 
 /**
- * A collapsible panel. `badge` is the list of things this panel currently has
- * switched on: both filter panels open COLLAPSED and their state outlives every
- * navigation, so an active filter used to be a canvas of 8% ghosts with the
- * control that caused it two clicks away behind a "▶" and nothing on the header
- * to say so.
+ * A collapsible panel. `badge` lists what this panel currently has switched on:
+ * both filter panels open COLLAPSED and their state outlives every navigation,
+ * so without it an active filter is a canvas of 8% ghosts with nothing on the
+ * header to say why.
  */
 function Panel({
   title,

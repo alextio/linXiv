@@ -9,11 +9,10 @@ use crate::models::PaperDetails;
 /// paper, ranked by bm25 (lower = better); a paper matched both ways takes its
 /// best score.
 ///
-/// FTS misnomer: `papers_fts.paper_id` holds the SOURCE_ID *string*, joined on
-/// `latest_papers.source_id` (NOT the int PAPER_ID); notes_fts carries
-/// SOURCE_FK, joined back through PAPER_ROOTS. `match_expr` turns raw input into
-/// FTS5 syntax; a prepare/query error from a branch is "no matches from that
-/// branch" — a backstop for a missing or corrupt index.
+/// FTS misnomer: `papers_fts.paper_id` holds the SOURCE_ID *string* (NOT the
+/// int PAPER_ID) that `latest_papers` is then read by; notes_fts carries
+/// SOURCE_FK, joined back through PAPER_ROOTS. `match_expr` turns raw input
+/// into FTS5 syntax; an unqueryable index yields no hits, not an error.
 pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Vec<PaperDetails>> {
     let limit = limit.clamp(0, 1000);
     let Some(expr) = match_expr(query) else {
@@ -25,8 +24,8 @@ pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Ve
     // beaten by `limit` papers whose merged score is at least as good. The notes
     // branch is one row per NOTE, so it groups to per-paper best before limiting
     // — a row-limit could crowd a distinct paper out behind one many-note paper.
-    // MATERIALIZED is load-bearing: flattened, bm25() lands inside the aggregate
-    // where FTS5 refuses it ("unable to use function bm25 in this context").
+    // MATERIALIZED is load-bearing: flattened, bm25() would land inside min(),
+    // which FTS5 refuses.
     let mut best: HashMap<String, f64> = HashMap::new();
     for (sid, score) in fts_matches(
         conn,
@@ -132,8 +131,8 @@ fn match_expr(raw: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.join(" "))
 }
 
-/// Classifies one raw token as an FTS5 operator (AND/OR/NOT, pushed only if
-/// it doesn't follow another operator) or a term/prefix (via `push_term`).
+/// Classifies one raw token as an FTS5 operator (AND/OR/NOT, kept only after
+/// a term) or a term/prefix (via `push_term`).
 fn match_expr_helper(out: &mut Vec<String>, tok: &str) {
     let prefix = tok.ends_with('*');
     let body = tok.strip_suffix('*').unwrap_or(tok);
@@ -153,8 +152,8 @@ fn is_operator(tok: Option<&String>) -> bool {
 
 /// Push one term as a quoted FTS5 phrase.
 fn push_term(out: &mut Vec<String>, term: &str, prefix: bool) {
-    // FTS5 drops punctuation when tokenizing, so an all-punctuation term holds
-    // no token to match and would emit `""` — itself a syntax error.
+    // FTS5 drops punctuation when tokenizing, so an all-punctuation term is an
+    // empty phrase matching nothing; alone it yields `None`.
     if !term.chars().any(char::is_alphanumeric) {
         return;
     }
@@ -226,9 +225,8 @@ mod tests {
         )
         .unwrap();
         // No hand-insert into papers_fts: the PAPER_META write above fires the
-        // sync trigger, which derives the row. Seeding it again would give every
-        // fixture paper two index rows and stop these tests running against the
-        // one-row-per-paper shape production actually has.
+        // sync trigger. Seeding it too would give each fixture paper two index
+        // rows, not the one-per-paper shape production has.
     }
 
     #[test]
@@ -308,9 +306,9 @@ mod tests {
         assert_eq!(hits[0].source_id, "arxiv:2204.12985");
     }
 
-    /// Punctuation FTS5 reads as syntax is searched for literally instead. Each
-    /// of these raised before, and a raise reads as "no matches" — so the search
-    /// silently returned nothing for terms that are all over a TeX corpus.
+    /// Punctuation FTS5 reads as syntax is searched for literally instead. All
+    /// but `encod*` raised before, and a raise reads as "no matches" — so the
+    /// search silently returned nothing for terms all over a TeX corpus.
     #[test]
     fn punctuation_in_a_query_searches_instead_of_raising() {
         let conn = db::open_in_memory().unwrap();
@@ -360,8 +358,8 @@ mod tests {
     }
 
     /// Column-filter syntax (`full_text:foo`) used to reach FTS5 and is now read
-    /// as literal text — the trade for making hyphens work. It finds papers
-    /// whose text holds those words, and nothing when it doesn't.
+    /// as literal text — the trade for making hyphens work. A plain query
+    /// still finds the paper.
     #[test]
     fn column_filter_syntax_is_searched_as_text() {
         let conn = db::open_in_memory().unwrap();

@@ -1,6 +1,5 @@
-//! Author reads + writes. Plan §5.3. No transaction wrappers: every write is a
-//! single statement, and the get-or-create is a SELECT-then-conditional-INSERT
-//! with no partial-inconsistent state to roll back.
+//! Author reads + writes. Plan §5.3. Every write is a single statement except
+//! `merge_authors`, which wraps its four steps in one transaction.
 
 use std::collections::HashSet;
 
@@ -11,7 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::models::{AuthorPaperPreview, AuthorWithCount, BasicAuthorDetails};
 use crate::storage::db;
 
-// `AUTHOR.AUTHOR_*` columns are all nullable -> every field but the FK is Option.
+// The four name/ORCID columns are all nullable -> only the FK isn't Option.
 fn row_to_basic(row: &Row) -> rusqlite::Result<BasicAuthorDetails> {
     Ok(BasicAuthorDetails {
         author_id: row.get("AUTHOR_FK")?,
@@ -234,6 +233,8 @@ pub fn orcid_backfill_candidates(conn: &Connection, limit: i64) -> Result<Vec<Or
     Ok(out)
 }
 
+// ── writes ────────────────────────────────────────────────────────────────
+
 /// Set `AUTHOR_ORCID` only if it's currently NULL — never overwrites a
 /// manually-set or already-harvested value. Returns whether a row changed.
 pub fn fill_orcid_if_null(conn: &Connection, author_id: i64, orcid: &str) -> Result<bool> {
@@ -243,8 +244,6 @@ pub fn fill_orcid_if_null(conn: &Connection, author_id: i64, orcid: &str) -> Res
     )?;
     Ok(changed > 0)
 }
-
-// ── writes ────────────────────────────────────────────────────────────────
 
 /// Plain INSERT (no dedup; the full-name index is non-unique by design).
 /// Returns the new AUTHOR_FK.
@@ -302,17 +301,15 @@ pub fn update_author(
     Ok(())
 }
 
-/// Delete the AUTHOR row by FK. Fails on the FK
-/// constraint if the author is still linked via PAPER_TO_AUTHOR; callers must
-/// unlink first (see `unlink_author_from_paper`), so a merge can't silently
-/// drop paper links it didn't mean to touch.
+/// Delete the AUTHOR row by FK. Fails on the FK constraint while the author is
+/// still linked via PAPER_TO_AUTHOR, so callers unlink (or merge) first.
 pub fn delete_author(conn: &Connection, author_id: i64) -> Result<()> {
     conn.execute("DELETE FROM AUTHOR WHERE AUTHOR_FK = ?", params![author_id])?;
     Ok(())
 }
 
-/// INSERT OR IGNORE the PAPER_TO_AUTHOR row
-/// with an optional author_index (ordering within the paper's author list).
+/// Link row + optional author_index (order within the paper). Re-linking a
+/// pair duplicates it: no UNIQUE index.
 pub fn link_author_to_paper(
     conn: &Connection,
     author_fk: i64,
@@ -551,14 +548,14 @@ mod tests {
         assert_eq!(pa[0].full_name.as_deref(), Some("Bob Stone"));
         assert_eq!(pa[1].full_name.as_deref(), Some("Alice Cole"));
 
-        // paper_author_orcids: same AUTHOR_INDEX order, keyed by paper; a paper
-        // with no author links is absent, an unknown id is ignored.
+        // paper_author_orcids: same AUTHOR_INDEX order, keyed by paper; an id
+        // with no link rows is absent.
         let orcids = paper_author_orcids(&conn, &[pid, 9_999]).unwrap();
         assert_eq!(orcids.len(), 1);
         assert_eq!(orcids[&pid], vec![None, Some("0000-1".to_string())]);
         assert!(paper_author_orcids(&conn, &[]).unwrap().is_empty());
 
-        // previews: each author sees the one active latest paper.
+        // previews: the one active latest paper.
         let prev = get_paper_previews(&conn, a1).unwrap();
         assert_eq!(prev.len(), 1);
         assert_eq!(prev[0].source_id, "arxiv:1");

@@ -69,8 +69,8 @@ fn main() {
                 }
              },
         ))
-        // linxiv:// serves PDF bytes to the webview and bridges the graph iframe's
-        // /api/* GETs — the in-process replacement for what invoke() can't stream.
+        // linxiv:// serves local and proxied PDF bytes to the webview —
+        // invoke() can't stream binary into react-pdf or an `<iframe src>`.
         .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, protocol::handler)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -80,18 +80,17 @@ fn main() {
         .plugin(tauri_plugin_texbrain::init())
         .setup(|app| {
             // In-process backend: open the DB once and manage it. The webview
-            // reaches linxiv-core through the `api` invoke command + the linxiv://
-            // scheme — no sidecar process, no HTTP hop, nothing to spawn or reap.
+            // reaches linxiv-core through the invoke commands below plus the
+            // linxiv:// scheme — no sidecar, no HTTP hop, nothing to reap.
             app.manage(AppState::new().map_err(|e| e.to_string())?);
             // Background TeX full-text indexing, one paper at a time. Idles
             // unless `full_text_worker_enabled` is on (Settings → Library).
             commands::spawn_full_text_worker(app.handle().clone());
             // Quarantined CRDT "shared projects" store, managed beside AppState
-            // (never a field of it). Reached only via the `share_api` command.
-            // The iroh node binds async (the Endpoint bind is async); block on it
-            // during setup so the network arms have a live node from first request.
-            // At-rest key-store encryption: resolve the DEK before the bind
-            // (keychain access is sync; never call it from async context).
+            // (never a field of it), resolved by every p2p-touching command.
+            // The Endpoint bind is async: block on it during setup so the
+            // network arms have a live node from the first request. Resolve the
+            // DEK first — keychain access is sync, never call it from async.
             let dek = p2p_config::p2p_dek();
             let (share_state, node_bound) =
                 tauri::async_runtime::block_on(route::share::startup_share_state(dek))
@@ -100,15 +99,14 @@ fn main() {
             // Remote Query Mode client half: cached outbound connections,
             // one per registered backend (dials reuse the share endpoint).
             app.manage(remote_backend::RemoteState::default());
-            // `mark_sync_started` also guards the relay-reconnect command's spawn, so a
+            // `mark_sync_started` also guards the relay-reconnect route's spawn, so a
             // node that only comes up later (e.g. relay was fixed via "Save & Reconnect")
             // still gets exactly one interval-sync loop.
             if node_bound && app.state::<ShareState>().mark_sync_started() {
-                // Background share sync: one pass now, then every 5 min.
+                // Share sync: one pass now, then on nudge or 5 min.
                 commands::spawn_interval_sync(app.handle().clone());
             }
-            // Journal loop is unconditional — history/undo must not depend on
-            // the p2p node binding.
+            // Unconditional, unlike the sync above: undo needs no p2p node.
             commands::spawn_journal_loop(app.handle().clone());
             // Point the pdfium loader at the libpdfium bundled under the app
             // resources (tauri.conf.json `bundle.resources` maps it into pdfium/).

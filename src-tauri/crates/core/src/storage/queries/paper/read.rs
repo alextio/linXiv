@@ -10,10 +10,9 @@ use crate::error::Result;
 use crate::models::{PaperDetails, NO_PUBLISHED_DATE};
 use crate::storage::db::{bool_from_sql, date_from_sql, list_from_sql};
 
-// Every read selects `PAPER_COLUMNS_NO_TEXT` from the `papers` /
-// `latest_papers` views (same column set), so one row->model mapper serves all.
-// LIST/DATE/BOOL columns go through the storage::db decltype converters — no
-// inline re-parsing.
+// Every `PaperDetails` read selects `PAPER_COLUMNS_NO_TEXT` from the `papers` /
+// `latest_papers` views (same column set), so one mapper serves all. LIST/DATE/
+// BOOL columns go through the storage::db decltype converters — no re-parsing.
 pub(in crate::storage::queries) fn row_to_paper(row: &Row) -> Result<PaperDetails> {
     // LIST column (JSON TEXT) -> Vec<String>; NULL -> empty (model default).
     let list = |name: &str| -> Result<Vec<String>> {
@@ -54,8 +53,8 @@ pub(in crate::storage::queries) fn row_to_paper(row: &Row) -> Result<PaperDetail
     })
 }
 
-/// A specific version, or the latest if `None`. Reads the list column set
-/// (FULL_TEXT blanked); `has_full_text` answers the one stored-body question.
+/// A specific version, or the latest if `None`. No FULL_TEXT —
+/// `has_full_text` answers the one stored-body question.
 pub fn get_paper(
     conn: &Connection,
     source_id: &str,
@@ -82,8 +81,8 @@ pub fn get_paper(
     }
 }
 
-/// One exact PAPER version by PK. Reads the list column set (FULL_TEXT
-/// blanked) so the lookup never hauls a full TeX corpus row into memory.
+/// One exact PAPER version by PK. No FULL_TEXT, so the lookup never hauls a
+/// TeX corpus row into memory.
 pub fn get_paper_by_id(conn: &Connection, paper_id: i64) -> Result<Option<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM papers WHERE paper_id = ?"
@@ -95,10 +94,9 @@ pub fn get_paper_by_id(conn: &Connection, paper_id: i64) -> Result<Option<PaperD
     }
 }
 
-/// The `papers`/`latest_papers` column list with FULL_TEXT blanked out — every
-/// column `row_to_paper` reads, in the view's order. Every `PaperDetails` read
-/// uses this instead of `SELECT *`: nothing consumes the body through the
-/// struct, and `SELECT *` would haul a multi-MB TeX body per read.
+/// The `papers`/`latest_papers` column list in view order, FULL_TEXT blanked.
+/// Every `PaperDetails` read uses this instead of `SELECT *`: nothing reads the
+/// body through the struct, and `SELECT *` would haul a multi-MB TeX body.
 pub const PAPER_COLUMNS_NO_TEXT: &str = "paper_id, source_id, source_fk, version, title, url, \
      published, updated, category, categories, doi, journal_ref, comment, summary, authors, tags, \
      has_pdf, source, pdf_path, NULL AS full_text, downloaded_source, created_at, updated_at";
@@ -201,7 +199,6 @@ fn list_papers_sql(
     (sql, params)
 }
 
-/// Latest version per paper by default.
 /// Optional exact-category filter; limit/offset apply to the filtered result.
 pub fn list_papers(
     conn: &Connection,
@@ -245,8 +242,8 @@ pub fn list_papers_sorted(
     Ok(out)
 }
 
-/// Latest-version papers whose PDF flag is set — backs `GET /api/pdfs`. Filters
-/// in SQL so the whole library is never materialized to find the PDF subset.
+/// Latest-version papers whose PDF flag is set — the source rows for every
+/// saved-PDF listing. Filters in SQL so the whole library is never scanned.
 pub fn list_pdf_papers(conn: &Connection) -> Result<Vec<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM latest_papers WHERE has_pdf = 1"
@@ -280,7 +277,7 @@ pub fn get_papers_by_source_fks(
             out.push(row_to_paper(row)?);
         }
     }
-    // Option<NaiveDate> reversed = DESC with None (undated) last, like SQL DESC.
+    // Reversed cmp = SQL DESC: NULLs and the undated sentinel both sink.
     out.sort_by(|a, b| {
         b.published
             .cmp(&a.published)
@@ -342,7 +339,7 @@ pub fn existing_source_ids(conn: &Connection, source_ids: &[String]) -> Result<V
     Ok(out)
 }
 
-/// `get_all_versions` — every stored (active) version, oldest-first.
+/// Every stored (active) version, oldest-first.
 pub fn get_all_versions(conn: &Connection, source_id: &str) -> Result<Vec<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM papers WHERE source_id = ? ORDER BY version ASC"
@@ -364,8 +361,8 @@ pub struct PaperVersionMeta {
     pub has_pdf: bool,
 }
 
-/// `version_meta` — [`get_all_versions`] minus the per-version full-row
-/// hydration: every stored (active) version's four listing scalars, oldest-first.
+/// [`get_all_versions`] minus the full-row hydration: every stored (active)
+/// version's four listing scalars, oldest-first.
 pub fn version_meta(conn: &Connection, source_id: &str) -> Result<Vec<PaperVersionMeta>> {
     let mut stmt = conn.prepare(
         "SELECT version, published, updated, has_pdf FROM papers \
@@ -394,7 +391,6 @@ pub fn version_meta(conn: &Connection, source_id: &str) -> Result<Vec<PaperVersi
 
 /// Another paper root sharing this root's DOI — same underlying work resolved
 /// independently by a different source (e.g. arXiv vs OpenAlex/Crossref).
-/// Local struct (no model; models.rs out of scope this phase).
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct DoiVersionCandidate {
     pub source_fk: i64,
@@ -645,8 +641,7 @@ mod tests {
             .into_iter()
             .map(|p| (p.source_id, p.version))
             .collect();
-        // The new query carries no ORDER BY (its one caller re-sorts by file
-        // size); compare as sets.
+        // No ORDER BY (callers re-sort in saved_pdf_sizes); compare as sets.
         got.sort();
         let mut expected_sorted = expected.clone();
         expected_sorted.sort();
@@ -686,7 +681,7 @@ mod tests {
             .unwrap();
         }
 
-        // The oldest-added paper gains a v2 today. Ordering by the version row's
+        // arxiv:a gains a v2 today. Ordering by the version row's
         // timestamp would make it the "most recently added" paper.
         let apple_fk: i64 = conn
             .query_row(

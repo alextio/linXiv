@@ -12,13 +12,13 @@ pub struct AppState {
     conn: Mutex<Connection>,
     /// Managed PDF directory (`config::pdf_dir()`), used by the PDF/export arms.
     pub pdf_dir: PathBuf,
-    /// Obsidian vault root (`config::vault_dir()`), used by the export arms.
+    /// LaTeX vault root (`config::vault_dir()`), used by the editor arms.
     pub vault_root: PathBuf,
 }
 
 impl AppState {
-    /// Resolve + create the data dir, open the DB, run schema init. The data dir
-    /// byte-matches Tauri's `app_data_dir()` for `com.linxiv.app` (D24).
+    /// Resolve + create the data dir, open the DB, run schema init. Absent a
+    /// LINXIV_DATA_DIR override it matches Tauri's `app_data_dir()` (D24).
     pub fn new() -> anyhow::Result<Self> {
         config::init_data_dir()?;
         // Pin the persistent device actor so every CRDT change is attributable.
@@ -44,13 +44,12 @@ impl AppState {
         }
     }
 
-    /// Locks the shared connection for the duration of `f`. Never hold the guard
-    /// across an `.await`: `f` runs to completion and releases the lock first.
-    /// A poisoned mutex is recovered, not propagated — a `Connection` has no broken
-    /// invariant to protect, and refusing the lock forever would take every
-    /// DB-touching route down for the rest of the process.
+    /// Locks the shared connection for the duration of `f`. `f` is sync, so the
+    /// guard can never span an `.await`. A poisoned mutex is recovered, not
+    /// propagated — a `Connection` has no broken invariant to protect, and
+    /// refusing the lock forever would take every DB route down for the process.
     ///
-    /// TODO: Revisit for HUB roles — maybe parallel reads, serial writes.
+    /// TODO: maybe parallel reads, serial writes if peers contend.
     pub fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> T {
         let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)

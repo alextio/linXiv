@@ -1,14 +1,9 @@
 // Which nodes the Knowledge Graph's filter panels MATCH.
 //
-// This stays on the client rather than moving to the Rust side with the rest of
-// the graph's derivations, and deliberately so: a paper the filter excludes is
-// still DRAWN — as an 8% ghost — so "matched" is a rendering state, not a WHERE
-// clause. Making it a query would mean the excluded papers never arrive, and
-// with them would go the ghost, the layout the ghosts are pinned in, and the
-// counts the panels report about what is being held back.
-//
-// It is pure and it is the whole of the rule, so it is tested directly rather
-// than through a canvas.
+// Deliberately client-side rather than a Rust-side query: an excluded paper is
+// still DRAWN (an 8% ghost), so "matched" is a rendering state, not a WHERE
+// clause. Querying it away would take the ghosts, the layout they are pinned
+// in, and the counts the panels report about what is held back.
 
 import type { GraphIndex, GraphNodeType, GraphView } from "./model.ts";
 import { normTag } from "./model.ts";
@@ -54,11 +49,9 @@ export const EMPTY_FILTER: GraphFilterState = {
   tagRows: [],
 };
 
-/**
- * What a filter pass concluded. The three sets are AUTHORITATIVE: with no filter
- * in force they hold every node of their type, so a style or layout pass can ask
- * them the same question either way and never needs a "is a filter on" branch.
- */
+/** What a filter pass concluded. With no filter in force the three sets still
+ *  hold every node of their type, so style and layout passes never need an
+ *  "is a filter on" branch. */
 export interface GraphMatch {
   papers: Set<string>;
   authors: Set<string>;
@@ -66,19 +59,16 @@ export interface GraphMatch {
   /** Node types a Visibility checkbox switched off: not drawn at all. */
   hiddenTypes: Set<GraphNodeType>;
   isolate: boolean;
-  /**
-   * Matched nodes of a type that is still being drawn — i.e. what the user can
-   * actually read. Zero with a non-empty library is the "no matches" state.
-   */
+  /** Matched nodes of a still-drawn type. Zero on a non-empty library is the
+   *  "no matches" state. */
   drawnCount: number;
 }
 
 /**
- * The node ids the force layout runs over — the single source the charge, the
- * collision radius, the link set and the drag release must all agree on (an
- * excluded node is PINNED, not removed from the simulation). The Visibility
- * checkboxes remove a type from the layout along with the attribute filters:
- * an invisible node must not shape the layout of the ones the user can see.
+ * The node ids the force layout runs over — the one source charge, collision
+ * radius, link set and drag release must agree on (excluded nodes are PINNED,
+ * not removed). Hidden types drop out too: an invisible node must not shape the
+ * layout of the ones the user can see.
  */
 export function layoutIds(m: GraphMatch): Set<string> {
   const ids = new Set<string>();
@@ -121,11 +111,9 @@ export function evalTagRows(tagKeys: readonly string[], rows: readonly TagRow[])
 }
 
 /**
- * The project ids a Projects filter resolves to, or `null` when the filter is
- * off. An EMPTY array is a real answer and a different one: the rows are free
- * text, so a typo — or a project renamed or deleted since the row was added —
- * resolves to no project at all, and that must match no paper rather than every
- * paper.
+ * The project ids a Projects filter resolves to, `null` when it is off. An EMPTY
+ * set is a different answer: rows are free text, so a typo or a renamed project
+ * resolves to nothing — which must match no paper rather than every one.
  */
 function resolveProjectIds(view: GraphView, names: readonly string[]): Set<number> | null {
   if (names.length === 0) return null;
@@ -147,8 +135,8 @@ export function matchGraph(
   const dateFrom = state.dateFrom.trim();
   const dateTo = state.dateTo.trim();
   const projectIds = resolveProjectIds(view, state.projectNames);
-  // Project tags are matched WHOLE and case-insensitively, as TAG.TAG's UNIQUE
-  // COLLATE NOCASE makes every tag comparison in the app. Folded once here.
+  // Whole-string and case-insensitive, as TAG.TAG's UNIQUE COLLATE NOCASE makes
+  // every tag comparison. Folded once here.
   const projTags =
     state.projectTags.length > 0
       ? new Set(state.projectTags.map((t) => t.trim().toLowerCase()))
@@ -167,19 +155,17 @@ export function matchGraph(
       if (!hit) continue;
     }
     if (title && !p.label.toLowerCase().includes(title)) continue;
-    // `published` is already null for an undated paper (the backend folds the
-    // sentinel), so a date range never silently drops one as "too old".
+    // `published` is null for an undated paper (backend folds the sentinel), so
+    // a date range never silently drops one as "too old".
     if (dateFrom && p.published && p.published < dateFrom) continue;
     if (dateTo && p.published && p.published > dateTo) continue;
     if (author && !p.author_keys.some((a) => a.includes(author))) continue;
     papers.add(p.id);
   }
 
-  // Authors and tags are matched purely by adjacency to a matching paper — the
-  // Visibility checkboxes below are a RENDER concern and deliberately do not
-  // feed into this. Folding them together is what made unchecking "Papers"
-  // blank the whole canvas: it emptied the paper set, and authors and tags went
-  // with it. Match first, hide after.
+  // Authors and tags match purely by adjacency to a matching paper; the
+  // Visibility checkboxes below are a RENDER concern. Folding them in is what
+  // made unchecking "Papers" blank the canvas. Match first, hide after.
   const authors = new Set<string>();
   const tags = new Set<string>();
   for (const pid of papers) {
@@ -205,11 +191,9 @@ export function matchGraph(
 /**
  * The Filters panel's active controls, in the order the panel lists them.
  *
- * Both filter panels open COLLAPSED and everything in them outlives every
- * navigation, so an active filter used to be a canvas of 8% ghosts with nothing
- * on the header to say why. The three Visibility checkboxes count: "don't draw
- * authors" is not an attribute filter, but it is just as much a reason the
- * canvas is not showing what the library holds.
+ * Both panels open COLLAPSED and their state outlives navigation, so without
+ * this the header says nothing about a canvas of 8% ghosts. The Visibility
+ * checkboxes count: "don't draw authors" is just as much a reason.
  */
 export function activeFilterSummary(state: GraphFilterState): string[] {
   const on: string[] = [];
@@ -227,10 +211,9 @@ export function activeFilterSummary(state: GraphFilterState): string[] {
 }
 
 /**
- * The Tag Filter panel's three lists. Only the ROWS count — text left sitting in
- * an add-box is not a filter, which is the same line `matchGraph` draws. The
- * paper-tag rows carry the AND/OR they are combined with, since two rows joined
- * by OR filter nothing like the same two joined by AND.
+ * The Tag Filter panel's three lists. Only the ROWS count — text left in an
+ * add-box is not a filter, the same line `matchGraph` draws. Paper-tag rows
+ * carry their AND/OR, since OR and AND filter nothing alike.
  */
 export function activeTagFilterSummary(state: GraphFilterState): string[] {
   return [
@@ -241,18 +224,13 @@ export function activeTagFilterSummary(state: GraphFilterState): string[] {
 }
 
 /**
- * Why the canvas is empty — i.e. which panel the user has to go to.
+ * Why the canvas is empty — i.e. which panel to send the user to. Only
+ * meaningful when `drawnCount === 0` on a non-empty library.
  *
- * Only meaningful when `drawnCount === 0` on a non-empty library. If any paper
- * still MATCHED, the attribute filters are not the cause: those papers are
- * simply not being drawn, so it is a Visibility checkbox, and "no papers match
- * the active filters" would be a false statement pointing at the wrong panel.
- *
- * `types` names only the switched-off types that had something to show — a
- * library with no tags at all should not be told its Tags are hidden, and it is
- * that library which makes "count the hidden types" the wrong test: switching
- * off Papers and Authors there empties the canvas with two boxes unchecked, not
- * three.
+ * A paper still MATCHING means the attribute filters are not the cause; it is a
+ * Visibility checkbox. `types` names only switched-off types that had something
+ * to show, so a library with no tags is not told its Tags are hidden — which is
+ * also why "count the hidden types" is the wrong test.
  */
 export type NoMatchCause =
   | { kind: "visibility"; types: Array<"Papers" | "Authors" | "Tags"> }

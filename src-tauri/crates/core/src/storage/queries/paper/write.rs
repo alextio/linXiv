@@ -340,15 +340,13 @@ pub fn remove_paper_tags(
 }
 
 /// In-place metadata repair keyed by the stable SOURCE_FK, migrating SOURCE_ID
-/// if the full id changed. Composite-FK ORDER is load-bearing: PAPER.SOURCE_ID
-/// renames BEFORE PAPER_TO_TAG.SOURCE_ID, then the FTS row moves — wrong order
-/// = FK violation or orphaned/duplicated FTS rows.
+/// if the full id changed. FK checks are deferred to commit so the renames can
+/// land in any order; the FTS rebuild must follow them — it reads the new id.
 pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata) -> Result<()> {
     transaction(conn, |tx| {
         // Defer FK checks to commit: immediate FK rejects a parent-key rename
         // (PAPER.SOURCE_ID) while child rows (PAPER_TO_TAG) still reference the
-        // old value, no matter the statement order. Deferring lets the documented
-        // PAPER-first ordering land all renames before the single commit-time check.
+        // old value, no matter the statement order.
         tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
         let old_id: Option<String> = tx
             .query_row(
@@ -361,8 +359,6 @@ pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata)
         let new_id = &meta.source_id;
         let renamed = *new_id != old_id;
         if renamed {
-            // PAPER first (PAPER_TO_TAG's composite FK references it), then roots,
-            // then the PAPER_TO_TAG rename.
             tx.execute(
                 "UPDATE PAPER SET SOURCE_ID = ? WHERE SOURCE_FK = ?",
                 params![new_id, source_fk],

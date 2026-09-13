@@ -10,7 +10,7 @@ use super::scan::{
 };
 
 // ---------------------------------------------------------------------------
-// Raw extraction result (`abstract` is always None).
+// Raw extraction result.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -28,9 +28,8 @@ pub(crate) struct Extracted {
 // ---------------------------------------------------------------------------
 
 /// Resolve the libpdfium path ONCE. Order: `LINXIV_PDFIUM_LIB` env → `pdfium/`
-/// next to the executable → (debug builds only) the dev vendor dir; `None` → the
-/// system library at bind time. The vendor path is `cfg(debug_assertions)`-gated
-/// so it can't be baked into a shipped binary.
+/// next to the executable → the dev vendor dir, `cfg(debug_assertions)`-gated so
+/// it can't ship in a release binary; `None` → the system library at bind time.
 pub(crate) fn pdfium_lib_path() -> Option<&'static std::path::Path> {
     static LIB: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     LIB.get_or_init(|| {
@@ -93,16 +92,15 @@ fn meta_get(md: &PdfMetadata, tag: PdfDocumentMetadataTagType) -> Option<String>
 // extract_pdf_metadata — catch-and-fall-through over the whole pipeline
 // ---------------------------------------------------------------------------
 
-/// SYNCHRONOUS, BLOCKING native FFI — async callers MUST run it via
-/// `tokio::task::spawn_blocking` (see `resolve_pdf_metadata`) so it neither stalls
-/// a runtime worker nor blocks on the per-call libpdfium lock from an executor.
+/// SYNCHRONOUS, BLOCKING native FFI. Async callers reach it through
+/// `resolve_pdf_metadata`, which runs the isolated wrapper on `spawn_blocking`.
 pub(crate) fn extract_pdf_metadata(bytes: &[u8]) -> Extracted {
     // Bind a fresh Pdfium, extract, and drop it within this call (see `bind_pdfium`
     // for the lock mechanism that makes a short-lived instance the correct choice).
-    // catch_unwind degrades a pdfium *panic* to all-None — but only under an unwind
-    // profile; NOTE (D30): in a release build (`panic = "abort"`) a panic aborts the
-    // process, and a native libpdfium *segfault* is uncatchable in either profile.
-    // `extract_pdf_metadata_isolated` is the subprocess boundary covering those.
+    // catch_unwind degrades a pdfium *panic* to all-None; D30 pins the release
+    // profile to `panic = "unwind"` for it (src-tauri/Cargo.toml). A native
+    // libpdfium *segfault* is uncatchable — `extract_pdf_metadata_isolated` is
+    // the subprocess boundary covering that.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(pdfium) = bind_pdfium() else {
             return Extracted::default();
@@ -129,9 +127,8 @@ fn extract_from_doc(doc: &PdfDocument) -> Extracted {
         authors = None;
     }
 
-    // First-page text only. pdfium emits proper newlines, so the title heuristic
-    // sees one logical line per visual line; joined output is capped at 300 chars
-    // in extract_title_from_text.
+    // First-page text only. pdfium emits proper newlines, so extract_title_from_text
+    // sees one logical line per visual line (joins <=3 of them, caps at 300 chars).
     let first_page = doc
         .pages()
         .first()
@@ -158,9 +155,9 @@ fn extract_from_doc(doc: &PdfDocument) -> Extracted {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — the D10 spike against the committed real PDFs. No network:
-// enrichment is not exercised here. The D10 spikes skip (not panic) when
-// libpdfium or a fixture is unavailable — see `load_spike_pdf`.
+// Tests — D10 spikes over the committed real PDFs, skipped (not failed)
+// without libpdfium or a fixture; see `load_spike_pdf`. No network: the
+// junk-byte resolves find no id/DOI/title to enrich from.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -170,11 +167,8 @@ mod tests {
 
     // ---- D10 SPIKE: real committed PDFs (pdfium extraction, no network) ----
 
-    // Skip guard (not panic) for the spike tests below: a dev checkout without
-    // `scripts/fetch_pdfium.sh` run (no libpdfium) or a shallow/sparse checkout
-    // missing the committed fixture shouldn't fail the suite, per this repo's
-    // fixture-gating convention — print why and return `None` for the caller to
-    // early-return on, same as `bind_pdfium`'s own missing-library warning.
+    // Skip guard for the spike tests: print why and return `None` for the caller
+    // to early-return on, rather than fail the suite on a dev/sparse checkout.
     fn load_spike_pdf(name: &str) -> Option<Vec<u8>> {
         if bind_pdfium().is_none() {
             eprintln!(
@@ -195,10 +189,9 @@ mod tests {
         }
     }
 
-    // D10 RESOLVED: pdf-extract rendered this 76-page/29MB paper's first page in
-    // ~183s; pdfium does it in ~0.3s (vs lopdf ~5s). Fast enough to run inline.
-    // The arXiv id is the load-bearing extraction: it drives enrichment, which
-    // supplies the real title/authors.
+    // pdf-extract took ~183s on this 76-page/29MB paper's first page;
+    // pdfium ~0.3s (lopdf ~5s), fast enough to run inline. Only the arXiv id is
+    // asserted: it is what drives enrichment to the real title/authors.
     #[test]
     fn spike_multi_author_2411_fast() {
         let Some(bytes) = load_spike_pdf("2411.10406v2.pdf") else {
@@ -236,10 +229,9 @@ mod tests {
         assert_eq!(m.doi, None);
     }
 
-    // Non-arXiv PDF (no arXiv-id/DOI to enrich from): the text-title heuristic is
-    // the ONLY metadata, so a regression here is silent — guards that the title
-    // doesn't swallow the page (pdfium's proper newlines keep it one line per
-    // visual line).
+    // Non-arXiv PDF: no arXiv id/DOI to enrich from, so a title regression here is
+    // silent. Guards that the title doesn't swallow the page — pdfium's newlines
+    // keep it one line per visual line.
     #[test]
     fn non_arxiv_text_title_is_bounded() {
         let Some(bytes) = load_spike_pdf("paper.pdf") else {
@@ -259,12 +251,11 @@ mod tests {
     }
 
     // Regression for the thread_local deadlock: pdfium-render's thread_safe holds a
-    // process-global lock for a Pdfium's whole lifetime. A per-thread instance pinned
-    // it (the 2nd concurrent extraction blocked forever on a long-lived worker); the
-    // per-call bind+drop releases it. 8 concurrent resolves on a 4-worker runtime must
-    // all finish — the timeout turns a regression into a failure, not a hung suite.
-    // Exercises resolve_pdf_metadata's full path (extraction + enrichment) and when
-    // LINXIV_PDF_WORKER or an adjacent binary is available, the worker subprocess path.
+    // process-global lock for a Pdfium's whole lifetime, so a per-thread instance
+    // pinned it (the 2nd concurrent extraction blocked forever); per-call bind+drop
+    // releases it. 8 resolves on a 4-worker runtime must all finish — the timeout
+    // turns a regression into a failure, not a hung suite. Each call runs resolve's
+    // full path, and the worker subprocess too when a worker binary resolves.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_extractions_do_not_deadlock() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -272,8 +263,7 @@ mod tests {
         for i in 0..8 {
             let data_dir_path = data_dir.path().to_path_buf();
             handles.push(tokio::spawn(async move {
-                // Each call exercises resolve_pdf_metadata's full path (extraction + enrichment).
-                // Result value is irrelevant here — only completion (no deadlock) matters.
+                // Result is irrelevant — only completion (no deadlock) matters.
                 let bytes = format!("%PDF junk {i}").into_bytes();
                 let _ = resolve_pdf_metadata(&bytes, &data_dir_path, "", true).await;
             }));

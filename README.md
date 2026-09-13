@@ -22,7 +22,7 @@ A local-first desktop application for discovering, managing, and visualizing aca
 
 Upload your PDFs, create projects, manage notes, tags, and annotations to organize your library; all locally. linXiv aims to be a one-stop shop for researchers managing their literature, with the near-term goal of extending to research groups who want to share knowledge without going to the web.
 
-> **Development status:** Pre-1.0 (current version `0.3.3`). The database schema is still evolving, but migration structure is in-place.
+> **Development status:** Pre-1.0 (`0.5.0-beta`). The schema is still evolving, but migration structure is in-place.
 
 > **Licensing:** linXiv is GPLv3. The vendored [`linxiv-p2p`](https://github.com/linxiv-dev/linxiv-p2p) submodule (`src-tauri/crates/p2p`) is licensed separately under Apache-2.0.
 
@@ -111,7 +111,7 @@ git submodule update --init --recursive
 
 ## Architecture
 
-linXiv is a Tauri v2 app. The frontend is React 18 + TypeScript (Vite); the backend is native Rust and runs **in-process** inside the app: the webview calls it through a single `api` Tauri command over IPC, and streams PDF bytes over a custom `linxiv://` scheme. SQLite (bundled, FTS5) and PDF extraction (native `libpdfium`) are compiled in; see [docs/architecture.md](docs/architecture.md) for the full workspace layout.
+linXiv is a Tauri v2 app. The frontend is React 19 + TypeScript (Vite); the backend is native Rust and runs **in-process** inside the app: the webview calls it through a single `api` Tauri command over IPC, and streams PDF bytes over a custom `linxiv://` scheme. SQLite (bundled, FTS5) and PDF extraction (native `libpdfium`) are compiled in; see [docs/architecture.md](docs/architecture.md) for the full workspace layout.
 
 ## Setup
 
@@ -203,7 +203,7 @@ Covers papers, tags, projects, notes, PDF annotations, PDFs, DOI resolution, aut
 
 ## MCP server
 
-`linxiv-mcp` is a stdio MCP server exposing ~60 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly.
+`linxiv-mcp` is a stdio MCP server exposing ~75 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly.
 
 The simplest path is to install the desktop app and use **Settings → Integrations**, which registers the bundled server with a detected client.
 
@@ -235,7 +235,7 @@ In a checkout you can run it straight from source with `cargo run -p linxiv-mcp`
 the iroh share peer, and background sync — with no window, for a
 self-hosted or containerized always-on node. Run it from source
 (`cargo run -p linxiv-server --bin linxiv-headless` from `src-tauri/`) or
-build the repo's `Dockerfile`; a bearer token gates every request when it
+build the repo's `Dockerfile`; a bearer token gates the API when it
 binds beyond loopback, and `GET /admin` serves a small management page.
 Setup steps, a ready-made compose file, the environment reference, and
 relay configuration: [docs/headless](docs/headless/README.md).

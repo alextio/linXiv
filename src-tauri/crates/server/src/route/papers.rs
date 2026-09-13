@@ -1,8 +1,8 @@
 //! `/api/papers` routes over `service::paper`.
 //!
-//! The generic `{source_id}` arms match EXACTLY 3 segments; the `/pdf` and
-//! `/pdf-path` subtrees belong to the `pdfs` group (tried first in `mod.rs`).
-//! `POST {source_id}/full-text` is the one 4-segment arm this group owns.
+//! The generic `{source_id}` arms match EXACTLY 3 segments, except
+//! `POST {source_id}/full-text`; `{source_id}/pdf` belongs to `uploads` and
+//! `/pdf-path` to `pdfs`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -75,7 +75,7 @@ fn versions(state: &AppState, fk: &str) -> Result<Value, ApiError> {
 }
 
 /// `GET /api/papers/sfk/{fk}/doi-candidates` — other paper roots sharing this
-/// one's DOI, for the "same paper, different source" suggestion banner.
+/// one's DOI, i.e. merge candidates.
 fn doi_candidates(state: &AppState, fk: &str) -> Result<Value, ApiError> {
     let source_fk = path_i64(fk)?;
     let candidates = state.with_conn(|conn| -> Result<_, ApiError> {
@@ -90,8 +90,6 @@ fn doi_candidates(state: &AppState, fk: &str) -> Result<Value, ApiError> {
 /// `GET /api/papers/sfk/{fk}?version=` — the bare paper object, no envelope.
 fn by_sfk(state: &AppState, fk: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let source_fk = path_i64(fk)?;
-    // A present-but-non-integer or <1 version is a 422, not a silent
-    // fall-through to the latest version.
     let version = crate::route::q_version(ctx)?;
     state.with_conn(|conn| -> Result<Value, ApiError> {
         let paper = if let Some(version) = version {
@@ -145,8 +143,8 @@ async fn fetch_full_text(
     to_value(&receipt)
 }
 
-/// `GET /api/papers/full-text-pending` — how many stored arXiv papers have no
-/// TeX source yet, i.e. how much work `full_text_worker` still has.
+/// `GET /api/papers/full-text-pending` — how many fetchable arXiv papers still
+/// lack TeX, i.e. `full_text_worker`'s remaining backlog.
 fn full_text_pending(state: &AppState) -> Result<Value, ApiError> {
     let pending = state.with_conn(|conn| svc_paper::full_text_backfill_count(conn))?;
     to_value(&svc_paper::FullTextPending { pending })
@@ -211,8 +209,7 @@ fn repair(state: &AppState, fk: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiErro
             .ok_or_else(|| CoreError::PaperNotFound(source_fk.to_string()))?;
         // Date validated after the existence check (the 404 wins over the 422).
         let meta = b.into_metadata(paper.source_id, paper.version, paper.source)?;
-        // This endpoint never renames source_id, so no UNIQUE conflict can
-        // arise; a stray rusqlite error surfaces as CoreError::Internal (500).
+        // source_id is never renamed here, so no UNIQUE conflict can arise.
         svc_paper::repair_paper(conn, source_fk, &meta)?;
         let updated = svc_paper::get(conn, &sfk_key(source_fk))?
             .ok_or_else(|| ApiError::new(500, "Repair failed"))?;
@@ -229,7 +226,7 @@ pub struct PaperMergeBody {
 /// root named in the body INTO this paper (this paper's metadata is canonical;
 /// the duplicate's notes, annotations, memberships, tags, missing versions and
 /// PDFs move over, then the duplicate root is deleted). 404 on unknown roots,
-/// 409 on self/trashed/share-linked duplicates (see `merge_plan`'s guards).
+/// 409 on a self-merge, a trashed root, or a shared-project loser.
 fn merge(state: &AppState, fk: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let winner_fk = path_i64(fk)?;
     let b: PaperMergeBody = ctx.parse_body()?;
@@ -348,9 +345,8 @@ mod tests {
         m
     }
 
-    /// The saved-lookup contract the search page's indicator rests on: stored
-    /// active ids echo back verbatim (namespaced), trashed and unknown ids are
-    /// absent, and an empty list is fine.
+    /// The contract the search page's indicator rests on: active ids echo back
+    /// verbatim, trashed and unknown are absent, an empty list is fine.
     #[tokio::test]
     async fn saved_reports_active_stored_ids_verbatim() {
         let st = state();
@@ -456,9 +452,8 @@ mod tests {
 
     /// The guards that run BEFORE any network call, so they are the testable part
     /// of the arm: unknown paper, and a paper with no arXiv source to fetch. The
-    /// happy path needs a real arXiv fetch, and `arxiv_get`'s host allowlist
-    /// rejects a loopback mock, so it isn't covered by an automated test here --
-    /// same constraint `service::files`'s existing download tests document.
+    /// happy path needs a real arXiv fetch — `arxiv_get` rewrites any host to
+    /// `export.arxiv.org`, so no loopback mock can stand in for it.
     #[tokio::test]
     async fn fetch_full_text_rejects_before_reaching_the_network() {
         let st = state();
@@ -529,8 +524,8 @@ mod tests {
         assert_eq!(err.status, 400);
     }
 
-    /// `full_text` is the FTS payload, not a display field — once ingestion has
-    /// run it is megabytes of TeX per paper.
+    /// `full_text` is the FTS payload, not a display field — once indexed it is
+    /// the whole TeX body (up to 16 MiB).
     #[tokio::test]
     async fn paper_responses_omit_the_indexed_full_text() {
         let st = state();

@@ -75,9 +75,8 @@ export const useUiStore = create<UiState>()(
       name: "linxiv-ui",
       version: 7,
       migrate: migrateUi,
-      // The webview starts every launch at 100%; re-apply the saved zoom once
-      // the persisted value is loaded (and normalize it in case the stored
-      // number is out of range or corrupt).
+      // The webview starts every launch at the defaults; re-apply the persisted
+      // zoom and density, normalized in case a stored value is out of range.
       onRehydrateStorage: () => (state) => {
         if (state) {
           state.zoom = clampZoom(state.zoom);

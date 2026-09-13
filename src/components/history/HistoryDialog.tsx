@@ -418,8 +418,8 @@ function ChangeItem({
         >
           {change.hash.slice(0, 7)}
         </button>
-        {/* title = full actor hex, hover-copyable for the operator's pairing
-            workflow; click toggles filtering the list to this actor. */}
+        {/* title = the full actor hex for the operator's pairing workflow;
+            click toggles filtering the list to this actor. */}
         <button
           type="button"
           style={{ color: "var(--color-text)" }}

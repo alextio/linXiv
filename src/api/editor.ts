@@ -28,7 +28,7 @@ export async function listEditorProjects(
   return res.projects;
 }
 
-/** Create an editor project (note + scaffolded vault). Returns the new note id. */
+/** Create an editor project: a note plus its scaffolded vault. */
 export async function createEditorProject(
   body: CreateEditorProjectBody
 ): Promise<{ noteId: number; projectName: string; mainFile: string }> {
@@ -39,7 +39,7 @@ export async function createEditorProject(
 }
 
 /**
- * The doc the host pushes to the editor: main file + all text files. The
+ * The doc pushed to the editor: main file + name, `files` is {}. The
  * backend doesn't know the bridge's `projectId` (that IS the noteId); the
  * caller stamps it on before sendDocOpen, so this returns the payload sans id.
  */

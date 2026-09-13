@@ -1,10 +1,9 @@
 // The wire types the frontend consumes.
 //
-// Everything backed by a canonical serializer in linxiv-core is GENERATED into
+// Anything with a canonical serializer in linxiv-core is GENERATED into
 // ./generated.ts (CONTEXT.md § Serializer Convention); this file only aliases
-// those to the frontend's vocabulary and hand-writes the shapes that have no
-// single Rust struct to generate from. Each hand-written one says why — if the
-// reason goes away, delete it here and add a `#[derive(TS)]` there.
+// those to the UI's vocabulary and hand-writes the shapes with no single Rust
+// struct. Each hand-written one says why; when the reason goes, generate it.
 import type { ThemeColors, ColorAlphas } from "../lib/theme";
 import type {
   PaperDetails,
@@ -153,8 +152,7 @@ export type {
   SyncedReceipt,
 } from "./generated";
 
-// `PUT /api/papers/sfk/{fk}` body — core names it RepairFields; the UI has
-// always called it PaperRepairBody.
+// `PUT /api/papers/sfk/{fk}` body; core names it RepairFields.
 export type { RepairFields as PaperRepairBody } from "./generated";
 
 // History (`/api/history`): change log, per-change diff, restore.
@@ -170,8 +168,7 @@ export type {
   RestoreBody,
 } from "./generated";
 
-// Frontend names for the generated serializers. The Rust name is the model,
-// the alias is what the UI has always called it.
+// Frontend names for the generated serializers.
 export type Paper = PaperDetails;
 export type Project = ProjectOut;
 export type Note = NoteDetails;
@@ -181,17 +178,16 @@ export type Author = AuthorWithCount;
 export type AuthorDetail = AuthorWithPapers;
 export type FeedFilterRule = FilterRule;
 
-// `POST /api/share/{id}/sync` serializes one of two generated shapes
-// (share_sync.rs); the union itself has no single Rust struct.
+// `POST /api/share/{id}/sync` returns one of two generated shapes
+// (share_sync.rs); the union has no Rust struct of its own.
 export type SyncReceipt = SyncSkipped | SyncedReceipt;
 
 // --- Not generated ---------------------------------------------------------
 
 // `GET /api/settings` returns `UserSettings::all()` — a free-form JSON object
-// seeded from crates/core/assets/default_settings.json, plus the mailto env
-// keys overlaid by route/settings.rs. There is no Rust struct, so the index
-// signature is the honest type, not an escape hatch: the keys below are the
-// ones the app actually reads.
+// seeded from crates/core/assets/default_settings.json, with the mailto env
+// keys overlaid by route/settings.rs. No Rust struct, so the index signature
+// is honest, not an escape hatch; the keys below are the ones the app reads.
 export interface Settings {
   pdf_save_limit_mb: number;
   theme_overrides: Partial<ThemeColors>;
@@ -203,28 +199,27 @@ export interface Settings {
   home_feed_url?: string;
   rss_cache_retention_days?: number;
   update_check_frequency?: string;
-  /** Overlaid from the process env by route/settings.rs, never persisted here. */
+  /** Overlaid from the process env; set via `PATCH /api/env`. */
   CROSSREF_MAILTO?: string;
   OPENALEX_MAILTO?: string;
-  /** Self-hosted iroh relay override; empty keeps n0's public relays. Read once at app launch. */
+  /** Self-hosted iroh relay override; empty keeps n0's public relays. */
   p2p_relay_url?: string;
   p2p_relay_auth_token?: string;
-  /** If true, refuse to bind the p2p node at all rather than falling back to n0's public relay. */
+  /** If set, refuse to bind the p2p node rather than use n0's relays. */
   p2p_relay_only?: boolean;
-  /** Local history attribution: journal actor hex (lowercase) → display name.
-   *  Overrides a remote node's host-assigned display_name in the UI. */
+  /** History attribution: actor hex (lowercase) → display name, overriding a
+   *  remote node's host-assigned display_name. */
   actor_names?: Record<string, string>;
   [key: string]: unknown;
 }
 
-// The Knowledge Graph's wire shapes are GENERATED from `linxiv_core::graph`
-// (`GraphView` and friends in ./generated.ts); `npm run types:check` is the
-// drift check.
+// The graph's wire shapes are GENERATED from `linxiv_core::graph` (`GraphView`
+// and friends in ./generated.ts); `npm run types:check` catches drift.
 
-// Core's `service::feed::FeedResponse` carries `entries` as untyped JSON blobs
-// (the cached feed entries round-trip through the DB as stored JSON), so the
-// generated type would say `JsonValue` where the app relies on this shape —
-// hand-written until core types the cached entries.
+// Core's `service::feed::FeedResponse` types `entries` as `Vec<Value>` (cached
+// entries round-trip through the DB as stored JSON), so generating it would
+// give `JsonValue` where the app relies on this shape. Hand-written until core
+// types those entries.
 export interface FeedEntry {
   title: string;
   link: string;

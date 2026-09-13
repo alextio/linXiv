@@ -1,4 +1,4 @@
-//! project service — thin orchestration over `storage::queries::{project,tag,note,paper}`.
+//! project service — thin orchestration over `storage::queries::{project,tag,paper}`.
 //! DB-touching fns take `conn` first.
 //!
 //! Two write contracts that are deliberately opposite (do NOT unify):
@@ -32,7 +32,7 @@ pub struct Projects {
     pub status: Option<Status>,
 }
 
-// ── Tag helpers (shared by create/update) ────────────────────────────────────
+// ── Tag helpers ─────────────────────────────────────────────────────────────
 
 /// Strip + case-insensitive dedup, case-preserving, dropping blanks.
 fn normalize_tags(tags: &[String]) -> Vec<String> {
@@ -82,8 +82,7 @@ fn fill_tags(conn: &Connection, mut p: ProjectDetails) -> Result<ProjectDetails>
     Ok(p)
 }
 
-/// Batched [`fill_tags`] for list paths: one tag query for the whole slice
-/// instead of one per project.
+/// Batched [`fill_tags`] for list paths: one chunked tag query, not one per project.
 fn fill_tags_bulk(conn: &Connection, projects: &mut [ProjectDetails]) -> Result<()> {
     let ids: Vec<i64> = projects.iter().filter_map(|p| p.id).collect();
     let mut by_project = tq::project_tags_by_project(conn, &ids)?;
@@ -95,7 +94,7 @@ fn fill_tags_bulk(conn: &Connection, projects: &mut [ProjectDetails]) -> Result<
     Ok(())
 }
 
-// ── Reads ─────────────────────────────────────────────────────────────────────
+// ── Reads + tag/share-id writes ─────────────────────────────────────────────
 
 /// Single project by project_fk (with tags). `None` when project_fk is unset
 /// or no row matches.
@@ -226,13 +225,13 @@ pub fn ensure_share_id(conn: &Connection, project_fk: i64) -> Result<String> {
     pq::ensure_share_id(conn, project_fk, &candidate)?.ok_or(CoreError::ProjectNotFound(project_fk))
 }
 
-/// Reverse share lookup: the project (if any) whose SHARE_ID equals `share_id`.
+/// Reverse share lookup: the live (non-trashed) project holding `share_id`.
 pub fn find_by_share_id(conn: &Connection, share_id: &str) -> Result<Option<i64>> {
     pq::find_by_share_id(conn, share_id)
 }
 
-/// Detach the local project (if any) linked to this share_id; the project and
-/// the share both survive. Returns whether a link existed.
+/// Detach the live (non-trashed) holder of this share_id; the project and the
+/// share both survive. Returns whether one was cleared.
 pub fn release_share_id(conn: &Connection, share_id: &str) -> Result<bool> {
     Ok(pq::release_share_id(conn, share_id)? > 0)
 }
@@ -258,8 +257,7 @@ pub fn adopt_share_id(conn: &Connection, project_fk: i64, share_id: &str) -> Res
 // ── Create (ATOMIC insert + membership) ─────────────────────────────────────────
 
 /// Insert a new project and its membership in ONE transaction, then link tags
-/// (separate). Atomicity is load-bearing: a mid-membership failure rolls the
-/// PROJECT row back too — no orphan project.
+/// (separate). Atomicity is load-bearing — see the module header.
 pub fn create(conn: &mut Connection, project: &ProjectIn) -> Result<i64> {
     let name = project.name.trim();
     if name.is_empty() {
@@ -289,8 +287,7 @@ pub fn create(conn: &mut Connection, project: &ProjectIn) -> Result<i64> {
 /// Partial update. `color` is the D16 UNSET sentinel (`Option<Option<i32>>`): outer
 /// `None` = unchanged, `Some(None)` = clear, `Some(Some(v))` = set. `ProjectNotFound`
 /// if absent, `ProjectDeleted` if soft-deleted and the update is not a restore.
-/// Intentionally NON-atomic (do NOT make atomic): tag sync and the field UPDATE are
-/// separate transactions, so a failure between them leaves tags changed and fields not.
+/// Intentionally NON-atomic (do NOT make atomic) — see the module header.
 pub fn update(conn: &mut Connection, upd: &ProjectUpdateIn) -> Result<()> {
     let mut p = pq::get_project(conn, upd.project_fk, false)?
         .ok_or(CoreError::ProjectNotFound(upd.project_fk))?;
@@ -313,7 +310,6 @@ pub fn update(conn: &mut Connection, upd: &ProjectUpdateIn) -> Result<()> {
         dirty = true;
     }
     if let Some(color) = upd.color {
-        // outer Some = caller supplied a value (inner None clears, inner Some sets).
         p.color = color;
         dirty = true;
     }
@@ -373,8 +369,7 @@ fn save_fields(conn: &Connection, p: &ProjectDetails) -> Result<()> {
 
 // ── Membership seam ─────────────────────────────────────────────────────────────
 
-/// Guards only (existence + not-deleted), no write. Import flows call this
-/// before mutating the library.
+/// Guards only (existence + not-deleted), no write.
 pub fn ensure_membership_writable(conn: &Connection, project_fk: i64) -> Result<()> {
     match pq::get_project(conn, project_fk, false)? {
         None => Err(CoreError::ProjectNotFound(project_fk)),
@@ -439,7 +434,7 @@ pub fn remove_papers(
 }
 
 /// A project's papers for the text exporters, resolved ONE way for every
-/// surface: latest-version rows in library order, filtered in SQL.
+/// surface: latest-version rows, newest published first.
 pub fn export_papers(conn: &Connection, source_fks: &[i64]) -> Result<Vec<PaperDetails>> {
     crate::service::paper::get_by_source_fks(conn, source_fks)
 }
@@ -1185,7 +1180,7 @@ mod tests {
             },
         )
         .unwrap();
-        // a note on project a to exercise note_counts.
+        // a note on project a; get_many ignores it.
         conn.execute(
             "INSERT INTO NOTE (SOURCE_FK, PROJECT_FK, TITLE, NOTE, CREATED_AT, UPDATED_AT) \
              VALUES (10, ?1, 't', 'c', '2024-01-01T00:00:00', '2024-01-01T00:00:00')",

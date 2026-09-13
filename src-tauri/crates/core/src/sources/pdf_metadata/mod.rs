@@ -1,7 +1,7 @@
 //! pdf_metadata — PDF-first metadata extraction (D10 spike). pdfium reads
 //! first-page text + the Info dict; scanners/heuristics are hand-rolled (no
 //! `regex` dep). A malformed PDF degrades to an all-None record — see the D30
-//! note in `extract_pdf_metadata` for the release/`abort` and segfault caveats.
+//! note in `extract_pdf_metadata` for the panic/segfault caveats.
 //!
 //! `resolve_pdf_metadata` is PDF-metadata-first: the PDF's own title/authors win
 //! outright when both present. A text-scanned arXiv id/DOI is only a candidate

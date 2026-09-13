@@ -38,7 +38,7 @@ pub fn soft_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Optio
     })
 }
 
-/// `restore_paper` — STATUS='active', and rebuild the FTS entry that
+/// Set STATUS='active' and rebuild the FTS entry that
 /// `soft_delete_paper` dropped. Returns the stored PDF_PATH (the file may be gone).
 pub fn restore_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
@@ -72,7 +72,7 @@ pub fn hard_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Optio
     })
 }
 
-/// `is_paper_deleted` — true if a PAPER_ROOTS row exists with STATUS='deleted'.
+/// True if a PAPER_ROOTS row exists with STATUS='deleted'.
 pub fn is_paper_deleted(conn: &Connection, source_id: &str) -> Result<bool> {
     let row: Option<i64> = conn
         .query_row(
@@ -120,7 +120,7 @@ pub struct DeletedPaper {
     pub had_pdf: bool,
 }
 
-/// `list_deleted_papers` — all soft-deleted papers, newest-deleted first.
+/// All soft-deleted papers, newest-deleted first.
 pub fn list_deleted_papers(conn: &Connection) -> Result<Vec<DeletedPaper>> {
     let mut stmt = conn.prepare("SELECT * FROM deleted_papers ORDER BY deleted_at DESC")?;
     let mut rows = stmt.query([])?;

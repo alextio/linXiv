@@ -279,10 +279,9 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
   const orcidCandidates = mergeSuggestions?.candidates ?? [];
   const nameCandidates = mergeSuggestions?.name_candidates ?? [];
 
-  // Two-click confirm for every destructive action on this page — per-paper
-  // link surgery and both merge buttons (window.confirm is unreliable under
-  // WebKitGTK): first click arms, second fires. One shared key means arming
-  // one action disarms any other.
+  // Two-click confirm for per-paper link surgery and both merge buttons
+  // (window.confirm is suppressed under WebKitGTK): first click arms, second
+  // fires. One shared key means arming one action disarms any other.
   const [armedPaperAction, setArmedPaperAction] = useState<string | null>(null);
 
   const unlinkMutation = useMutation({

@@ -12,7 +12,7 @@ pub(super) const FORMAT_VERSION: i64 = 1;
 pub enum OnConflict {
     /// Keep the stored paper metadata; just (re)link it to the imported project.
     Merge,
-    /// Re-write stored paper metadata from the archive (`repair_paper`).
+    /// Re-write stored paper metadata from the archive (unvalidated).
     Overwrite,
 }
 
@@ -221,7 +221,7 @@ pub struct ArchivePdf {
     pub bytes: Vec<u8>,
 }
 
-/// `ImportPreview` — what `commit_import` would do, read without touching the DB.
+/// What `commit_import` would do, read without touching the DB.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct ImportPreview {
     pub project_name: String,

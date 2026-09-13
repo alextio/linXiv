@@ -1,6 +1,6 @@
-//! Local change journal: automerge snapshots of every project + the library,
-//! written at the top of each sync pass (nudge-driven, same debounce). SQLite
-//! stays authoritative; history/undo read the journal. Docs live at
+//! Local change journal: automerge snapshots of every live project + the
+//! library, written by its own debounced loop at share sync's cadence.
+//! SQLite stays authoritative; history/undo read the journal. Docs live at
 //! `<data_dir>/journal/p<fk>.automerge` + `library.automerge` — ids are keyed
 //! by project fk, never SHARE_ID (minting one would mark the project
 //! share-linked and e.g. block paper merges).
@@ -21,7 +21,7 @@ use linxiv_share::{
 use crate::route::ApiError;
 use crate::state::AppState;
 
-/// Doc id of the library-wide journal (papers in no project, library notes).
+/// Doc id of the library-wide journal (active papers, project-less notes).
 pub const LIBRARY_DOC: &str = "library";
 
 pub fn journal_dir() -> PathBuf {
@@ -34,8 +34,8 @@ pub fn project_doc_id(project_fk: i64) -> String {
 
 static NUDGE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-/// Poke the journal loop. `share_sync::nudge` calls this — every successful
-/// non-GET on `route()` and on the share front door (`share::dispatch`).
+/// Poke the journal loop. `share_sync::nudge` calls this — on successful
+/// non-GETs: all of `share::dispatch`'s, `route()`'s mirroring ones.
 pub fn nudge() {
     NUDGE.notify_one();
 }
@@ -250,9 +250,9 @@ fn build_library_snapshot(conn: &Connection) -> Result<SharedProject, ShareError
     })
 }
 
-/// Restore a project to its state as of change `to` — destructive in both
-/// directions: snapshot content comes back (additive apply), later additions
-/// are removed (removal apply), and the project row is replaced wholesale.
+/// Restore a project to its state as of change `to` — destructive both ways:
+/// snapshot content comes back (additive apply), later additions are removed
+/// (removal apply), and name/description/color/tags are overwritten.
 pub fn restore_project(
     state: &AppState,
     dir: &Path,
@@ -457,8 +457,7 @@ mod tests {
     }
 
     /// A bracketed remote write journals exactly its delta under the given
-    /// actor; pending local changes flush under the node's actor first, and a
-    /// later background pass finds nothing left to claim.
+    /// actor, and a later background pass finds nothing left to claim.
     #[tokio::test]
     async fn remote_write_bracket_attributes_the_delta() {
         let (state, _pid) = seeded();

@@ -11,7 +11,7 @@ fn to_json_string(v: &Value) -> Result<String> {
     serde_json::to_string(v).map_err(|e| CoreError::Internal(e.to_string()))
 }
 
-/// `save_state` — upsert the ID = 1 row. `clauses`/`results`/`saved_ids` are the
+/// Upsert the ID = 1 row. `clauses`/`results`/`saved_ids` are the
 /// request-body JSON arrays (stored verbatim); `sort_prefs` → JSON text or NULL.
 pub fn save_state(
     conn: &Connection,
