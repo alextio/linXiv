@@ -18,10 +18,9 @@ import type {
 } from "../types/api";
 
 // The in-process app serves PDF bytes over the `linxiv://` custom scheme (the
-// invoke()-based transport can't stream binary). The webview host form differs by
-// platform (Tauri docs): linxiv://localhost on Linux/macOS, http://linxiv.localhost
-// on Windows. In browser dev there is no custom scheme — keep the HTTP URL so the
-// Vite proxy reaches the sidecar.
+// invoke() transport can't stream binary). The host form is platform-dependent:
+// linxiv://localhost on Linux/macOS, http://linxiv.localhost on Windows. Browser
+// dev has no custom scheme, so callers keep the HTTP URL for the Vite proxy.
 function linxivUrl(path: string): string {
   const isWindows =
     typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
@@ -63,11 +62,9 @@ export function listProjectPapers(projectId: number): Promise<PapersListing> {
   return listPapers(PAPER_LIMIT_MAX, 0, undefined, projectId);
 }
 
-/**
- * Which of the given canonical stored ids (`entry_id`s, e.g. "arxiv:2204.12985")
- * the library holds active. Matches echo back verbatim; trashed/unknown ids are
- * absent. Backs the search page's saved indicator.
- */
+/** Which of the given stored ids (`entry_id`s, e.g. "arxiv:2204.12985") the
+ *  library holds active, echoed back verbatim — trashed/unknown ids are absent.
+ *  Backs the search page's saved indicator. */
 export async function getSavedSourceIds(entryIds: string[]): Promise<string[]> {
   if (entryIds.length === 0) return [];
   const body: PaperSavedBody = { source_ids: entryIds };
@@ -98,10 +95,10 @@ export async function getDoiVersionCandidates(sfk: number): Promise<DoiVersionCa
   return data.candidates;
 }
 
-// Merge a duplicate paper root INTO the paper `winnerSfk` (the open paper's
-// metadata stays canonical; the duplicate's notes, annotations, memberships,
-// tags, missing versions and PDFs move over, then the duplicate is deleted).
-// 409s on self/trashed/share-linked duplicates.
+// Merge a duplicate paper root INTO `winnerSfk`: the winner's metadata stays
+// canonical; the duplicate's notes, annotations, memberships, tags, missing
+// versions and PDFs move over, then it's deleted. 409s on self/trashed/
+// share-linked duplicates.
 export async function mergePapers(
   winnerSfk: number,
   loserSfk: number
@@ -145,11 +142,9 @@ export async function searchLibrary(
 /** Core's `FullTextReceipt`. */
 export type { FullTextReceipt as FullTextResult } from "../types/api";
 
-/**
- * Downloads a paper's arXiv TeX source and indexes it, so `searchLibrary` can
- * match on the body and not just the metadata. arXiv-only; already-indexed
- * papers are skipped unless `force`.
- */
+/** Downloads a paper's arXiv TeX source and indexes it, so `searchLibrary` can
+ *  match the body and not just the metadata. Already-indexed papers are skipped
+ *  unless `force`. */
 export async function fetchFullText(
   sourceId: string,
   force = false
@@ -160,22 +155,17 @@ export async function fetchFullText(
   );
 }
 
-/**
- * How many stored arXiv papers still have no indexed TeX source — the backlog
- * the background full-text worker is working through.
- */
+/** How many stored arXiv papers still have no indexed TeX source — the backlog
+ *  the background full-text worker chews through. */
 export async function fullTextPending(): Promise<FullTextPending> {
   return libraryFetch<FullTextPending>("/api/papers/full-text-pending");
 }
 
-/**
- * Returns the URL to stream/download the PDF for a paper. In Tauri this hits
- * the backend directly; in browser dev it goes through the Vite proxy.
- */
+/** URL that streams a paper's PDF. */
 export function getPaperPdfUrl(sourceId: string, version?: number): string {
   const id = encodeURIComponent(sourceId);
   // Tauri: id travels as a query param (a slash-bearing old-style id stays one
-  // token). Browser dev: the HTTP path the Vite proxy forwards to the sidecar.
+  // token). Browser dev: the HTTP path Vite proxies to the dev server.
   if (isTauri) {
     const v = version !== undefined ? `&version=${version}` : "";
     return linxivUrl(`pdf?id=${id}${v}`);
@@ -184,10 +174,8 @@ export function getPaperPdfUrl(sourceId: string, version?: number): string {
   return `${BASE_URL}/api/papers/${id}/pdf${query}`;
 }
 
-/**
- * URL that streams an external (arXiv) PDF through the host-allowlisted proxy.
- * Used by the preview pages' CORS fallback. linxiv:// in the app, HTTP in dev.
- */
+/** URL that streams an external (arXiv) PDF through the host-allowlisted proxy —
+ *  the preview pages' CORS fallback. linxiv:// in the app, HTTP in dev. */
 export function getPdfProxyUrl(remoteUrl: string): string {
   const url = encodeURIComponent(remoteUrl);
   if (isTauri) return linxivUrl(`pdf-proxy?url=${url}`);

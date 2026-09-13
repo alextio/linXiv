@@ -22,9 +22,9 @@ pub struct FetchedFeed {
     pub entries: Vec<rss::CacheEntry>,
 }
 
-/// The filtered feed page: survivors of block/dismissal/rule filtering (recorded
-/// as seen), plus which are already in the library. `window_was_empty` reports the
-/// pre-filter DB window, distinguishing "nothing cached" from "everything filtered out".
+/// The filtered feed page: up to 200 survivors of block/dismissal/rule filtering
+/// (recorded as seen), plus which are already in the library. `window_was_empty`
+/// reports the pre-filter DB window: "nothing cached" vs "everything filtered out".
 pub struct FeedPage {
     pub entries: Vec<Value>,
     pub saved_arxiv_ids: Vec<String>,
@@ -281,8 +281,8 @@ mod tests {
         );
     }
 
-    /// Dismissed versions drop out of the page; survivors are recorded as
-    /// seen; `window_was_empty` reflects the pre-filter window.
+    /// Dismissed versions drop out of the page; `window_was_empty` reflects
+    /// the pre-filter window.
     #[test]
     fn read_page_filters_dismissed_and_reports_raw_window() {
         let mut c = conn();

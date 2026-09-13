@@ -98,8 +98,7 @@ pub fn validate_backup_source(src: &Path) -> Result<()> {
         )));
     }
 
-    // Validate first: open + query PAPER forces the header read and confirms
-    // this is actually a linXiv DB.
+    // Open + query PAPER: forces the header read, confirms a linXiv DB.
     let check = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| CoreError::BadRequest(format!("cannot read backup file: {e}")))?;
     let is_linxiv_db: i64 = check
@@ -173,7 +172,7 @@ pub fn restore(src: &Path, db_path: &Path) -> Result<()> {
         return Err(CoreError::Internal(format!("restore copy failed: {e}")));
     }
 
-    // Drop stale sidecars from the pre-restore DB before the fresh file lands.
+    // Drop the outgoing DB's stale sidecars before the fresh file lands.
     for suffix in ["-journal", "-wal", "-shm"] {
         let _ = std::fs::remove_file(sidecar(db_path, suffix));
     }

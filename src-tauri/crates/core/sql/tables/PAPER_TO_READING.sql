@@ -1,19 +1,14 @@
--- Per-paper reading status inside a reading-list PROJECT, stored SPARSELY:
--- the default status (unread) is the ABSENCE of a row, so only deviations
--- (reading / read) ever get persisted. Setting a paper back to unread deletes
--- its row. STATUS holds only the non-default values 'reading' | 'read'.
--- Keyed on (PROJECT_FK, SOURCE_FK): one status per paper per reading list,
--- covering all versions of the paper (SOURCE_FK → PAPER_ROOTS, like membership).
--- The composite FK ties a status row to the paper's PROJECT_TO_PAPER membership
--- row (not directly to PROJECT/PAPER_ROOTS): removing a paper from a project
--- deletes its PROJECT_TO_PAPER row, which cascades here too, so reading status
--- can't outlive membership and silently resurrect on re-add. Needs
--- idx_project_to_paper_unique on PROJECT_TO_PAPER(PROJECT_FK, SOURCE_FK) by the
--- time of any DML on either table (not at CREATE TABLE time) — init_db dedups
--- pre-schema, then the project_to_paper_unique_index migration creates it before
--- any write — and needs the removal to be a genuine delete,
--- not a blanket delete+reinsert of unchanged rows in one statement (that would
--- cascade-clear this table too; see save_source_fks).
+-- Per-paper reading status inside a reading-list PROJECT, stored SPARSELY: unread
+-- is the ABSENCE of a row, so setting a paper back to unread deletes its row and
+-- only 'reading'/'read' are ever stored. One status per paper per reading list,
+-- covering every version of the paper (SOURCE_FK → PAPER_ROOTS, like membership).
+-- The composite FK targets the paper's PROJECT_TO_PAPER membership row, not
+-- PROJECT/PAPER_ROOTS: dropping a paper from a project cascades its status away,
+-- so status can't outlive membership and silently resurrect on re-add. That needs
+-- PROJECT_TO_PAPER(PROJECT_FK, SOURCE_FK) uniquely indexed by DML time (see that
+-- file), and needs the removal to be a genuine delete, not a blanket
+-- delete+reinsert of unchanged rows (that would cascade-clear this table too;
+-- see save_source_fks).
 CREATE TABLE IF NOT EXISTS PAPER_TO_READING(
     PROJECT_FK  INTEGER NOT NULL,
     SOURCE_FK   INTEGER NOT NULL,

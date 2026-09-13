@@ -20,7 +20,7 @@ fn goldens_with_extension(ext: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// `tag_list-all.json` -> `["tag", "list-all"]`.
+/// `tag_list-all` -> `["tag", "list-all"]`.
 fn argv_from_slug(slug: &str) -> Vec<&str> {
     if slug.is_empty() {
         vec![]
@@ -104,7 +104,7 @@ fn json_goldens_match_byte_for_byte() {
     }
 }
 
-/// A bare `assert_eq!` on two multi-KB strings is unreadable; point at the line.
+/// `assert_eq!` on whole blobs hides where they diverge; point at the line.
 fn describe_diff(expected: &str, actual: &str) -> String {
     let exp: Vec<&str> = expected.lines().collect();
     let act: Vec<&str> = actual.lines().collect();
@@ -117,7 +117,7 @@ fn describe_diff(expected: &str, actual: &str) -> String {
             exp.get(i).unwrap_or(&"<end of output>"),
             act.get(i).unwrap_or(&"<end of output>"),
         ),
-        // Same lines but unequal strings: trailing-newline difference.
+        // Same lines, unequal strings: whitespace-only difference.
         None => "  lines are identical; trailing whitespace differs\n".to_string(),
     };
     msg.push_str(&format!(

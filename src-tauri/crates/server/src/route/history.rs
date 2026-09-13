@@ -66,7 +66,7 @@ pub struct DeviceActor {
     pub actor: Option<String>,
 }
 
-/// One row of `GET /api/history/...` (`HistoryChange` in src/api/history.ts).
+/// One row of `GET /api/history/...`.
 #[derive(Serialize, ts_rs::TS)]
 pub struct ChangeRow {
     pub hash: String,

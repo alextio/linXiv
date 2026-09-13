@@ -1,11 +1,11 @@
-//! Core error model. Each variant carries its HTTP-equivalent status so every
-//! surface returns the same `{"error": "<msg>"}` body + status. Plan §5 + D21.
+//! Core error model. `http_status` maps each variant to an HTTP-equivalent
+//! status; the shared `Display` text is what every surface emits. Plan §5 + D21.
 
 #[derive(thiserror::Error, Debug)]
 pub enum CoreError {
     // ── Typed failure modes (named so callers can branch + word them) ──────
-    /// Membership guard miss. 404. Carries the project id so every surface
-    /// words the message identically.
+    /// Project row absent. 404. Carries the id so every surface words the
+    /// message identically.
     #[error("Project {0} not found")]
     ProjectNotFound(i64),
     /// Project is soft-deleted. 400.
@@ -21,7 +21,7 @@ pub enum CoreError {
     /// Paper imported but project link failed. 400.
     #[error("{0}")]
     PaperLink(String),
-    /// Upload over the size limit. 413.
+    /// PDF storage quota exceeded. 413.
     #[error("{0}")]
     PdfTooLarge(String),
     /// 404.
@@ -45,7 +45,7 @@ pub enum CoreError {
     NotFound(String),
     #[error("{0}")]
     BadRequest(String),
-    /// Uniqueness violation / managed-storage / author-has-papers. 409.
+    /// Merge refusal / author-has-papers / DB in use. 409.
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -58,7 +58,7 @@ pub enum CoreError {
 }
 
 impl CoreError {
-    /// HTTP-equivalent status — the boundary contract every surface preserves.
+    /// HTTP-equivalent status; the router turns it into `ApiError.status`.
     pub fn http_status(&self) -> u16 {
         use CoreError::*;
         match self {
@@ -74,8 +74,8 @@ impl CoreError {
     }
 }
 
-/// rusqlite failures surface as Internal (500); the few 409 cases (uniqueness
-/// violations) are raised explicitly as CoreError::Conflict at the call site.
+/// rusqlite failures surface as Internal (500); `storage::backup` matches
+/// busy/locked handles into `Conflict` (409) before `?` reaches here.
 impl From<rusqlite::Error> for CoreError {
     fn from(e: rusqlite::Error) -> Self {
         CoreError::Internal(e.to_string())

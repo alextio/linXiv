@@ -33,7 +33,7 @@ function Keys({ keys }: { keys: string[] }) {
   );
 }
 
-/** Click to rebind: press a combo, Esc to cancel, blur to cancel. Warns
+/** Click to rebind: press a combo, Esc or blur to cancel. Warns
  * (and refuses to save) on a collision with another shortcut's binding. */
 function ShortcutBinding({ shortcut }: { shortcut: Shortcut }) {
   const override = useShortcutsStore((s) => s.overrides[shortcut.id]);

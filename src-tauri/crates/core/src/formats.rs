@@ -211,7 +211,7 @@ fn old_style_arxiv(sid: &str) -> bool {
 
 // ── BibTeX import ────────────────────────────────────────────────────────────
 
-/// Parse a BibTeX document into `PaperMetadata`: source_id = doi or entry key,
+/// Parse BibTeX into `PaperMetadata`: source_id `doi:<doi>` or `local:<key>`,
 /// version 1, source "bibtex", year→Jan-1 date (falling back to 1900-01-01).
 pub fn bibtex_import(text: &str) -> Result<Vec<PaperMetadata>, String> {
     let bib = Bibliography::parse(text).map_err(|e| format!("BibTeX parse error: {e}"))?;
@@ -276,7 +276,7 @@ fn parse_year(entry: &biblatex::Entry) -> NaiveDate {
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(1900, 1, 1).unwrap())
 }
 
-/// "Given Last" display name (prefix/suffix folded in), trimmed.
+/// "Given Last" display name (prefix/suffix folded in).
 fn format_person(p: &biblatex::Person) -> String {
     [
         p.given_name.as_str(),

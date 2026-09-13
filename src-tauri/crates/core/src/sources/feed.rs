@@ -66,7 +66,7 @@ fn parse_arxiv_link(link: &str) -> Option<(String, i64)> {
     if base.is_empty() {
         return None;
     }
-    // Validate against arXiv's two real id shapes: new (YYYY.XXXXX) or old (archive/NNNNNNN).
+    // Validate the two real arXiv id shapes: new (YYMM.NNNNN) or old (archive/NNNNNNN).
     if let Some((archive, digits)) = base.split_once('/') {
         // Old-style: archive/7digits
         if digits.len() != 7 || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -253,8 +253,8 @@ struct ParseState {
 }
 
 impl ParseState {
-    /// Opens a new entry on `<item>`/`<entry>`, else updates the in-progress entry's
-    /// link/guid/author state, or clears `text` ahead of the top-level `<title>`.
+    /// Opens a new entry on `<item>`/`<entry>`, else records the link/guid/author
+    /// state for it and clears `text` ahead of every leaf parsed on End.
     fn handle_start_event(&mut self, e: &BytesStart<'_>) {
         let name = e.name();
         let l = local(name.as_ref());
@@ -307,7 +307,7 @@ fn handle_general_ref_event(e: &BytesRef<'_>, text: &mut String) {
     match e.resolve_char_ref() {
         Ok(Some(c)) => text.push(c),
         Ok(None) => {
-            // Named entity: check XML predefined, then common HTML entities.
+            // Named entity.
             if let Ok(name) = e.decode() {
                 if let Some(s) = quick_xml::escape::resolve_predefined_entity(&name) {
                     text.push_str(s);
@@ -413,7 +413,7 @@ pub fn parse_feed(xml: &[u8]) -> Result<Feed> {
             Ok(event) => event,
             Err(_e) => {
                 // Malformed fragment: drop the in-progress entry and keep parsing
-                // (mirror arxiv::parse_atom's skip); bail if the reader stalls.
+                // (arxiv::parse_atom aborts); bail if the reader stalls.
                 let pos = reader.buffer_position();
                 if last_err_pos == Some(pos) {
                     break;
@@ -438,7 +438,6 @@ pub fn parse_feed(xml: &[u8]) -> Result<Feed> {
             Event::CData(e) => {
                 st.text.push_str(&String::from_utf8_lossy(e.as_ref()));
             }
-            // quick-xml emits entities (`&amp;`, `&#38;`) as their own events.
             Event::GeneralRef(e) => {
                 handle_general_ref_event(&e, &mut st.text);
             }
@@ -786,37 +785,33 @@ mod tests {
 
     #[test]
     fn parses_title_with_nested_markup() {
-        // Title containing inline nested markup should accumulate text from before and after the nested tag.
         const RSS_WITH_MARKUP: &str = include_str!("testdata/feed/rss_with_markup.xml");
 
         let feed = parse_feed(RSS_WITH_MARKUP.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // Nested markup should be ignored; only text content accumulates.
+        // Nested tags ignored; text before and after them accumulates.
         assert_eq!(feed.entries[0].title, "Foo Bar Baz");
     }
 
     #[test]
     fn parses_feed_with_invalid_char_ref() {
-        // Feed containing an invalid numeric character reference (e.g., &#0;) should parse successfully,
-        // dropping just that reference instead of aborting the entire parse.
+        // An invalid numeric char ref must not abort the parse.
         const RSS_WITH_BAD_REF: &str = include_str!("testdata/feed/rss_with_bad_ref.xml");
 
         let feed = parse_feed(RSS_WITH_BAD_REF.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // Invalid ref &#0; should be dropped; adjacent text glues without space.
+        // Invalid ref &#0; is dropped; the spaces around it stay.
         assert_eq!(feed.entries[0].summary, "Before  after");
     }
 
     #[test]
     fn feed_title_not_corrupted_by_preceding_sibling_elements() {
-        // Real Atom feeds (e.g., GitHub's commits.atom) may have <id>, <link>, etc. before <title>.
-        // The text buffer must be cleared when we encounter the top-level title element
-        // to prevent accumulated text from preceding siblings from leaking into the feed title.
+        // Real Atom feeds (e.g. GitHub's commits.atom) put <id>/<link> before
+        // <title>; their text must not leak into the feed title.
         const ATOM_WITH_ID_BEFORE_TITLE: &str =
             include_str!("testdata/feed/atom_with_id_before_title.xml");
 
         let feed = parse_feed(ATOM_WITH_ID_BEFORE_TITLE.as_bytes()).unwrap();
-        // Feed title must be exactly "My Feed", not corrupted with the preceding id/link text.
         assert_eq!(feed.title, "My Feed");
         assert_eq!(feed.entries.len(), 1);
         assert_eq!(feed.entries[0].title, "Entry One");
@@ -842,7 +837,6 @@ mod tests {
 
         let feed = parse_feed(RSS_GUID_BEFORE_LINK.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // The explicit <link> should win, not the <guid>.
         assert_eq!(feed.entries[0].link, "https://example.com/real-link");
     }
 }

@@ -1,6 +1,6 @@
 //! Quarantined CRDT document model: autosurgeon `Reconcile`/`Hydrate` over automerge,
-//! projected from core's read views. `color` widens i32→i64 and note timestamps are
-//! ISO strings — automerge has no native i32/date scalar.
+//! projected from core's read views. `color` widens i32→i64, timestamps are
+//! `NaiveDateTime` strings — automerge has no i32/date scalar.
 
 use autosurgeon::{Hydrate, Reconcile};
 
@@ -82,7 +82,7 @@ pub struct SharedAnnotation {
     pub updated_at: Option<String>,
 }
 
-/// Lightweight listing view — hydrated counts without the full subgraph.
+/// Lightweight listing view — counts only, never a hydrated subgraph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedSummary {
     pub share_id: String,

@@ -79,7 +79,6 @@ pub fn get(conn: &Connection, tag: &Tag) -> Result<Option<TagDetails>> {
 /// linked via PAPER_TO_TAG), else `project_id`/`label` narrow the full set in-service.
 pub fn get_tags(conn: &Connection, tags: &Tags) -> Result<Vec<TagDetails>> {
     if let Some(pid) = tags.paper_id {
-        // paper_id takes priority over the other filters.
         return q::list_tags_by_paper(conn, pid);
     }
     let mut rows = q::list_tags(conn)?;
@@ -120,7 +119,7 @@ pub fn delete(conn: &mut Connection, tag: &Tag) -> Result<()> {
     Ok(())
 }
 
-/// Every tag label, ordered by label. Null labels are dropped.
+/// Tag labels, ordered. Nulls and `reading-list` excluded.
 pub fn list_all_tags(conn: &Connection) -> Result<Vec<String>> {
     Ok(q::list_tags(conn)?
         .into_iter()
@@ -133,7 +132,7 @@ pub fn project_fks_by_label(conn: &Connection, label: &str) -> Result<Vec<i64>> 
     q::project_fks_by_tag(conn, label)
 }
 
-/// Every named tag with its active-paper count, for the Tags index table.
+/// Named tags minus `reading-list`, with active-paper counts.
 pub fn list_tags_with_count(conn: &Connection) -> Result<Vec<TagWithCount>> {
     q::list_tags_with_count(conn)
 }

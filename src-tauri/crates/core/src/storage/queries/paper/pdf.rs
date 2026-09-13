@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::{CoreError, Result};
 use crate::storage::db::transaction;
 
-/// `set_has_pdf` — flip HAS_PDF for one paper version.
+/// Flip HAS_PDF for one paper version.
 pub fn set_has_pdf(conn: &Connection, source_id: &str, version: i64, has: bool) -> Result<()> {
     conn.execute(
         "UPDATE PAPER SET HAS_PDF = ? WHERE SOURCE_ID = ? AND VERSION = ?",

@@ -6,8 +6,8 @@
 -- rather than the whole library (mirrors NOTE, and feeds the share snapshot).
 -- ANCHOR is opaque JSON ({v,version,page,color,quote,rects}); validate_anchor
 -- size-caps it, the frontend renderer reads its structural shape.
--- Added after the initial schema, so it is created by an idempotent startup
--- migration (CREATE TABLE IF NOT EXISTS) rather than the base TABLE_DDL.
+-- Added after the initial schema, so a startup migration creates it rather
+-- than the base TABLE_DDL.
 CREATE TABLE IF NOT EXISTS ANNOTATION(
     ANNOTATION_SK INTEGER NOT NULL,
     SOURCE_FK     INTEGER NOT NULL,

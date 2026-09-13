@@ -1,5 +1,5 @@
-//! `/api/storage/*` — DB backup/restore for Settings → Storage. The frontend
-//! picks paths with the OS save/open dialogs and sends them here as JSON.
+//! `/api/storage/*` — DB backup/restore for Settings → Server & data. The
+//! frontend picks paths with the OS dialogs and sends them here as JSON.
 
 use std::path::PathBuf;
 

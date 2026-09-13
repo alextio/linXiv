@@ -213,7 +213,7 @@ impl Server {
     ) -> Result<String, ErrorData> {
         let sort: PaperSort = sort.map(Into::into).unwrap_or_default();
         let desc = desc.unwrap_or_else(|| sort.default_desc());
-        // `list_paper_details` defaults latest_only=True.
+        // `true` = latest_only: newest version per root.
         let papers = self
             .with_conn(|conn| {
                 svc_paper::list_papers_sorted(
@@ -276,8 +276,7 @@ impl Server {
         &self,
         Parameters(SearchFullTextParams { query, limit }): Parameters<SearchFullTextParams>,
     ) -> Result<String, ErrorData> {
-        // FTS errors return [] rather than failing; the diagnostic goes to STDERR —
-        // STDOUT is the JSON-RPC channel.
+        // Any read failure degrades to []; the log goes to STDERR (STDOUT is JSON-RPC).
         match self.with_conn(|conn| svc_paper::search_library(conn, &query, limit)) {
             Ok(results) => json_ok(&results),
             Err(exc) => {
@@ -303,8 +302,8 @@ impl Server {
         if paper.downloaded_source && !force {
             return json_ok(&svc_paper::FullTextReceipt::already_indexed(&paper));
         }
-        // Mirrors io_authors_misc.rs's map_core: BadRequest/Validation/PaperNotFound
-        // are user-facing refusals, not server faults.
+        // Like io_authors_misc's `map_core`, plus `PaperNotFound` (commit can
+        // race a delete): refusals, not server faults.
         let map_fetch_err = |e: CoreError| match e {
             CoreError::BadRequest(m) | CoreError::Validation(m) => invalid(m),
             e @ CoreError::PaperNotFound(_) => invalid(e.to_string()),
@@ -408,7 +407,7 @@ impl Server {
             tags,
         }): Parameters<RepairPaperParams>,
     ) -> Result<String, ErrorData> {
-        // Keyed by the stable paper root so the fix survives a source_id rename.
+        // Root fk keys the update; `paper_id` also becomes the new source_id.
         let updated = self
             .with_conn(|conn| {
                 let source_fk = match svc_paper::resolve_source_fk(conn, &paper_id) {
@@ -582,8 +581,8 @@ mod tests {
         );
     }
 
-    /// The backlog is every stored arXiv paper with a `/pdf/` url and no TeX
-    /// yet; `limit` trims the returned ids without changing `pending`.
+    /// The backlog is every active arXiv paper with a `/pdf/` url and no TeX
+    /// yet; `limit` trims the returned ids, not `pending`.
     #[tokio::test]
     async fn full_text_pending_reports_the_backlog() {
         let srv = server();

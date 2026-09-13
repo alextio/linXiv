@@ -4,16 +4,16 @@
 //! by note id under `vault_dir()/note_<NOTE_SK>/`). The TeXbrain editor, in an
 //! iframe, drives its FileSystemDirectoryHandle over a postMessage RPC; the host
 //! forwards each [`FsOp`] to [`run_fs_op`] here, which returns the matching
-//! [`FsResult`]. The wire shapes mirror src/lib/editorBridgeTypes.ts.
+//! [`FsResult`]. The wire shapes generate src/types/generated.ts.
 //!
 //! DI: `vault_root` is a PARAMETER, not read from config. No DB here; pure FS.
 //!
 //! Security (trust boundary — do not simplify): every op resolves
 //! its path through [`safe_path`], which rejects absolute paths and any `..`
 //! traversal BEFORE the join, then asserts the result stays under `vault_root`.
-//! text-vs-binary is classified by EXTENSION (matching the TeXbrain guest's
-//! readDirRecursive), NOT by utf-8 decodability — otherwise a latin-1 `.tex`
-//! would ship as base64 and the guest's `.text()` would mojibake it.
+//! text-vs-binary is classified by EXTENSION, with utf-8 decodability deciding
+//! only unknown ones — otherwise a latin-1 `.tex` would ship as base64 and the
+//! guest's `.text()` would mojibake it.
 
 use std::path::{Path, PathBuf};
 
@@ -21,16 +21,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 
-/// Map a filesystem error to `Internal` (HTTP 500); core's `CoreError` has no
-/// blanket `From<io::Error>`, so each FS call routes through this.
+/// Map a filesystem error to `Internal` — same as core's `From<io::Error>`.
 fn io(e: std::io::Error) -> CoreError {
     CoreError::Internal(e.to_string())
 }
 
 // ── wire types (canonical for editorBridgeTypes.ts FsOp/FsResult) ───────────────
 // Tagged by `kind`; camelCase matches the wire ("readFile"/"writeFile"/"mkdir").
-// An unknown kind fails at deserialize time (-> the binary layer maps the serde
-// error to BadRequest), which is why `run_fs_op` needs no unknown-kind arm.
+// An unknown kind fails at deserialize time (the route's `parse_body` answers
+// 422), which is why `run_fs_op` needs no unknown-kind arm.
 // `path`/`data` carry serde(default) as server-side leniency only; the client
 // contract keeps them required, so they are NOT ts(optional).
 
@@ -71,12 +70,12 @@ pub enum FsOp {
 #[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 pub struct DirEntry {
     pub name: String,
-    /// "directory" | "file" (the guest re-joins each basename to the parent).
+    /// The guest re-joins each basename to the parent.
     #[ts(type = "\"file\" | \"directory\"")]
     pub kind: String,
 }
 
-/// `POST /api/editor/vault/{note_id}/fs` response, keyed by the producing [`FsOp`]'s `kind` tag.
+/// `POST /api/editor/vault/{note_id}/fs` response; the write ops all answer `ok`.
 #[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FsResult {
@@ -109,15 +108,15 @@ pub fn safe_path(vault_root: &Path, relpath: &str) -> Result<PathBuf> {
         ));
     }
     let target = vault_root.join(parts.join("/"));
-    // Containment belt: parts are already `..`/absolute-free, so the lexical
-    // prefix check always holds — but it stays as the explicit trust-boundary assert.
+    // Containment belt: redundant on posix, where parts are already
+    // `..`/absolute-free — kept as the explicit trust-boundary assert.
     if !parts.is_empty() && !target.starts_with(vault_root) {
         return Err(CoreError::BadRequest("path escapes the vault root".into()));
     }
     Ok(target)
 }
 
-// ── extension-based text/binary classifier (matches the TeXbrain guest) ─────────
+// ── extension-based text/binary classifier ──────────────────────────────────────
 
 const TEXT_EXTS: &[&str] = &[
     "tex", "sty", "cls", "bib", "bst", "def", "cfg", "fd", "dtx", "ins", "ltx", "txt", "bbx",
@@ -149,8 +148,7 @@ fn ext_is_text(relpath: &str) -> Option<bool> {
 
 // ── individual ops (error on failure; the route maps to HTTP status) ────────────
 
-/// List immediate children (BASENAMES only). A missing dir lists as empty rather
-/// than erroring, so a freshly-mounted vault doesn't break the editor's scan.
+/// List immediate children (BASENAMES only). A missing dir lists as empty.
 pub fn list_dir(vault_root: &Path, relpath: &str) -> Result<FsResult> {
     let target = safe_path(vault_root, relpath)?;
     let mut entries: Vec<DirEntry> = Vec::new();
@@ -210,7 +208,7 @@ pub fn read_file(vault_root: &Path, relpath: &str) -> Result<FsResult> {
 }
 
 /// Write a file, creating parent dirs. `data` is base64 when `binary`, else raw
-/// text. An empty string materializes a zero-length file (the create-empty path).
+/// text. An empty string materializes a zero-length file.
 pub fn write_file(vault_root: &Path, relpath: &str, data: &str, binary: bool) -> Result<FsResult> {
     let target = safe_path(vault_root, relpath)?;
     if target == *vault_root {
@@ -269,8 +267,8 @@ pub fn run_fs_op(vault_root: &Path, op: &FsOp) -> Result<FsResult> {
     }
 }
 
-/// Every file in the vault as root-relative posix paths (no content read). Used
-/// to resolve/repair the project's main file. A missing root lists as empty.
+/// Every file in the vault as root-relative posix paths (no content read).
+/// `get_doc` resolves the project's main file with it. A missing root is empty.
 pub fn list_files(vault_root: &Path) -> Result<Vec<String>> {
     if !vault_root.is_dir() {
         return Ok(Vec::new());
@@ -589,7 +587,7 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
-        // unknown kind -> serde error (the seam maps it to BadRequest).
+        // unknown kind -> serde error (the route answers 422).
         assert!(serde_json::from_str::<FsOp>(r#"{"kind":"chmod","path":"a"}"#).is_err());
     }
 

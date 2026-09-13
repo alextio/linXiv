@@ -190,8 +190,7 @@ export default function PaperDetailPage() {
   const { data: doiCandidates } = useQuery({
     queryKey: ["paper", "doi-candidates", sfk],
     queryFn: () => getDoiVersionCandidates(Number(sfk)),
-    // Gated on a DOI actually being present — skips the round trip for the
-    // (majority) of papers that have none.
+    // Gated on a DOI being present — skips the round trip for papers without one.
     enabled: !!sfk && Number.isFinite(Number(sfk)) && !!paper?.doi,
   });
 
@@ -580,7 +579,7 @@ export default function PaperDetailPage() {
           />
         )}
 
-        {/* Right pane: identity + Details/Notes */}
+        {/* Right pane: identity + tabs */}
         <div className={`overflow-y-auto bg-panel ${hasPdfContent ? "min-h-0" : "flex-1 min-h-0"}`}>
           <div className={hasPdfContent ? "px-[18px] py-5 space-y-5" : "max-w-[760px] mx-auto px-8 py-6 space-y-5"}>
             {/* Identity block */}
@@ -731,7 +730,6 @@ export default function PaperDetailPage() {
               )}
             </div>
 
-            {/* Tabs: Details | Notes */}
             <Tabs defaultValue="details">
               <TabsList>
                 <TabsTrigger value="details">Details</TabsTrigger>
@@ -743,7 +741,6 @@ export default function PaperDetailPage() {
                 </TabsTrigger>
               </TabsList>
 
-              {/* Details tab: abstract */}
               <TabsContent value="details" className="pt-5">
                 {paper.summary ? (
                   <div className="space-y-2">

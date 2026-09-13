@@ -47,7 +47,6 @@ pub fn get_notes(
     project_id: Option<i64>,
     all_projects: bool,
 ) -> Result<Vec<NoteDetails>> {
-    // NON-NEGOTIABLE: conn comes from storage::db::open (FK PRAGMA on); no raw Connection.
     let project_clause = if all_projects {
         "1 = 1"
     } else if project_id.is_some() {
@@ -154,7 +153,6 @@ pub fn count_notes(conn: &Connection, source_fk: i64, project_id: Option<i64>) -
     )?)
 }
 
-/// Check if a NOTE_UUID is already taken (exists in the database).
 /// NOTE_UUID -> NOTE_SK for many uuids in one batched pass, chunked under
 /// SQLite's parameter cap.
 pub fn ids_by_uuid(
@@ -502,7 +500,7 @@ mod tests {
         // literal "%" must not act as a wildcard: matches the title, not everything.
         let pct = search_notes_source_fks(&conn, "50%", 50).unwrap();
         assert_eq!(pct, vec![1]);
-        // a bare "%" would match all-if-wildcard; escaped it matches nothing.
+        // the "%" is escaped, so it matches nothing.
         assert!(search_notes_source_fks(&conn, "zzz%zzz", 50)
             .unwrap()
             .is_empty());

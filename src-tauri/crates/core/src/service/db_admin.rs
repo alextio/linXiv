@@ -3,9 +3,9 @@
 //! ADR 0010: consumers must not open connections or call `storage::` themselves.
 //!
 //! * `open_app_db` — open `config::db_path()` and bring the schema forward.
-//! * `backup` / `validate_backup_source` — pass-throughs so nobody reaches past.
-//! * `restore_in_place` — park the caller's live handle, swap the file, reopen;
-//!   core's `restore` refuses while any handle is open, so the parking dance is mandatory.
+//! * `backup` / `validate_backup_source` / `restore_closed` — pass-throughs.
+//! * `reject_live_db` — path guard shared by the route and MCP surfaces.
+//! * `restore_in_place` — park the caller's live handle, swap the file, reopen.
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,7 @@ fn canon_or_raw(path: &Path) -> PathBuf {
 
 /// Refuse a backup/restore path that is relative, non-UTF-8, or resolves to the live
 /// database file itself. `field`/`role` name the offending input in the message.
-/// `Validation` → 422, `BadRequest` → 400 (the route contract this came from).
+/// `Validation` → 422, `BadRequest` → 400 (`CoreError::http_status`).
 pub fn reject_live_db(path: &Path, field: &str, role: &str) -> Result<()> {
     if !path.is_absolute() {
         return Err(CoreError::Validation(format!("{field} must be absolute")));
@@ -43,7 +43,7 @@ pub fn reject_live_db(path: &Path, field: &str, role: &str) -> Result<()> {
         return Err(CoreError::Validation(format!("{field} is not valid UTF-8")));
     }
     let (a, b) = (canon_or_raw(path), canon_or_raw(&config::db_path()));
-    // Case-insensitive comparison only on case-insensitive filesystems.
+    // Case-insensitive on Windows/macOS builds — the fs is not probed.
     let same = if cfg!(windows) || cfg!(target_os = "macos") {
         a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
     } else {
@@ -62,23 +62,23 @@ pub fn backup(conn: &Connection, dest: &Path) -> Result<BackupInfo> {
     storage::backup(conn, dest)
 }
 
-/// Reject a restore source that is not a usable SQLite snapshot. Callers run this
+/// Reject a restore source that is not a usable linXiv snapshot. Callers run this
 /// before parking their live handle so a bad path fails cheaply.
 pub fn validate_backup_source(src: &Path) -> Result<()> {
     storage::validate_backup_source(src)
 }
 
-/// Replace the live database with the `src` snapshot, leaving `conn` pointing at a
-/// working handle either way.
+/// Replace the live database with the `src` snapshot, leaving `conn` open either
+/// way — on the empty parked DB if even the reopen fails.
 ///
 /// `conn` is parked on an in-memory DB and closed first, so core's
 /// `ensure_no_live_connections` only has to refuse *other* processes. The reopen
-/// runs whether or not the swap succeeded — a caller left holding a dead handle is
-/// worse than a refused restore — and re-runs `init_db`, migrating an older
-/// snapshot forward. The restore's own error is returned after the reopen.
+/// runs whether or not the swap succeeded — a dead handle is worse than a refused
+/// restore — and re-runs `init_db`, migrating an older snapshot forward. The
+/// restore's own error is returned after the reopen.
 ///
-/// Blocking: two full-file copies plus a rename. Async callers should run this on a
-/// blocking thread rather than holding a runtime worker.
+/// Blocking: two full-file copies plus a rename. Async callers should use a
+/// blocking thread.
 pub fn restore_in_place(conn: &mut Connection, src: &Path) -> Result<()> {
     let db_path = config::db_path();
     let parked = storage::open_in_memory()
@@ -126,7 +126,6 @@ mod tests {
         let snapshot = dir.join("snap.db");
         backup(&conn, &snapshot).unwrap();
 
-        // Diverge the live DB, then restore the snapshot over it.
         conn.execute("UPDATE t SET v = 'after'", []).unwrap();
         restore_in_place(&mut conn, &snapshot).unwrap();
         let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();

@@ -1,4 +1,4 @@
-//! Domain models + the two API serializers. Plan §5.1/§5.2, D16.
+//! Domain models + the API serializers. Plan §5.1/§5.2, D16.
 //! D16 NON-NEGOTIABLE: `SearchResultOut` and `PaperDetails` are TWO DISTINCT
 //! serializers and must NOT be unified — their JSON contracts differ
 //! (`paper_url`/`primary_category`/`entry_id` + `published=""` sentinel vs.
@@ -44,8 +44,8 @@ pub const OPENALEX_ID_PREFIX: &str = "openalex:";
 pub const DOI_ID_PREFIX: &str = "doi:";
 pub const LOCAL_ID_PREFIX: &str = "local:";
 
-/// The one home for `source_id` namespace construction (CONTEXT.md § source_id,
-/// ADR 0002). Sources build ids here so [`strip_namespace`] is the exact inverse.
+/// Namespaced `source_id` construction (CONTEXT.md § source_id, ADR 0002) —
+/// the inverse of [`strip_namespace`].
 pub fn arxiv_source_id(bare_id: &str) -> String {
     format!("{ARXIV_ID_PREFIX}{bare_id}")
 }
@@ -62,14 +62,14 @@ pub fn local_source_id(hash: &str) -> String {
     format!("{LOCAL_ID_PREFIX}{hash}")
 }
 
-/// Strip one leading provider prefix if present (`removeprefix` semantics —
-/// at most once, never mid-string), else return the id unchanged.
+/// Strip one leading provider prefix if present (at most once, never
+/// mid-string), else return the id unchanged.
 pub fn strip_provider_prefix<'a>(source_id: &'a str, prefix: &str) -> &'a str {
     source_id.strip_prefix(prefix).unwrap_or(source_id)
 }
 
-/// The `date.min` sentinel (`0001-01-01`) marking "no published date": smallest date,
-/// so it sinks under DESC but reads as a real year-1 date wherever forwarded raw.
+/// The `0001-01-01` sentinel marking "no published date": smallest date, so it
+/// sinks under DESC but reads as a real year-1 date wherever forwarded raw.
 pub const NO_PUBLISHED_DATE: &str = "0001-01-01";
 
 pub(crate) fn date_min() -> NaiveDate {
@@ -80,7 +80,7 @@ pub(crate) fn date_min() -> NaiveDate {
 // PaperMetadata — normalized, source-agnostic record
 // ---------------------------------------------------------------------------
 
-/// Normalized paper representation produced by every Provider module.
+/// Normalized paper shape the `sources/` fetchers produce.
 /// `categories`/`tags` stay `Option` here, unlike the DB-row `PaperDetails`
 /// where they default to an empty `Vec`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -109,11 +109,11 @@ pub struct PaperMetadata {
     pub url: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Backend that produced this record (must equal that source's `source_name`).
+    /// Backend that produced this record; stored as PAPER_META.PROVIDER.
     #[serde(default)]
     pub source: Option<String>,
     /// Index-aligned with `authors` (same length when present); `None` per-author
-    /// where the source didn't carry one. Only crossref/openalex populate this.
+    /// where the source didn't carry one. crossref/openalex + import set it.
     #[serde(default)]
     pub author_orcids: Option<Vec<Option<String>>>,
 }
@@ -158,11 +158,11 @@ pub struct SearchResultOut {
     pub title: String,
     pub summary: String,
     pub authors: Vec<String>,
-    /// "" when the published date is the `date.min` sentinel; else ISO date.
+    /// "" when published is the `0001-01-01` sentinel; else ISO date.
     pub published: String,
     pub paper_url: String,
     pub primary_category: String,
-    /// The full namespaced source_id (kept, unlike the stripped `source_id`).
+    /// The `source_id` verbatim; `source_id` above is namespace-stripped.
     pub entry_id: String,
 }
 
@@ -295,8 +295,8 @@ pub struct PaperDetails {
     pub source_fk: i64,
 }
 
-/// Aggregate view of a paper across all stored versions.
-/// Display fields come from the latest version; `versions` is oldest-first.
+/// Aggregate of all stored versions. Latest version's display fields, except
+/// `published` (oldest); `versions` is oldest-first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperDetailsAll {
     pub source_id: String,
@@ -450,16 +450,16 @@ pub struct ProjectDetails {
     pub updated_at: Option<NaiveDateTime>,
     #[serde(default)]
     pub archived_at: Option<NaiveDateTime>,
-    /// Persisted share identity (uuid v4); NULL until first publish.
+    /// Share identity (uuid v4); NULL until publish or import.
     #[serde(default)]
     pub share_id: Option<String>,
 }
 
 // SERIALIZER 3 — ProjectOut: the one project wire shape, emitted identically by
 // the route, the CLI and MCP (ADR-0011 scope). `ProjectDetails` itself is
-// deliberately NOT Serialize so no surface can bypass this shape. Produced only
-// via `service::project::to_out`, which resolves `source_fks` → namespaced
-// `source_ids` and renders `color` as `color_hex`.
+// deliberately NOT Serialize so no surface can bypass this shape. Built only by
+// `service::project::to_out{,_many}`: `source_fks` → namespaced `source_ids`,
+// `color` → `color_hex`.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct ProjectOut {
     /// Never null: `ProjectDetails.id` is optional only because that struct
@@ -545,8 +545,8 @@ pub struct AnnotationDetails {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// Reject an empty/whitespace-only or over-cap ANCHOR. Returns the message each
-/// write boundary surfaces in its own error type; cap is 64 KiB.
+/// Reject an empty/whitespace-only or over-cap (64 KiB) ANCHOR. The live write
+/// boundary raises the message; imports skip the row instead.
 pub fn validate_anchor(anchor: &str) -> std::result::Result<(), &'static str> {
     if anchor.trim().is_empty() {
         return Err("anchor must not be empty");
@@ -654,8 +654,8 @@ pub struct NoteIn {
     pub uuid: Option<String>,
 }
 
-/// title/content are non-nullable columns: absent and null both mean "unchanged"
-/// (plain `Option`, no UNSET sentinel). Service enforces at least one provided.
+/// title/content can never be cleared, so absent and null both mean "unchanged"
+/// (plain `Option`, no UNSET). Service enforces at least one provided.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NoteUpdateIn {
     pub note_id: i64,
@@ -720,8 +720,8 @@ pub struct ProjectUpdateIn {
 }
 
 // ---------------------------------------------------------------------------
-// Checks — the only non-trivial logic here is SearchResultOut::from_metadata
-// (namespace strip, date.min sentinel, "" coalescing of url/category).
+// Checks — the parsers (`SearchResultOut::from`, `normalize_orcid`, Status,
+// the D16 UNSET color) and the pinned wire shapes.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -744,7 +744,7 @@ mod tests {
         assert!(!is_arxiv_source_id(&openalex_source_id("W123")));
         assert!(!is_arxiv_source_id(&doi_source_id("10.1000/xyz")));
         assert!(!is_arxiv_source_id(&local_source_id("deadbeef")));
-        // removeprefix semantics: at most one leading prefix comes off.
+        // At most one leading prefix comes off.
         assert_eq!(strip_provider_prefix("doi:doi:1", DOI_ID_PREFIX), "doi:1");
         assert_eq!(
             strip_provider_prefix("10.1000/xyz", DOI_ID_PREFIX),

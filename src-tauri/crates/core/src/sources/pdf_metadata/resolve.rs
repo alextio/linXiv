@@ -15,12 +15,12 @@ use super::scan::title_similarity;
 use super::worker::extract_pdf_metadata_isolated;
 
 // ---------------------------------------------------------------------------
-// resolve_pdf_metadata — the seam `import_pdf` injects
+// resolve_pdf_metadata — `resolve_import_pdf`'s seam
 // ---------------------------------------------------------------------------
 
-/// Title + at least one real author name both present (already past the junk
-/// filters) — enough to call the PDF's own metadata the record, no network. Year
-/// is not required. Checks `split_authors` so stray-separator fields like `"; ; "` fail.
+/// Title + a real author name both present (already past the junk filters) —
+/// enough to call the PDF's own metadata the record, no network. Year is not
+/// required; `split_authors` runs so stray-separator fields like `"; ; "` fail.
 fn pdf_metadata_is_sufficient(raw: &Extracted) -> bool {
     raw.title.as_deref().is_some_and(|t| !t.trim().is_empty())
         && raw
@@ -33,8 +33,8 @@ fn pdf_metadata_is_sufficient(raw: &Extracted) -> bool {
 /// Otherwise comma-split with one repair pass: a bare token with no whitespace
 /// ("Smith") is re-merged with the next ("John") into "Smith, John", so "Last,
 /// First" exports survive while "Alice Smith, Bob Jones" passes untouched.
-/// ponytail: an ODD-length comma list of bare surnames only still misreads the
-/// trailing pair as one merged author; true name-parsing needed to fully fix.
+/// ponytail: a comma list of bare surnames ("Smith, Jones") still merges into
+/// one "Last, First" author; true name-parsing needed to fully fix.
 fn split_authors(raw: &str) -> Vec<String> {
     if raw.contains(';') {
         return raw
@@ -75,8 +75,8 @@ fn arxiv_id_year_month(id: &str) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(2000 + yy, mm, 1)
 }
 
-/// `Extracted` -> the local-id partial `PaperMetadata` (title/authors/year/doi only
-/// — the PDF carries nothing else; the page-scanned `doi` is PDF-derived, so kept).
+/// `Extracted` -> the local-id partial `PaperMetadata`: title, authors, `doi`
+/// and published; nothing else is PDF-derived. The page-scanned `doi` is kept.
 fn partial_meta_from_raw(local_id: String, raw: &Extracted) -> PaperMetadata {
     let authors: Vec<String> = raw
         .authors
@@ -113,14 +113,13 @@ fn partial_meta_from_raw(local_id: String, raw: &Extracted) -> PaperMetadata {
 }
 
 /// PDF-metadata-first resolution. Returns `(meta, external_identity)`: `meta`
-/// always carries the `local:<sha256>` id; `external_identity` is the upstream
-/// `(source_id, version)` when known. When the PDF's title+authors suffice, the
+/// always carries the caller's `local:` id, `external_identity` the upstream
+/// `(source_id, version)` when known. When the PDF's title+authors suffice the
 /// FIELDS never come from the network; a text-scanned arXiv id/DOI is only a
 /// CANDIDATE identity (page 1 can cite someone else's paper), so with
-/// `verify_identity` on this makes ONE lookup (arXiv id first, else DOI) and
-/// adopts it only on a >= 0.5 title-similarity match — off, a candidate is never
-/// adopted and no lookup is made. Insufficient PDF metadata falls through to
-/// full arXiv/DOI/CrossRef enrichment (NOT gated), else the partial record.
+/// `verify_identity` on this makes ONE lookup (arXiv id first, else DOI),
+/// adopted only on a >= 0.5 title-similarity match — off, no lookup at all.
+/// Insufficient metadata enriches from arXiv/DOI/CrossRef (NOT gated).
 async fn resolve_from_extracted(
     local_id: String,
     raw: Extracted,
@@ -155,8 +154,7 @@ async fn resolve_from_extracted(
         "pdf metadata insufficient: moving on to arXiv/DOI/CrossRef enrichment"
     );
 
-    // PDF metadata alone wasn't enough — move on to the other things. Enrich
-    // from an upstream record when an arXiv id / DOI / title matches.
+    // Enrich from an upstream record when an arXiv id / DOI / title matches.
     // external_identity = (enriched.source_id, version) so the importer can
     // dedupe against an existing root; the returned meta keeps the local id.
     if let Some(enriched) = enrich_external(&raw, data_dir, mailto).await {
@@ -192,9 +190,9 @@ async fn resolve_from_extracted(
 }
 
 /// At most one identity candidate — arXiv id if found, else DOI. Deliberately
-/// NOT "arXiv, then DOI on failure": that would turn a failed verification into
-/// a second round-trip, breaking the one-lookup promise. A citation-only arXiv
-/// id costs the DOI dedupe chance in that case — accepted.
+/// NOT "arXiv, then DOI on failure": a failed verification would cost a second
+/// round-trip, breaking the one-lookup promise. A citation-only arXiv id loses
+/// the DOI dedupe chance then — accepted.
 enum IdentityCandidate<'a> {
     Arxiv(&'a str),
     Doi(&'a str),
@@ -209,9 +207,9 @@ fn identity_candidate(raw: &Extracted) -> IdentityCandidate<'_> {
     }
 }
 
-/// The pure decision behind the verify_* fns: does `fetched`'s title look like
-/// `raw_title` (same 0.5 Jaccard bar as `try_crossref_title`)? This is what keeps
-/// a citation or wrong id from being silently adopted as identity.
+/// The pure decision behind the verify_* fns: is `fetched`'s title like
+/// `raw_title` (same 0.5 Jaccard bar as `try_crossref_title`)? Keeps a citation
+/// or wrong id from being silently adopted as identity.
 fn identity_if_title_matches(raw_title: &str, fetched: PaperMetadata) -> Option<(String, i64)> {
     (title_similarity(raw_title, &fetched.title) >= 0.5)
         .then_some((fetched.source_id, fetched.version))
@@ -230,7 +228,7 @@ async fn verify_arxiv_identity(
 }
 
 /// Same guard for a page-1-scanned DOI; only reached when no arXiv id was found.
-/// `resolve_doi` is the one call that can map a bare DOI to a source_id at all.
+/// `resolve_doi` chains arXiv-DOI, Semantic Scholar, then CrossRef.
 async fn verify_doi_identity(
     doi: &str,
     raw: &Extracted,
@@ -243,8 +241,8 @@ async fn verify_doi_identity(
 }
 
 /// PDF bytes -> `Extracted` -> `resolve_from_extracted` (split so tests drive a
-/// synthetic `Extracted`). `verify_identity` is read by the caller from
-/// `UserSettings::pdf_import_verify_identity_enabled` — this module never reads config.
+/// synthetic `Extracted`). `resolve_import_pdf` reads `verify_identity` from
+/// `UserSettings::pdf_import_verify_identity_enabled`; no config read here.
 pub async fn resolve_pdf_metadata(
     bytes: &[u8],
     data_dir: &Path,
@@ -283,8 +281,8 @@ async fn enrich_external(raw: &Extracted, data_dir: &Path, mailto: &str) -> Opti
     None
 }
 
-/// CrossRef title search: take the first candidate whose title is >= 0.5
-/// Jaccard-similar; if it carries a DOI, upgrade via `resolve_doi`, else as-is.
+/// CrossRef title search (top 3): first candidate >= 0.5 Jaccard-similar wins,
+/// upgraded via `resolve_doi` if its DOI resolves, else taken as-is.
 async fn try_crossref_title(title: &str, data_dir: &Path, mailto: &str) -> Option<PaperMetadata> {
     for candidate in crossref::search_by_title(title, 3, mailto).await {
         if !candidate.title.is_empty() && title_similarity(title, &candidate.title) >= 0.5 {
@@ -323,10 +321,9 @@ mod tests {
         };
         assert!(pdf_metadata_is_sufficient(&full));
 
-        // Missing title or authors is insufficient — falls through to
-        // enrichment instead of being treated as a resolved record. Same for
-        // an authors field of stray separators only: the raw string is
-        // non-blank, but split_authors() yields nothing real.
+        // Missing title or authors falls through to enrichment instead of
+        // counting as a resolved record. Same for stray separators only: the
+        // raw authors string is non-blank, but split_authors yields nothing.
         for degraded in [
             Extracted {
                 title: None,
@@ -344,9 +341,8 @@ mod tests {
             assert!(!pdf_metadata_is_sufficient(&degraded));
         }
 
-        // Year is NOT required: title + authors alone still short-circuits.
-        // With an arXiv id present, `partial_meta_from_raw` derives the date
-        // from its embedded YYMM (no network) rather than defaulting to today.
+        // Year is NOT required: title + authors alone still short-circuits, and
+        // an arXiv id's embedded YYMM dates it offline rather than today.
         let no_year = Extracted {
             year: None,
             ..full.clone()
@@ -381,9 +377,7 @@ mod tests {
         assert_eq!(meta.source.as_deref(), Some("pdf"));
 
         // A DOI text-scanned off the page is PDF-derived, so it's kept as a
-        // plain field even though it's not trusted for identity (unlike an
-        // arXiv id, a bare DOI has no offline/cheap way to confirm what root
-        // it maps to — that's exactly what the network DOI resolver does).
+        // plain field even though identity still needs network verification.
         let with_doi = Extracted {
             doi: Some("10.1234/xyz".into()),
             ..full.clone()
@@ -400,19 +394,17 @@ mod tests {
     fn split_authors_semicolon_then_comma() {
         // `;` is unambiguous and wins when present.
         assert_eq!(split_authors("Alice; Bob"), vec!["Alice", "Bob"]);
-        // No `;`: falls back to `,` — but only when every piece looks like a
-        // full name (has whitespace), i.e. a genuine name list.
+        // No `;`: comma-split; pieces that already look like full names
+        // (each has whitespace) are left unmerged.
         assert_eq!(
             split_authors("Alice Smith, Bob Jones"),
             vec!["Alice Smith", "Bob Jones"]
         );
-        // A single "Last, First" author (Word/Zotero/EndNote convention) has
-        // no `;`, and its two comma-parts are each a single bare token — the
-        // repair pass re-merges them, so it stays one author, not two.
+        // A single "Last, First" author (Word/Zotero convention): both comma
+        // parts are bare tokens, so the repair pass re-merges them into one.
         assert_eq!(split_authors("Smith, John"), vec!["Smith, John"]);
-        // Several "Last, First" authors chained by commas only (no `;`): each
-        // bare-token pair re-merges independently -> two correct authors, not
-        // one garbled string and not four fragments.
+        // Several "Last, First" authors chained by commas: each bare-token
+        // pair re-merges independently -> two authors, not four fragments.
         assert_eq!(
             split_authors("Smith, John, Doe, Jane"),
             vec!["Smith, John", "Doe, Jane"]
@@ -459,10 +451,9 @@ mod tests {
 
     #[test]
     fn identity_candidate_is_at_most_one_arxiv_preferred() {
-        // Both present: arXiv wins, DOI is never even considered — regardless
-        // of whether an arXiv verification would ultimately succeed. This is
-        // what makes the "at most one lookup" guarantee structural rather
-        // than a matter of remembering not to fall through after a failure.
+        // Both present: arXiv wins and the DOI is never considered, whether or
+        // not verification would succeed — that is what makes "at most one
+        // lookup" structural rather than a fall-through nobody must forget.
         let both = Extracted {
             title: Some("T".into()),
             authors: Some("A".into()),
@@ -494,14 +485,12 @@ mod tests {
     }
 
     // The short-circuit end to end, through resolve_from_extracted directly
-    // (not resolve_pdf_metadata / real pdfium) so it's driven by a synthetic
-    // Extracted: title+authors sufficient, no arXiv id and no DOI, so this is
-    // provably zero-network (enrich_external, verify_arxiv_identity, and
-    // verify_doi_identity are never reachable — there's nothing for any of
-    // them to look up). DOI-as-plain-field and DOI-as-identity are exercised
-    // separately (`pdf_metadata_sufficiency_gate`'s `with_doi` case, and
-    // `identity_if_title_matches_gate`, respectively) since a real DOI in
-    // this test would make `verify_doi_identity` hit the network.
+    // (not resolve_pdf_metadata / real pdfium) so a synthetic Extracted drives
+    // it: title+authors sufficient, no arXiv id and no DOI, so enrich_external
+    // and both verify_* fns are unreachable — provably zero-network. A DOI here
+    // would make verify_doi_identity hit the network, so the plain-field case
+    // lives in pdf_metadata_sufficiency_gate and the title bar in
+    // identity_if_title_matches_gate.
     #[tokio::test]
     async fn short_circuit_resolves_from_pdf_metadata_with_no_network_signal() {
         let raw = Extracted {
@@ -526,10 +515,8 @@ mod tests {
 
     // `verify_identity: false` (the `pdf_import_verify_identity_enabled`
     // setting off) must skip the lookup even when a candidate arXiv id IS
-    // present — proving the setting actually gates the network call, not
-    // just documents an intent. If this regressed to "true" being ignored
-    // or the gate applying only when no candidate exists, this would hang or
-    // require network; it does neither.
+    // present. A regression that ignored the flag, or applied it only when no
+    // candidate exists, would make this test need the network; it does not.
     #[tokio::test]
     async fn verify_identity_false_skips_lookup_even_with_a_candidate_id() {
         let raw = Extracted {
@@ -543,7 +530,7 @@ mod tests {
         let (meta, ext) = resolve_from_extracted("local:x".into(), raw, dir.path(), "", false)
             .await
             .unwrap();
-        // No identity attached, despite a real, verifiable arXiv id being present.
+        // No identity attached, despite a candidate arXiv id being present.
         assert_eq!(ext, None);
         // Fields still come straight from the PDF, same as the enabled case.
         assert_eq!(meta.title, "A Real Title");

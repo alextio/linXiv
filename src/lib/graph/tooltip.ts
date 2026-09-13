@@ -1,10 +1,8 @@
 // What the hover inspector says about a node.
 //
-// Paper labels are drawn with `text-max-width: 180px` + `text-wrap: ellipsis`,
-// so any real title is cut off on the canvas, while the payload already carries
-// the category, published date, tags, PDF flag and the whole abstract for every
-// paper. This is the "peek without navigating" affordance the rest of the app
-// gives a paper row.
+// Canvas labels ellipsize, but the payload already carries each paper's
+// category, date, tags, PDF flag and full abstract — so hovering peeks
+// without navigating.
 
 import type { GraphIndex, GraphNodeType } from "./model.ts";
 
@@ -15,8 +13,8 @@ export interface TooltipContent {
   title: string;
   /** Meta lines, rendered one per line. Plain text: this is library metadata. */
   meta: string[];
-  /** Truncated abstract. May contain TeX; rendered via MathText, kept separate
-   *  from `meta` so only it and the title go through the TeX path. */
+  /** Truncated abstract. Kept out of `meta` so only it and the title take the
+   *  MathText/TeX path. */
   summary?: string;
 }
 
@@ -33,14 +31,11 @@ function pluralPapers(n: number): string {
 }
 
 /**
- * "Author · 37 papers", plus what the filter left of those 37 when it is not all
- * of them.
+ * "Author · 37 papers", plus how many of those 37 the filter left drawn.
  *
- * The degree is a fact about the library — the Authors page reports the same
- * number — so filtering the canvas must not silently rewrite it; but a node
- * hovered on a filtered graph stands for a set the canvas is mostly not showing.
- * Report both. With no filter in force the two are equal and the line is the
- * plain one.
+ * The payload's degree counts every paper in the graph, so the client filter
+ * must not rewrite it — but a node on a filtered canvas stands for a set mostly
+ * not shown. Report both; unfiltered they are equal and the tail drops.
  */
 function degreeLine(kind: string, total: number, drawn: number): string {
   const head = `${kind} · ${pluralPapers(total)}`;
@@ -48,11 +43,8 @@ function degreeLine(kind: string, total: number, drawn: number): string {
   return head + (drawn === 0 ? " (none shown)" : ` (${drawn} shown)`);
 }
 
-/**
- * `drawnPapers` is the set of paper node ids currently painted at a non-zero
- * opacity. It is deliberately NOT "is the hovered node itself visible" — that
- * the user can see; this is how much of what the node stands for is.
- */
+/** `drawnPapers` is the MATCHED paper ids of a drawn type — how much of what
+ *  the hovered node stands for is shown, not whether it is itself. */
 export function tooltipFor(
   nodeId: string,
   type: GraphNodeType,
@@ -65,13 +57,11 @@ export function tooltipFor(
     const meta: string[] = [];
     const head: string[] = [];
     if (p.category) head.push(p.category);
-    // `published` is already null for the "no date" sentinel, so "no date" is
-    // sayable rather than a bogus year 1.
+    // `published` is null for the no-date sentinel, so say so, not year 1.
     head.push(p.published ?? "No publication date");
     head.push(p.has_pdf ? "PDF" : "No PDF");
     meta.push(head.join(" · "));
-    // Already deduped and spelled as the chips beside them are — the backend
-    // resolves both, so this line names exactly what the canvas drew.
+    // Deduped and canonically spelled by the backend, same as the chips.
     if (p.tags.length) meta.push(p.tags.join(" · "));
     return {
       title: p.label || "(untitled)",

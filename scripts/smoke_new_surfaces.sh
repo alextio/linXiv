@@ -11,7 +11,7 @@ trap 'rm -rf "$SCRATCH"' EXIT
 export LINXIV_DATA_DIR="$SCRATCH/data"
 
 cargo build --manifest-path "$REPO/src-tauri/Cargo.toml" -p linxiv-cli -q
-# The bin is `linxiv-cli`; `target/debug/linxiv` is the staged sidecar and goes stale.
+# Not the staged sidecar in src-tauri/binaries/ — that copy goes stale.
 CLI="$REPO/src-tauri/target/debug/linxiv-cli"
 
 step() { printf '\n=== %s ===\n' "$1"; }

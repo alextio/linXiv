@@ -33,8 +33,7 @@ export default function SharePage() {
   const [joining, setJoining] = useState(false);
   const [joinErr, setJoinErr] = useState("");
   // set when a join was accepted but its host was offline: the invite is saved
-  // and the share only appears in the received list once it syncs, so this is
-  // the only feedback the user gets that anything happened.
+  // and lists as a Pending card with no name or counts until a sync lands.
   const [joinPending, setJoinPending] = useState("");
   const joinSlow = useSlowHint(joining);
   const [codeCopied, setCodeCopied] = useState(false);

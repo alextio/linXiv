@@ -47,9 +47,8 @@
     inset 0 1px 0 rgba(255, 255, 255, .07);
 }
 
-/* P0 — light mode currently overrides only color-scheme and --shadow-card,
- * so every color token keeps its dark value on top of the light body
- * gradient. Same ten names, light values. */
+/* Light mode — the same color names as :root, light values, plus a lighter
+ * --shadow-card. */
 [data-mode="light"] {
   color-scheme: light;
 
@@ -70,17 +69,16 @@
     0 8px 24px rgba(0, 0, 0, .08);
 }
 
-/* Density — note the attribute is [data-density], not the --density the
- * README documents. */
+/* Density — keyed off [data-density], set by applyDensity(). */
 [data-density="compact"] {
   --card-pad: 1.25rem;
   --card-radius: .5rem;
   --row-pad-y: 11px;
 }
 
-/* Contrast of the light values against their own surfaces:
- *   text   #1b1b2b on #ffffff  ~15.8:1
- *   muted  #5a5a7a on #ffffff   ~6.9:1
- *   ink-3  #767696 on #ffffff   ~4.4:1  (MonoLabel is 10.5px — keep >=4.5 if it drops further)
- *   accent #3b6fd4 on #ffffff   ~5.1:1
+/* Contrast of the light values on --color-panel (#ffffff):
+ *   text   #1b1b2b  17.0:1
+ *   muted  #5a5a7a   6.6:1
+ *   ink-3  #767696   4.4:1  (MonoLabel is 10.5px — just under AA's 4.5)
+ *   accent #3b6fd4   4.8:1
  */

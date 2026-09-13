@@ -34,8 +34,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
     }
 }
 
-/// Decode the `file_b64` field's bytes; a bad base64 string is a 400 (the byte
-/// payload is malformed before any handler logic runs).
+/// Decode the `file_b64` field's bytes; a bad base64 string is a 400.
 fn decode_b64(s: &str) -> Result<Vec<u8>, ApiError> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
@@ -58,7 +57,7 @@ pub struct UploadPdfBody {
 }
 
 /// `PUT /api/papers/{id}/pdf` — store PDF bytes the client already fetched for a
-/// saved paper. Check order: 404 paper → 413 size → 400 magic.
+/// saved paper. Check order: 413 size → 404 paper → 400 magic.
 fn attach_pdf(state: &AppState, source_id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let b: UploadPdfBody = ctx.parse_body()?;
     reject_oversized_b64(&b.file_b64, "PDF exceeds size limit")?;
@@ -187,7 +186,7 @@ pub struct ImportCommitBody {
 }
 
 /// `POST /api/projects/import/commit` — `on_conflict` defaults to "merge";
-/// a `ProjectImportError` is a 422, any other failure a 400.
+/// a `ProjectImport` is a 422, any other failure a 400.
 fn import_commit(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let b: ImportCommitBody = ctx.parse_body()?;
     let on_conflict = match b.on_conflict.as_deref() {

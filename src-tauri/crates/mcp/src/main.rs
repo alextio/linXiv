@@ -1,4 +1,4 @@
-//! linXiv MCP server — the library tools over stdio JSON-RPC. The 75 tools are
+//! linXiv MCP server — the library tools over stdio JSON-RPC. The tools are
 //! split across five cluster modules, each a `#[tool_router]` impl merged here.
 
 mod annotations;

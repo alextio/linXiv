@@ -1,6 +1,5 @@
-//! Connection + column-type converters. Plan §5.3 + D4/D5. LIST/DATE/TIMESTAMP/
-//! BOOL conversion is explicit at the row-mapping site via the helper fns below;
-//! the named queries call them when shaping models.
+//! Connection + column-type converters. Plan §5.3 + D4/D5. The LIST/DATE/
+//! TIMESTAMP helpers below are called explicitly at each row-mapping site.
 
 use std::path::Path;
 
@@ -10,8 +9,8 @@ use rusqlite::{Connection, Transaction};
 use crate::error::{CoreError, Result};
 
 /// Open a connection with `PRAGMA foreign_keys = ON`.
-/// NON-NEGOTIABLE: the PRAGMA is per-connection and defaults OFF — without it
-/// every `ON DELETE CASCADE` silently no-ops. It must run on EVERY connection.
+/// NON-NEGOTIABLE: the PRAGMA is per-connection, and only our bundled SQLite
+/// build defaults it on — without it `ON DELETE CASCADE` silently no-ops.
 /// `busy_timeout` waits for a writer in another process (app/CLI/MCP share the
 /// file). WAL is best-effort (`let _`): entering it can be SQLITE_BUSY, and
 /// `backup.rs::ensure_no_live_connections` relies on `open` failing ONLY for
@@ -33,7 +32,7 @@ pub fn open_in_memory() -> Result<Connection> {
 /// Run `f` inside a transaction, committing on `Ok`, rolling back on `Err`/drop.
 /// IMMEDIATE, not DEFERRED: SQLite does not invoke the busy handler for a
 /// read→write promotion (instant SQLITE_BUSY); taking the write lock up front
-/// lets `busy_timeout` cover a writer in another process (app/CLI/MCP).
+/// lets `busy_timeout` cover a cross-process writer.
 pub fn transaction<T>(
     conn: &mut Connection,
     f: impl FnOnce(&Transaction) -> Result<T>,
@@ -47,7 +46,7 @@ pub fn transaction<T>(
 // ── decltype converters (explicit; no register_converter in rusqlite) ─────────
 
 /// LIST column ⇄ Vec<String>, stored as a JSON array TEXT.
-/// to_sql never fails for a string vec; defaults to `[]` rather than panicking.
+/// Serializing a string vec cannot fail; `[]` instead of an unwrap panic.
 pub fn list_to_sql(v: &[String]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
 }
@@ -77,9 +76,8 @@ pub fn timestamp_from_sql(s: &str) -> Result<NaiveDateTime> {
     let t = s.trim();
     let norm = t.replacen('T', " ", 1);
     NaiveDateTime::parse_from_str(&norm, "%Y-%m-%d %H:%M:%S%.f")
-        // Legacy rows carry microseconds + a UTC offset (e.g.
-        // "2026-06-04T03:10:47.041006+00:00"); RFC3339-parse those and
-        // normalize to naive UTC so the offset isn't trailing input.
+        // Legacy rows are RFC3339 with an offset ("…T03:10:47.041006+00:00"),
+        // which the naive parse rejects as trailing input; re-parse to UTC.
         .or_else(|_| DateTime::parse_from_rfc3339(t).map(|dt| dt.naive_utc()))
         .map_err(|e| CoreError::Internal(format!("bad TIMESTAMP {s:?}: {e}")))
 }

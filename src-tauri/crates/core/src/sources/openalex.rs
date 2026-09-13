@@ -168,7 +168,7 @@ fn parse_search_results(body: &Value) -> Vec<PaperMetadata> {
         .unwrap_or_default()
 }
 
-/// Search OpenAlex `/works`. `mailto` selects the polite pool (DI param, not env).
+/// Search OpenAlex `/works`. `mailto` selects the polite pool (caller-injected).
 pub async fn search(
     query: &str,
     max_results: u32,
@@ -329,8 +329,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // fixtures live in testdata/openalex/, whitespace inside is load-bearing —
-    // never run a formatter over them.
     // A representative /works search response (wire shape: {"results":[...]}).
     const SEARCH_RESPONSE: &str = include_str!("testdata/openalex/search_response.json");
 

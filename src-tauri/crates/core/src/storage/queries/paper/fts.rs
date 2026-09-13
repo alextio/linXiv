@@ -7,15 +7,13 @@ use crate::error::Result;
 use crate::models::{ARXIV_ID_PREFIX, ARXIV_PDF_MARKER};
 use crate::storage::db::transaction;
 
-// ── Writes ───────────────────────────────────────────────────────────────────
-//
 // papers_fts.paper_id holds the SOURCE_ID *string*, not the int PAPER_ID.
 // init_db always creates papers_fts, so a DELETE/INSERT against it cannot miss.
 
 /// Rows the backfill works on: latest-version active papers with no TeX source
 /// that `service::paper::source_fetch_url` would accept (an `arxiv:` id with a
-/// `/pdf/` link). Both patterns are built from the constants that fn matches on,
-/// so the rules can't drift; GLOB, not LIKE — LIKE is ASCII-case-insensitive.
+/// `/pdf/` link) — both patterns built from the constants that fn matches on.
+/// GLOB, not LIKE: LIKE is ASCII-case-insensitive.
 fn backfill_where() -> String {
     format!(
         "FROM latest_papers WHERE COALESCE(downloaded_source, 0) = 0 \
@@ -23,10 +21,9 @@ fn backfill_where() -> String {
     )
 }
 
-/// SOURCE_IDs of those rows, oldest-published first. Returns ids ONLY:
-/// `list_papers` would build a `PaperDetails` per row, so a backfill scan over a
-/// large library would materialise the whole library just to filter it out. The
-/// caller loads each paper individually instead.
+/// SOURCE_IDs of those rows, oldest-published first. Ids ONLY: `list_papers`
+/// would build a `PaperDetails` per row, materialising the whole library just to
+/// filter it out.
 pub fn full_text_backfill_candidates(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT source_id {} ORDER BY published ASC, source_id ASC",
@@ -48,8 +45,8 @@ pub fn full_text_backfill_count(conn: &Connection) -> Result<i64> {
 
 /// Re-derive a paper's FTS row from `paper_index_text` (dropped when the view
 /// yields nothing) — the same two statements the PAPER_META triggers run, so the
-/// paths can't disagree. Only for writes the triggers cannot see: a SOURCE_ID
-/// rename and an undelete; FULL_TEXT writers are already covered by trigger.
+/// paths can't disagree. Only for writes no trigger sees: a SOURCE_ID rename,
+/// an undelete, a merge; FULL_TEXT writers are covered by trigger already.
 pub(super) fn refresh_fts(tx: &Transaction, source_id: &str) -> Result<()> {
     tx.execute("DELETE FROM papers_fts WHERE paper_id = ?", [source_id])?;
     tx.execute(
@@ -61,8 +58,8 @@ pub(super) fn refresh_fts(tx: &Transaction, source_id: &str) -> Result<()> {
 }
 
 /// Store extracted TeX and mark DOWNLOADED_SOURCE; no-op if the version doesn't
-/// exist. FTS follows by trigger. Empty text marks the version fetched without
-/// leaving search: `paper_index_text` falls back to an older version's body.
+/// exist. FTS follows by trigger. Empty text marks the version fetched; search
+/// falls back to an older body, or drops the paper if no version has one.
 pub fn set_full_text(
     conn: &mut Connection,
     source_id: &str,
@@ -88,8 +85,7 @@ pub fn set_full_text(
 
 /// Whether this exact active version already stores a non-empty TeX body — the
 /// commit-time guard that keeps an empty re-fetch from erasing an indexed one.
-/// One column on purpose: the body itself can run to megabytes and no caller
-/// wants it, only the answer.
+/// One boolean column: the body can run to megabytes and no caller wants it.
 pub fn has_full_text(conn: &Connection, source_id: &str, version: i64) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -148,8 +144,8 @@ mod tests {
     /// THE INVARIANT: papers_fts is derived from FULL_TEXT, so a writer that
     /// stores text WITHOUT going through `set_full_text` still cannot desync
     /// search. Every write below is a raw statement of exactly the shape the
-    /// index used to depend on nobody writing; drop either trigger (or the
-    /// soft-delete gate) from `paper_index_text.sql` and this test goes red.
+    /// index used to depend on nobody writing; drop the INSERT/UPDATE trigger or
+    /// the STATUS gate from `paper_index_text.sql` and this goes red.
     #[test]
     fn raw_full_text_writes_cannot_desync_the_index() {
         let mut conn = open_in_memory().unwrap();
@@ -219,15 +215,15 @@ mod tests {
         );
 
         // A soft-deleted paper keeps its FULL_TEXT, so re-deriving must NOT put it
-        // back into search — the STATUS gate lives in `paper_index_text`.
+        // back into search — the STATUS gate is inherited from `papers`.
         soft_delete_paper(&mut conn, "arxiv:raw").unwrap();
         set_text(&conn, 1, Some("resurrected tex"));
         assert_eq!(matches(&conn, "resurrected"), 0);
     }
 
-    /// Dropping a version's meta row changes which body is newest, so the index
-    /// has to follow. Delete `papers_fts_meta_ad` and this goes red: search keeps
-    /// answering with a body whose row no longer exists.
+    /// Dropping a version's meta row changes which body is newest. Delete
+    /// `papers_fts_meta_ad` and this goes red: search keeps answering with a body
+    /// whose row no longer exists.
     #[test]
     fn deleting_the_newest_meta_row_falls_back_to_an_older_body() {
         let mut conn = open_in_memory().unwrap();

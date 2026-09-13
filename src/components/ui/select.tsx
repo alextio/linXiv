@@ -20,9 +20,8 @@ interface SelectProps
 
 /** Styled wrapper around a native <select>, matching the Input/Textarea/Badge
  *  primitives. Callers pass <option> children. Use `size` for inline density;
- *  `className` is appended, so avoid passing padding/size utilities that
- *  conflict with the variant (the project has no tailwind-merge to resolve
- *  such conflicts). */
+ *  `className` is appended, not merged, so avoid padding/size utilities that
+ *  conflict with the variant. */
 export function Select({
   size = "md",
   className = "",

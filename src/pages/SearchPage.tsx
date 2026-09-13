@@ -31,7 +31,7 @@ function paperMatchesText(paper: Paper, query: string): boolean {
 }
 
 // Adapts the storage Paper model to the SearchResult wire shape.
-// paper.url (storage field) maps to paper_url (API contract field renamed from pdf_url per ADR 0011).
+// paper.url (storage field) maps to paper_url (renamed per ADR 0011).
 function paperToSearchResult(paper: Paper): SearchResult {
   return {
     source_id: paper.source_id,
@@ -61,7 +61,7 @@ type ViewSort = "default" | "newest" | "oldest";
 
 function applyViewSort(list: SearchResult[], sort: ViewSort): SearchResult[] {
   if (sort === "default") return list;
-  // Undated entries use "0000-00-00" so they always sink to the bottom of both orderings.
+  // Undated entries use "0000-00-00": last under newest, first under oldest.
   return [...list].sort((a, b) => {
     const da = a.published || "0000-00-00";
     const db = b.published || "0000-00-00";
@@ -214,7 +214,7 @@ const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: getSettin
     saveSearchState(clause, src, max, res, prefs).catch(() => {});
   }
 
-  // Core search runner — accepts explicit prefs so sort-change re-search works without waiting for state.
+  // Core search runner — overridePrefs, when passed, beats the sortPrefs state.
   function runSearch(mode: "replace" | "append", overridePrefs?: SortPrefs) {
     const query = queryText.trim();
     if (!query) return;
@@ -283,8 +283,7 @@ const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: getSettin
       await saveOpenAlex(sourceId);
     } else if (sourceId.startsWith("arxiv:")) {
       // Namespaced ids arrive when a row offers save before the saved lookup
-      // resolves (or after it failed); re-saving a library paper is an
-      // idempotent upsert.
+      // resolves (or after it failed); re-saving a stored version is a no-op.
       await fetchArxiv(sourceId.slice("arxiv:".length), true);
     } else if (/^openalex:W\d+$/.test(sourceId)) {
       await saveOpenAlex(sourceId.slice("openalex:".length));
@@ -411,7 +410,7 @@ const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: getSettin
             </div>
           )}
 
-          {/* Sort — per source, auto-re-searches on change */}
+          {/* Sort — per source */}
           {source === "arxiv" && (
             <div className="flex items-center gap-1.5 text-sm text-[var(--color-muted)]">
               <span>Sort</span>

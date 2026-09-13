@@ -8,17 +8,16 @@ export type ContextMenuItem =
   | "separator"
   // `checked` present (even false) makes it a native check item.
   // `confirm` makes it two-click: the first click re-pops the menu in place
-  // with this item flipped to the confirm text; only the second runs `action`.
-  // Dismissing the menu resets it. Ignored on check items.
+  // showing `confirm`; only the second runs `action`. Dismissing resets it;
+  // check items ignore it.
   | { text: string; action: () => void; enabled?: boolean; checked?: boolean; confirm?: string };
 
 // Every menu command is serialized through this chain. popup() holds tauri's
 // resources-table mutex until the menu is DISMISSED, while close() is a sync
 // command served on the GTK main thread — inside the popup's own nested event
-// loop. close() during an open popup therefore deadlocks the whole app (main
-// thread parks on the mutex, the popup holds it until the main thread returns;
-// observed live in eu-stack). Queueing behind the previous popup's resolution
-// guarantees the mutex is free before any close/build/popup runs.
+// loop — so close() during an open popup deadlocks the whole app (observed
+// live in eu-stack). Queueing behind the previous popup's resolution keeps the
+// mutex free before any close/build/popup runs.
 let chain: Promise<void> = Promise.resolve();
 // Check items are their own Rust-side resources; menu.close() frees only the
 // menu, so they're tracked and closed alongside it or they leak per click.
@@ -41,8 +40,7 @@ function enqueue(step: () => Promise<void>) {
 }
 
 // Rust-side menu resources are only freed via close(); the next pointer
-// interaction after a menu is gone frees the last one, so at most one
-// dismissed menu is ever kept alive in between.
+// interaction sweeps the last one, so at most one dismissed menu stays alive.
 let sweeperArmed = false;
 function armMenuSweeper() {
   if (sweeperArmed) return;
@@ -59,9 +57,8 @@ function armMenuSweeper() {
   );
 }
 
-/** A "Copy …" entry. The webview may withhold navigator.clipboard outside a
- *  DOM gesture (menu actions arrive via a Tauri event), so fall back to a
- *  hidden-textarea execCommand copy before giving up. */
+/** A "Copy …" entry. The webview may withhold navigator.clipboard outside a DOM
+ *  gesture (menu actions arrive via a Tauri event), so fall back to execCommand. */
 export function copyItem(text: string, value: string): ContextMenuItem {
   return {
     text,
@@ -94,9 +91,8 @@ function execCommandCopy(value: string): boolean {
   return ok;
 }
 
-/** Pop a native context menu at the cursor. Outside Tauri (browser dev) this
- *  is a no-op that lets the browser's default menu through. Accepts a plain
- *  MouseEvent too — cytoscape's cxttap hands over the native event. */
+/** Pop a native context menu at the cursor; outside Tauri, a no-op that lets the
+ *  browser's default menu through. Takes a plain MouseEvent too (cytoscape cxttap). */
 export function showContextMenu(
   e: React.MouseEvent | MouseEvent,
   items: ContextMenuItem[]
@@ -104,9 +100,8 @@ export function showContextMenu(
   if (!isTauri) return;
   e.preventDefault();
   e.stopPropagation();
-  // Captured before the async hop: the menu pops where the mouse actually
-  // clicked, not wherever the OS last showed one. clientX/Y are in zoomed CSS
-  // px (interface zoom is webview-native zoom); window-logical px = client × zoom.
+  // Captured before the async hop so the menu pops where the click landed.
+  // clientX/Y are CSS px under the webview's native zoom; logical = client × zoom.
   const zoom = useUiStore.getState().zoom;
   showMenuAt(e.clientX * zoom, e.clientY * zoom, items);
 }
@@ -153,9 +148,8 @@ function showMenuAt(
           extras.push(check);
           menuItems.push(check);
         } else if (item.confirm !== undefined && i !== armedIndex) {
-          // Native menus dismiss on click, so "staying open" is a re-pop at
-          // the same spot with this item armed. Queues behind this popup's
-          // dismissal on the chain, so no mutex overlap.
+          // Native menus dismiss on click, so "staying open" is a re-pop at the
+          // same spot with this item armed, queued behind this popup's dismissal.
           menuItems.push({
             text: item.text,
             action: () => showMenuAt(clickX, clickY, items, i),
@@ -188,8 +182,7 @@ function showMenuAt(
       // Free whatever was built before the failure — nothing else holds it.
       await Promise.all([menu, ...extras].map((r) => r?.close().catch(() => {})));
       if (lastMenu?.menu === menu) lastMenu = null;
-      // Menu API systematically failing must not fail silent — right-click
-      // would be dead app-wide with no trace.
+      // Never fail silent: a broken menu API kills right-click app-wide.
       console.error("native context menu failed:", err);
     }
   });

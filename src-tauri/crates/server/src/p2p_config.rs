@@ -1,5 +1,5 @@
 //! p2p node config from the OS keychain + on-disk user settings: the at-rest DEK
-//! and the relay override. Shared by `main.rs` startup and `route::share`'s relay-reconnect.
+//! and the relay override. Shared by app + headless startup and `route::share`.
 
 use linxiv_core::config;
 
@@ -7,10 +7,9 @@ use linxiv_core::config;
 /// encryption key for `device.key` / `auth.key` / keyhive `state.bin`.
 ///
 /// Resolution order (spec §8): fetch-or-create in the OS keychain (service
-/// "linXiv", account "p2p-dek") is primary; keychain unavailable
+/// "linXiv", account "p2p-dek") is primary; keychain or RNG failure
 /// (headless/CI) → Argon2id-derive from `LINXIV_P2P_PASSPHRASE` if set; else
-/// `None` with one logged warning, keeping today's plaintext key store. The
-/// passphrase is inert whenever the keychain works.
+/// `None` with a logged warning, keeping today's plaintext key store.
 pub fn p2p_dek() -> Option<[u8; 32]> {
     let unavailable = |e: &dyn std::fmt::Display| match passphrase_dek() {
         Some(dek) => Some(dek),
@@ -56,11 +55,10 @@ pub fn p2p_dek() -> Option<[u8; 32]> {
                 // passphrase fallback is fine here — it's re-derivable.
                 return unavailable(&e);
             }
-            // First-run mint race: two instances launched together can both
-            // see NoEntry and set different DEKs — the keychain keeps the
-            // last write. Seal files only under the READ-BACK value, never
-            // the local mint, or state.bin can end up sealed under a key the
-            // keychain no longer holds (unrecoverable from the next launch).
+            // First-run mint race: two instances can both see NoEntry and set
+            // different DEKs (last write wins). Seal only under the READ-BACK
+            // value — the local mint can leave state.bin under a key the
+            // keychain no longer holds, unrecoverable on the next launch.
             match entry.get_password() {
                 Ok(stored) => match parse(&stored) {
                     Some(dek) => Some(dek),
@@ -73,10 +71,10 @@ pub fn p2p_dek() -> Option<[u8; 32]> {
     }
 }
 
-/// Keychain-unavailable fallback (spec §8): derive the DEK from
-/// `LINXIV_P2P_PASSPHRASE` via Argon2id, default params. Fixed app-level
-/// salt, documented as such: the passphrase is per-deployment; the salt only
-/// domain-separates this derivation (there is no per-install salt to store).
+/// Keychain fallback (spec §8): Argon2id-derive the DEK from
+/// `LINXIV_P2P_PASSPHRASE`, default params. The passphrase is per-deployment,
+/// so the fixed app-level salt only domain-separates this derivation; there
+/// is no per-install salt to store.
 fn passphrase_dek() -> Option<[u8; 32]> {
     let pass = std::env::var("LINXIV_P2P_PASSPHRASE").ok()?;
     let mut dek = [0u8; 32];
@@ -97,7 +95,7 @@ fn passphrase_dek() -> Option<[u8; 32]> {
 /// / `p2p_relay_only`). `RequireCustomButMissing` must never resolve to n0's
 /// public relay — the caller refuses to bind the node instead.
 pub enum RelaySetting {
-    /// No custom relay configured (or "only" isn't set): n0 public defaults.
+    /// No usable relay and "only" off, or settings unreadable: n0 defaults.
     Default,
     /// Bind with this relay only.
     Custom(linxiv_share::CustomRelay),
@@ -105,7 +103,7 @@ pub enum RelaySetting {
     RequireCustomButMissing,
 }
 
-/// Reads the relay settings straight off the on-disk file.
+/// Re-reads settings from disk on every call; no cache.
 pub fn relay_setting() -> RelaySetting {
     let Ok(settings) = config::UserSettings::load() else {
         return RelaySetting::Default;

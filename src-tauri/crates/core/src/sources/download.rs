@@ -51,7 +51,6 @@ pub async fn download_pdf(dest: &Path, url: &str, configured_max_bytes: u64) -> 
 fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        // Dedicated no-redirect client (manual per-hop SSRF re-check), but share http's UA.
         .user_agent(crate::sources::http::USER_AGENT)
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -221,9 +220,8 @@ fn host_is_public(url: &Url) -> bool {
     }
 }
 
-/// SECURITY CORE: reject any non-public address (private, loopback, link-local, unique-local,
-/// multicast, unspecified, CGNAT-shared, 0.0.0.0/8).
-/// The one SSRF classifier in the crate — the feed guard reuses it too.
+/// SECURITY CORE: rejects every private, loopback, link-local, multicast and reserved
+/// address. The one SSRF classifier in the crate — the feed guard reuses it too.
 pub(crate) fn is_public_addr(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),

@@ -1,6 +1,5 @@
-# Workspace root is src-tauri (NOT the repo root): upstream's integrations.rs
-# resolves sidecar binaries relative to current_exe(), so the cargo target/
-# directory must stay at src-tauri/target (ADR 0016 / drift report 2026-06-05).
+# Workspace root is src-tauri (NOT the repo root): release sidecars resolve
+# beside current_exe(), so the cargo target/ dir must stay at src-tauri/target.
 [workspace]
 members = [".", "crates/core", "crates/cli", "crates/mcp", "crates/migrate", "crates/share", "crates/p2p", "crates/server"]
 
@@ -47,7 +46,7 @@ tokio = { version = "1", features = ["full"] }
 # Tauri-free half of what used to live in this crate.
 linxiv-server = { path = "crates/server" }
 # In-process backend: the app calls linxiv-core directly via the `api` dispatch
-# command (replacing the HTTP hop to the Python sidecar).
+# command — no HTTP hop.
 linxiv-core = { path = "crates/core" }
 # remote_backend.rs holds a ShareNode Arc per cached outbound connection.
 linxiv-share = { path = "crates/share", features = ["auth-keyhive", "sync-beelay"] }
@@ -96,10 +95,9 @@ tauri-plugin-single-instance = "2"
 codegen-units = 1
 lto = true
 opt-level = "s"
-# D30: unwind so the PDF-extraction catch_unwind (sources/pdf_metadata.rs) can
-# degrade a libpdfium-binding Rust panic to "no metadata" instead of aborting the
-# whole app. The catch is inside the Rust→pdfium-render call, so nothing unwinds
-# across a C frame. (Native libpdfium *segfaults* are contained by the subprocess
-# boundary in pdf_metadata.rs::extract_pdf_metadata_isolated.)
+# D30: unwind so the catch_unwind in sources/pdf_metadata/extract.rs can degrade a
+# libpdfium-binding Rust panic to "no metadata" instead of aborting the whole app.
+# The catch sits inside the Rust→pdfium-render call, so nothing unwinds across a C
+# frame. (Native segfaults are contained by pdf_metadata/worker.rs instead.)
 panic = "unwind"
 strip = true

@@ -41,7 +41,7 @@ jobs:
       # The tag lands verbatim in the RPM Version field, where a "-beta" suffix
       # sorts ABOVE the bare core (rpm's only prerelease marker is "~"), so a
       # stable tag sharing a core with a shipped prerelease can never rpm -U
-      # over it. After v0.3.0-beta the next release is v0.3.1 — see docs/build.md.
+      # over it — never reuse a prerelease's core. See docs/build.md.
       - name: Set app version from tag
         shell: bash
         run: bash scripts/set_release_version.sh "$GITHUB_REF_NAME"
@@ -120,7 +120,7 @@ jobs:
           generateReleaseNotes: true
           args: ${{ matrix.args }}
           # We ship both NSIS and MSI; the updater's latest.json can only name
-          # one Windows artifact, so pin it to NSIS (passive installMode above).
+          # one Windows artifact, so pin it to NSIS.
           updaterJsonPreferNsis: true
           # macOS and Windows builds are unsigned. See README.md's Install
           # section for the current per-OS bypass steps (Gatekeeper's "damaged"

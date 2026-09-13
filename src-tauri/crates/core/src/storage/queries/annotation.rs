@@ -1,8 +1,7 @@
 //! ANNOTATION named queries — PDF highlight storage, mirroring `queries::note`.
 //!
-//! Callers must pass a connection opened via `storage::db::open`; FK cascades
-//! (SOURCE_FK → PAPER_ROOTS ON DELETE CASCADE) depend on the foreign_keys
-//! PRAGMA set there.
+//! Callers must pass a connection from `storage::db::open`/`open_in_memory` —
+//! SOURCE_FK → PAPER_ROOTS ON DELETE CASCADE needs their foreign_keys PRAGMA.
 
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
@@ -98,8 +97,7 @@ pub fn create_annotation(
     Ok(conn.last_insert_rowid())
 }
 
-/// Update the written comment (the only mutable field). Returns false if no row
-/// matched ANNOTATION_SK.
+/// Update the comment (the only user-editable field); false if no row matched.
 pub fn patch_annotation(conn: &Connection, annotation_id: i64, comment: &str) -> Result<bool> {
     let now = timestamp_to_sql(Utc::now().naive_utc());
     let n = conn.execute(
@@ -118,7 +116,7 @@ pub fn delete_annotation(conn: &Connection, annotation_id: i64) -> Result<bool> 
     Ok(n > 0)
 }
 
-/// Check if an annotation with the given UUID already exists.
+/// True if some annotation already has this UUID.
 pub fn uuid_taken(conn: &Connection, uuid: &str) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM ANNOTATION WHERE ANNOTATION_UUID = ?1 LIMIT 1")?;
     Ok(stmt.exists([uuid])?)
@@ -195,7 +193,7 @@ mod tests {
         assert_eq!(got.project_id, Some(proj));
         assert!(got.created_at.is_some());
 
-        // patch updates only the comment.
+        // patch edits the comment.
         assert!(patch_annotation(&conn, id, "edited").unwrap());
         assert_eq!(
             get_annotation(&conn, id).unwrap().unwrap().comment,
@@ -259,14 +257,14 @@ mod tests {
         init_db(&conn).unwrap();
         let (src, proj) = seed(&conn);
 
-        // Create with a fixed uuid and verify it round-trips.
+        // A supplied uuid round-trips.
         let fixed_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
         let id =
             create_annotation(&conn, src, Some(proj), ANCHOR, "test", Some(fixed_uuid)).unwrap();
         let got = get_annotation(&conn, id).unwrap().unwrap();
         assert_eq!(got.uuid, fixed_uuid);
 
-        // Duplicate uuid insert fails at this layer.
+        // Duplicate uuid trips the UNIQUE index.
         assert!(
             create_annotation(&conn, src, Some(proj), ANCHOR, "dup", Some(fixed_uuid)).is_err()
         );

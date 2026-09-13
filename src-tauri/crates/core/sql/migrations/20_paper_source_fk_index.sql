@@ -1,11 +1,8 @@
--- PAPER's only indexes were its PK and UNIQUE (SOURCE_ID, VERSION) — nothing on
--- SOURCE_FK, though it is the join/filter column everywhere versions are looked
--- up by root: the deleted_papers view's correlated MAX(VERSION) subquery (one
--- full PAPER scan per trashed row), the latest-version-by-fk lookup in
--- write.rs, merge.rs's (SOURCE_FK, VERSION) row targeting, and the FK cascade
--- when a PAPER_ROOTS row is purged. (RSS_PAPER, the sibling table, already
--- indexes its SOURCE_FK.) Composite with VERSION so MAX/ORDER BY VERSION
--- lookups are index-only. Purely for speed; every reader on these predicates
--- is order-safe (explicit ORDER BY, aggregate, or set-based), so plans may
+-- Composite (SOURCE_FK, VERSION) for the root -> versions lookups: the
+-- deleted_papers view's correlated MAX(VERSION) subquery, write.rs's
+-- latest-version-by-fk, merge.rs's row targeting, and the PAPER_ROOTS FK
+-- cascade. Purely for speed; every reader here is order-safe, so plans may
 -- change but results don't.
+-- BROKEN: migration 18 already creates idx_paper_source_fk on (SOURCE_FK)
+-- alone, so IF NOT EXISTS makes this a no-op and the composite never exists.
 CREATE INDEX IF NOT EXISTS idx_paper_source_fk ON PAPER (SOURCE_FK, VERSION);

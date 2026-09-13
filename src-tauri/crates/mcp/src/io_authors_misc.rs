@@ -39,7 +39,7 @@ fn project_papers(
     project_id: i64,
 ) -> Result<Vec<linxiv_core::models::PaperDetails>, ErrorData> {
     let details = svc_project::get_required(conn, project_id).map_err(guard_err)?;
-    // One resolution for every surface: library order (ADR-0011, route wins).
+    // One resolution for every surface: library order (ADR-0010).
     svc_project::export_papers(conn, &details.source_fks).map_err(map_core)
 }
 
@@ -57,7 +57,7 @@ pub struct ExportProjectParams {
     pub project_id: i64,
     /// Destination file path (.lxproj added automatically if absent).
     pub dest: String,
-    /// Include bundled PDFs in the archive (default False).
+    /// Include bundled PDFs in the archive.
     #[serde(default)]
     pub include_pdfs: bool,
 }
@@ -69,7 +69,7 @@ pub struct ImportProjectParams {
     /// How to handle papers that already exist — "merge" or "overwrite".
     #[serde(default = "default_on_conflict")]
     pub on_conflict: String,
-    /// If True, return a summary without modifying the database.
+    /// Return a summary without modifying the database.
     #[serde(default)]
     pub preview: bool,
 }

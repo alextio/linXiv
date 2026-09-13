@@ -36,11 +36,11 @@ pub fn preview_from_manifest(manifest: &Manifest) -> ImportPreview {
     }
 }
 
-/// Two-phase commit over an already-decoded manifest + decoded PDF bytes. Creates a
-/// fresh project, imports papers (merge/overwrite), links them, writes bundled PDFs,
-/// then imports notes. On ANY failure the project is soft-deleted (trash) and a
-/// `CoreError::ProjectImport` is returned — papers saved before the failure remain.
-/// Returns the new project_fk.
+/// Two-phase commit over an already-decoded manifest + PDF bytes. Creates the
+/// project, imports papers (merge/overwrite), links them, writes bundled PDFs,
+/// then notes and annotations. On ANY failure the project is soft-deleted (trash)
+/// and `CoreError::ProjectImport` is returned — papers saved before the failure
+/// remain. Returns the new project_fk.
 pub fn commit_from_manifest(
     conn: &mut Connection,
     manifest: &Manifest,

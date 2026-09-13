@@ -1,13 +1,10 @@
 // EditorPage.tsx
 // -----------------------------------------------------------------------------
 // Host-side full-canvas view that embeds the TeXbrain editor in an <iframe> and
-// drives it over the EditorBridge. Modeled on GraphPage.tsx (full-height flex:
-// header bar + flex-1 iframe), it wires an EditorBridgeClient to the iframe's
-// contentWindow, pushes live linXiv theme updates to the guest, and now mounts a
-// real LaTeX project: the header lists editor projects (frontmatter-flagged notes,
-// see service/editor_project.py), and selecting one pushes its DocOpenPayload via
-// texbrain:doc:open. Reads/writes flow through ApiFsResponder → the on-disk vault,
-// so edits persist.
+// drives it over an EditorBridgeClient. The header lists editor projects
+// (frontmatter-flagged notes, see service/editor_project.rs); selecting one
+// pushes its DocOpenPayload via texbrain:doc:open, and reads/writes flow through
+// ApiFsResponder to the on-disk vault.
 // -----------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -45,19 +42,17 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { errText } from "../lib/errText";
 
-// ---- Editor-plugin install gate (plan §4.3, ADR 0017 §Lifecycle) ------------
-// In DEV the editor comes from its own dev server — no plugin, no gate. In PROD
-// the editor is the downloaded Editor plugin served via texbrain://; AppShell's
-// keep-alive pattern mounts this page (and would mount the iframe) at app BOOT,
-// so the iframe src must not be set until status() reports installed — render
-// the "Install the LaTeX editor" card in its place instead.
+// ---- Editor-plugin install gate (ADR 0017 §Lifecycle) -----------------------
+// DEV serves the editor from its own dev server — no plugin, no gate. In PROD it
+// comes from the downloaded plugin via texbrain://, and AppShell's keep-alive
+// mounts this page at app BOOT, so the iframe src must wait until status()
+// reports installed; the "Install the LaTeX editor" card renders in its place.
 
 type PluginGate =
   | { state: "checking" }
   | { state: "ready" }
-  // A PROD frontend running in a plain browser (e.g. `vite preview` of the
-  // built dist): there is no Tauri runtime, so the plugin commands and the
-  // texbrain:// scheme don't exist — show a friendly notice, never invoke.
+  // A PROD frontend in a plain browser (`vite preview` of the built dist): no
+  // Tauri runtime, so the plugin commands and texbrain:// don't exist.
   | { state: "browser" }
   | {
       state: "missing";
@@ -135,18 +130,17 @@ export default function EditorPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bridgeRef = useRef<EditorBridgeClient | null>(null);
 
-  // The active project's note id, read lazily by the long-lived bridge/FS responder
-  // and onReady handler so switching projects never needs the bridge rebuilt.
+  // The active project's note id, read lazily by the long-lived bridge/FS
+  // responder so switching projects never rebuilds the bridge.
   const noteIdRef = useRef<number | null>(null);
   const guestReadyRef = useRef(false);
   // A project chosen before the guest finished its handshake; mounted on ready.
   const pendingOpenRef = useRef<number | null>(null);
   // The guest's unsaved-edits flag (from texbrain:dirty); guards project switches.
   const dirtyRef = useRef(false);
-  // Absolute path of a host-picked disk folder the guest opened IN PLACE of a
-  // vault project (its "Open Folder" → texbrain:pick:folder). While set, the
-  // HostFsRouter routes every fs op here instead of the vault; cleared whenever
-  // a vault project mounts (mountProject).
+  // Absolute path of a host-picked disk folder the guest opened instead of a
+  // vault project ("Open Folder" → texbrain:pick:folder). While set, HostFsRouter
+  // routes every fs op here; cleared when a vault project mounts (mountProject).
   const diskRootRef = useRef<string | null>(null);
 
   const [projects, setProjects] = useState<EditorProjectSummary[]>([]);
@@ -156,7 +150,7 @@ export default function EditorPage() {
   const [diskName, setDiskName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Non-fatal: the live guest reported a bridge protocol this host doesn't
-  // support (plan Phase 5; the real guard is the install-time manifest gate).
+  // support; the real guard is the install-time manifest check.
   const [protocolWarning, setProtocolWarning] = useState<string | null>(null);
   // noteId awaiting the unsaved-changes confirmation dialog (null = closed).
   const [pendingSwitch, setPendingSwitch] = useState<number | null>(null);
@@ -171,17 +165,14 @@ export default function EditorPage() {
   const pluginReady = gate.state === "ready";
 
   // PROD boot: resolve installed-or-not before ever setting the iframe src.
-  // status() is LOCAL (reads the on-disk cache) — no network. We deliberately do
-  // NOT call checkUpdates() here: AppShell keep-alive mounts this page at app
-  // launch regardless of route, and ADR 0017 forbids unsolicited background
-  // network (a per-launch unauthenticated GitHub hit for users who never open
-  // the editor). The compat-gated download size is fetched lazily once the user
-  // actually views the Editor tab (the effect below).
+  // status() is LOCAL (on-disk cache), no network. checkUpdates() is deliberately
+  // NOT called here: keep-alive mounts this page at launch regardless of route,
+  // and ADR 0017 forbids unsolicited background network. The download size is
+  // fetched lazily once the user views the Editor tab (the effect below).
   useEffect(() => {
     if (import.meta.env.DEV) return;
-    // PROD frontend outside Tauri (browser preview of the built dist): no
-    // runtime, no plugin commands — don't invoke (it throws
-    // "__TAURI_INTERNALS__ is undefined"), just show the notice.
+    // Outside Tauri there are no plugin commands — invoking throws
+    // "__TAURI_INTERNALS__ is undefined", so just show the notice.
     if (!isTauri) {
       setGate({ state: "browser" });
       return;
@@ -213,14 +204,12 @@ export default function EditorPage() {
     };
   }, []);
 
-  // Lazily fill the install card's download-size copy the first time the user is
-  // actually looking at the Editor tab and the plugin is missing — the only
-  // point a network update-check is user-initiated rather than at boot.
+  // Fill the install card's download-size copy the first time the user views
+  // the Editor tab with the plugin missing.
   const onEditorRoute = useLocation().pathname === "/editor";
   const sizeFetchedRef = useRef(false);
-  // Primitive projections of the union so the effect deps don't reference
-  // variant-only fields (TS can't narrow gate.check/gate.installing in a deps
-  // array) and the effect re-runs only on the transitions it cares about.
+  // Primitive projections of the union: TS can't narrow gate.check/gate.installing
+  // in a deps array, and the effect re-runs only on the transitions it cares about.
   const gateMissingNoCheck = gate.state === "missing" && !gate.check;
   const gateInstalling = gate.state === "missing" && gate.installing;
   useEffect(() => {
@@ -232,9 +221,8 @@ export default function EditorPage() {
     void (async () => {
       try {
         const check = await checkPluginUpdates();
-        // If the user navigated away mid-flight, clear the guard so the size is
-        // re-fetched next time they view the tab — otherwise the card would be
-        // stuck on "? MB" for the rest of the session despite a successful call.
+        // Navigated away mid-flight: clear the guard so the size is re-fetched
+        // next time, instead of the card sticking on "? MB" all session.
         if (alive) setGate((g) => (g.state === "missing" ? { ...g, check } : g));
         else sizeFetchedRef.current = false;
       } catch {
@@ -244,18 +232,14 @@ export default function EditorPage() {
     return () => {
       alive = false;
     };
-    // Depend on the primitive projections, NOT the whole gate object: every
-    // install-progress event makes a new gate reference and would otherwise
-    // tear down/re-run this effect ~50× per install.
+    // The projections, NOT the whole gate object: every install-progress event
+    // makes a new gate reference and would re-run this effect ~50× per install.
   }, [onEditorRoute, gateMissingNoCheck, gateInstalling]);
 
-  // Re-resolve the gate every time the user (re)enters the Editor tab:
-  // Settings' Uninstall (EditorPluginSection) doesn't notify this page, so a
-  // gate stuck at 'ready' would keep rendering the iframe against a
-  // texbrain:// scheme that now 404s — a blank editor with no recovery path.
-  // status() is LOCAL (on-disk cache read), so this costs no network. The
-  // reconcile only flips ready↔missing when not mid-install, leaving the
-  // install card's check/error/progress sub-state alone otherwise.
+  // Re-resolve the gate whenever the user (re)enters the Editor tab: Settings'
+  // Uninstall doesn't notify this page, so a gate stuck at 'ready' would render
+  // the iframe against a texbrain:// scheme that now 404s. status() is local, so
+  // this costs no network, and it only flips ready↔missing when not mid-install.
   useEffect(() => {
     if (import.meta.env.DEV || !isTauri || !onEditorRoute) return;
     let alive = true;
@@ -276,10 +260,9 @@ export default function EditorPage() {
     };
   }, [onEditorRoute]);
 
-  // Guards handleInstall's post-await setGate calls (progress events, results)
-  // against an unmounted component. AppShell's keep-alive means this page never
-  // unmounts today, but the install flow shouldn't depend on that (mirrors
-  // EditorPluginSection's alive ref).
+  // Guards handleInstall's post-await setGate calls against an unmounted
+  // component. Keep-alive means this page never unmounts today, but the install
+  // flow shouldn't depend on that (mirrors EditorPluginSection's alive ref).
   const aliveRef = useRef(true);
   useEffect(() => {
     aliveRef.current = true; // StrictMode remount: reset after the teardown below
@@ -303,9 +286,8 @@ export default function EditorPage() {
         setGate((g) => (g.state === "missing" ? { ...g, error: errMessage(e) } : g));
     } finally {
       unlisten?.();
-      // Always drop the installing flag (the catch above relies on this too):
-      // install() resolving with installed:false would otherwise wedge the card
-      // with a progress bar and no retry button.
+      // Always drop the installing flag: install() resolving installed:false
+      // would otherwise wedge the card on a progress bar with no retry button.
       if (aliveRef.current)
         setGate((g) =>
           g.state === "missing" ? { ...g, installing: false, progress: null } : g
@@ -313,11 +295,11 @@ export default function EditorPage() {
     }
   }, []);
 
-  // Live theme delivery is owned by the theme store itself (stores/theme.ts
-  // applyAndSet → pushThemeToEditor on the registered frame), so EditorPage no
-  // longer subscribes to palette slices or re-renders on theme change. The two
-  // spots that still need the palette directly (the onReady handshake reply and
-  // the onLoad nudge) read it fresh via useThemeStore.getState().
+  // Live theme delivery is owned by the theme store (stores/theme.ts applyAndSet
+  // → pushThemeToEditor on the registered frame), which also covers callers
+  // outside React, so this page neither subscribes nor re-pushes. Initial theming
+  // is the onReady handshake reply + the onLoad nudge, both of which read the
+  // palette fresh via useThemeStore.getState().
 
   // Fetch a project's doc + push it to the guest. Sets noteIdRef BEFORE doc:open so
   // the FS ops the guest fires while mounting target the right vault.
@@ -354,12 +336,11 @@ export default function EditorPage() {
     }
   }, [mountProject]);
 
-  // Open a project. Switching away from a project with unsaved edits would
-  // discard them (the guest re-mounts on doc:open), so confirm first via the
-  // in-app dialog — window.confirm is suppressed in some webviews (e.g. Linux
-  // WebKitGTK returns false without showing anything), which would silently
-  // block every switch. Opening the dialog re-renders, snapping the controlled
-  // <select> back to currentNoteId until the user confirms.
+  // Open a project. Switching away with unsaved edits would discard them (the
+  // guest re-mounts on doc:open), so confirm first via the in-app dialog —
+  // window.confirm is suppressed in some webviews (Linux WebKitGTK returns false
+  // without showing anything). Opening the dialog re-renders, snapping the
+  // controlled <select> back to currentNoteId until the user confirms.
   const openProject = useCallback((noteId: number) => {
     if (noteId === noteIdRef.current) return; // already the open project
     // Guard unsaved edits in the open VAULT project or a host-picked DISK
@@ -382,9 +363,8 @@ export default function EditorPage() {
     }
   }, []);
 
-  // The project name is collected via the in-app dialog below — window.prompt
-  // is suppressed in some webviews (e.g. Linux WebKitGTK returns null without
-  // showing anything), which would make "New project" do nothing.
+  // The name comes from the in-app dialog below — window.prompt is suppressed in
+  // some webviews (Linux WebKitGTK returns null), making "New project" a no-op.
   const submitNewProject = useCallback(async () => {
     const name = newProjectName?.trim();
     if (!name) return;
@@ -398,9 +378,9 @@ export default function EditorPage() {
     }
   }, [newProjectName, refreshProjects, openProject]);
 
-  // Create the bridge once the iframe element exists; tear it down on unmount.
-  // Gated on pluginReady: while the install card shows there IS no iframe — the
-  // effect re-runs when the gate opens and binds the freshly-mounted frame.
+  // Create the bridge once the iframe exists; tear it down on unmount. Gated on
+  // pluginReady — the install card renders no iframe, so the effect re-runs and
+  // binds the frame when the gate opens.
   useEffect(() => {
     if (!pluginReady) return;
     // Guards async bridge callbacks (the native folder picker can outlive this
@@ -409,9 +389,8 @@ export default function EditorPage() {
     const frame = iframeRef.current?.contentWindow ?? null;
     registerEditorFrame(frame);
     const bridge = new EditorBridgeClient(frame, EDITOR_ORIGIN, {
-      // The client replies to the guest's 'texbrain:ready' handshake by pushing
-      // this resolved theme before first paint (no Amber flash). Reading from
-      // the store via getState() avoids a stale closure in the long-lived bridge.
+      // The client answers the guest's 'texbrain:ready' handshake with this
+      // resolved theme, before first paint. getState() avoids a stale closure.
       getThemeState: (): ThemePushState => {
         const s = useThemeStore.getState();
         return {
@@ -421,21 +400,17 @@ export default function EditorPage() {
           overrideAlphas: s.overrideAlphas,
         };
       },
-      // Real persistence: every guest FS op is forwarded to the on-disk vault for
-      // whatever project is currently open (noteIdRef) — unless the guest opened
-      // a host-picked disk folder (diskRootRef), which the router serves via the
-      // Tauri fs plugin instead.
+      // Every guest FS op goes to the on-disk vault of the open project
+      // (noteIdRef), unless a host-picked disk folder is mounted (diskRootRef),
+      // which the router serves via the Tauri fs plugin instead.
       fs: new HostFsRouter(
         () => diskRootRef.current,
         new ApiFsResponder(() => noteIdRef.current)
       ),
-      // The guest's "Open Folder": show the native directory picker, re-root the
-      // fs router at the pick, and deselect the vault-project dropdown. Resolving
-      // null = user cancelled (the guest keeps its current project mounted).
-      // pickFolder is a plugin command (tauri-plugin-texbrain) that shows the
-      // native directory dialog and extends the fs plugin's scope recursively
-      // for the picked folder (ADR 0018). It's in the plugin, not the host,
-      // so the plugin stays self-contained.
+      // The guest's "Open Folder": pickFolder is a tauri-plugin-texbrain command
+      // that shows the native directory dialog and extends the fs plugin's scope
+      // recursively for the pick (ADR 0020). We re-root the fs router there and
+      // deselect the vault dropdown; null = cancelled, current project stays.
       onPickFolder: async () => {
         const dir = await pickFolder();
         // This bridge was torn down while the picker was open (e.g. StrictMode
@@ -449,8 +424,8 @@ export default function EditorPage() {
         return name;
       },
       // The guest (re)booted: mount the selected/pending project. Also fires on a
-      // hot-reload, so the open project re-mounts after an iframe reload. (The guest
-      // ignores a same-project re-send, so this won't clobber unsaved buffers.)
+      // hot reload, so the open project re-mounts; the guest ignores a
+      // same-project re-send, so this won't clobber unsaved buffers.
       onReady: (protocol?: number) => {
         guestReadyRef.current = true;
         dirtyRef.current = false; // fresh guest starts clean
@@ -478,11 +453,10 @@ export default function EditorPage() {
     };
   }, [pluginReady]);
 
-  // Load the project list and auto-open the most recent one the first time the
-  // user actually views the Editor tab — NOT at mount: AppShell's keep-alive
-  // mounts this page at app BOOT, so an unconditional fetch would hit the
-  // backend on every launch, and a failure would set the error banner on a
-  // hidden (display:none) component where nobody sees it.
+  // Load the project list (newest first) and auto-open the most recent one the
+  // first time the user views the Editor tab — not at mount, since keep-alive
+  // would then fetch on every launch and a failure would set the error banner on
+  // a hidden (display:none) component where nobody sees it.
   const projectsFetchedRef = useRef(false);
   useEffect(() => {
     if (!onEditorRoute || projectsFetchedRef.current) return;
@@ -492,12 +466,6 @@ export default function EditorPage() {
     });
   }, [onEditorRoute, refreshProjects, openProject]);
 
-  // NOTE: live theme changes are pushed to the editor by the theme store itself
-  // (stores/theme.ts applyAndSet → pushThemeToEditor on the registered frame),
-  // which also covers programmatic theme callers outside React. We deliberately
-  // do NOT duplicate that here — a second push would send the guest an identical
-  // texbrain:theme on every change. Initial theming is the onReady handshake
-  // reply + the onLoad nudge below.
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -520,9 +488,8 @@ export default function EditorPage() {
               }}
               title="Open editor project"
             >
-              {/* Disk-folder placeholder: a host-picked folder isn't a vault
-                  project, so it deselects the dropdown — show its name instead
-                  of silently displaying the first project. */}
+              {/* A host-picked folder isn't a vault project, so it deselects
+                  the dropdown — show its name, not the first project's. */}
               {diskName != null && (
                 <option value="" disabled hidden>
                   {diskName} (folder)
@@ -644,19 +611,16 @@ export default function EditorPage() {
         title="TeXbrain LaTeX editor"
         // No `sandbox` attr: the editor needs full same-origin privileges (the
         // SwiftLaTeX worker fetches wasm with credentials:'same-origin', uses
-        // IndexedDB, etc.), which a non-sandboxed iframe already has. (`allow=`
-        // is Permissions-Policy and has no "same-origin" token — omitted.)
-        // COOP/COEP isolation for the worker is tracked in the asset-serving-note.
+        // IndexedDB), which a non-sandboxed iframe already has. `allow=` is
+        // Permissions-Policy and has no "same-origin" token, so it's omitted.
         onLoad={() => {
           // The mount effect captured the pre-navigation (about:blank) window;
-          // re-register the freshly-loaded guest so the store-side push targets
-          // the real editor, then nudge a theme push in case the bridge missed
-          // the 'texbrain:ready' handshake (e.g. a hot reload after mount).
+          // re-register the loaded guest so the store-side push targets the real
+          // editor, then nudge a theme push in case 'texbrain:ready' was missed.
           const frame = iframeRef.current?.contentWindow ?? null;
           registerEditorFrame(frame);
-          // Read the palette fresh (getState), not from the render closure — a
-          // theme change while the iframe was loading would otherwise nudge a
-          // stale palette and leave the editor mis-themed until the next change.
+          // Fresh palette (getState), not the render closure: a theme change
+          // while the iframe loaded would nudge a stale one.
           const s = useThemeStore.getState();
           pushThemeToEditor(frame, EDITOR_ORIGIN, {
             preset: s.preset,

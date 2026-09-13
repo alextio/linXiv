@@ -3,7 +3,7 @@ import type { Clause, SearchHistoryResponse, SearchResult } from "../types/api";
 
 // Diverged from core's `service::search_state::SavedSearch`: core stores
 // clauses/results/sort_prefs as untyped JSON (`Vec<Value>`/`Map`) and has no
-// `updated_at` (added by the route) — not generatable until core types them.
+// `updated_at` (storage adds it) — not generatable until core types them.
 // `saved_ids` still exists on the wire (the backend defaults it to []) but the
 // GUI no longer reads or writes it: saved state is the ["papers","saved",...]
 // react-query lookup, not a persisted snapshot.

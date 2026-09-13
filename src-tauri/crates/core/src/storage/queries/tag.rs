@@ -9,7 +9,7 @@ use crate::storage::db;
 const TAG_FK_BY_LABEL_SQL: &str = "SELECT TAG_FK FROM TAG WHERE TAG = ? COLLATE NOCASE LIMIT 1";
 
 /// Internal marker tag on projects that are reading lists (frontend
-/// `src/lib/readingStatus.ts::READING_LIST_TAG`). Hidden from index listings only.
+/// `src/lib/readingStatus.ts::READING_LIST_TAG`). Hidden from index listings.
 pub const READING_LIST_TAG: &str = "reading-list";
 
 /// Every tag, ordered by label. TAG.TAG is UNIQUE NOCASE (rows already distinct)
@@ -133,10 +133,10 @@ pub fn create_tag(conn: &mut Connection, label: &str) -> Result<i64> {
     db::transaction(conn, |tx| tag_fk_for_label(tx, label))
 }
 
-/// Hard delete by id (no-op if absent). Unlinks first — the bridge tables have
-/// no ON DELETE, so a bare delete fails on a tag in use. Both halves of dual tag
-/// storage (PAPER_TO_TAG and the `PAPER_META.TAGS` JSON) are cleared, in one
-/// IMMEDIATE `db::transaction`.
+/// Hard delete by id (no-op if absent). Unlinks first — TAG_FK has no ON DELETE,
+/// so a bare delete fails on a tag in use. Both halves of dual tag storage
+/// (PAPER_TO_TAG and the `PAPER_META.TAGS` JSON) are cleared, in one IMMEDIATE
+/// `db::transaction`.
 pub fn delete_tag(conn: &mut Connection, tag_id: i64) -> Result<()> {
     db::transaction(conn, |tx| {
         let label: Option<String> = tx

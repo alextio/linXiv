@@ -20,8 +20,7 @@ use crate::remote_query::{ApiEnvelope, RemoteError};
 use crate::route::share::ShareState;
 use crate::route::ApiRequest;
 
-/// UserSettings key holding the backend registry (reuses the existing
-/// settings persistence; no new storage system).
+/// UserSettings key holding the backend registry — no new storage system.
 const SETTINGS_KEY: &str = "remote_backends";
 
 /// One registered remote Library Backend. `node_address` is a locator, not a
@@ -114,10 +113,9 @@ pub async fn remote_backend_remove(
     Ok(())
 }
 
-/// Delete `root/{id}`; an absent dir is success. Non-slug ids (possible only
-/// via a hand-edited registry) are a no-op — [`fetch_remote_pdf`] refuses
-/// them, so nothing was ever cached under one, and they must not become a
-/// path segment here either.
+/// Delete `root/{id}`; an absent dir is success. Non-slug ids are a no-op —
+/// [`fetch_remote_pdf`] refuses them, so nothing was ever cached under one,
+/// and they must not become a path segment here either.
 fn purge_pdf_cache(root: &Path, id: &str) -> std::io::Result<()> {
     if !is_slug(id) {
         return Ok(());
@@ -146,8 +144,8 @@ pub struct RemoteState {
     conns: tokio::sync::Mutex<HashMap<String, Connection>>,
 }
 
-/// Cached connection for `backend_id`, dialing `addr` when there is none
-/// (or when `fresh` forces a redial). A dial failure is `RemoteError::unreachable`.
+/// Cached connection for `backend_id`, dialing `addr` when there is none,
+/// it is closed, or `fresh` is set. A dial failure is `RemoteError::unreachable`.
 // ponytail: two concurrent first requests may both dial; the second insert
 // wins and both connections work — dedupe only if dials ever get expensive.
 async fn conn_for(
@@ -271,8 +269,8 @@ pub async fn api_remote(
 
 // ── remote PDFs (byte lane + local cache) ───────────────────────────────────
 
-/// `%`-escape everything but unreserved chars — `encodeURIComponent` for the
-/// source-id path segment (old-style ids carry `/`, prefixed ones `:`).
+/// `%`-escape all but RFC 3986 unreserved, for the source-id path segment
+/// (old-style ids carry `/`, prefixed ones `:`).
 fn pct_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -287,7 +285,7 @@ fn pct_encode(s: &str) -> String {
 }
 
 /// Byte-lane read deadline: the header's `eta_seconds` doubled plus slack, so a
-/// hung node can't pin the UI forever; a missing or absurd eta gets a flat ceiling.
+/// hung node can't pin the UI forever; a missing or absurd eta gets a flat 10 min.
 fn read_deadline(header: &Value) -> std::time::Duration {
     match header.get("eta_seconds").and_then(Value::as_f64) {
         Some(eta) if eta.is_finite() && (0.0..86_400.0).contains(&eta) => {
@@ -375,7 +373,7 @@ pub async fn remote_pdf(
 
 /// This device's member code — the iroh endpoint id an operator adds to their
 /// node's Member List. NOTE: distinct from `GET /api/share/member_code` (the
-/// keyhive e2ee member id); Remote Query admission keys on the transport endpoint id.
+/// e2ee contact card); Remote Query admission keys on the transport endpoint id.
 #[tauri::command]
 pub async fn remote_member_code(
     share: tauri::State<'_, ShareState>,
@@ -412,13 +410,13 @@ mod tests {
         // Missing/corrupt key degrades to an empty registry.
         assert_eq!(parse_backends(None), vec![]);
         assert_eq!(parse_backends(Some(&json!("junk"))), vec![]);
-        // Slugs fill the smallest hole and stay filesystem-safe.
+        // Ids fill the smallest hole.
         assert_eq!(new_id(&list), "b3");
         assert_eq!(new_id(&list[1..]), "b1");
     }
 
     /// Removal must delete the cache dir: `new_id` reuses freed slugs, so a
-    /// leftover dir would poison the next backend that gets the same id.
+    /// leftover would be served as the next backend's PDFs.
     #[test]
     fn purge_pdf_cache_deletes_dir_tolerates_absence_refuses_non_slugs() {
         let root = tempfile::tempdir().unwrap();
@@ -460,7 +458,7 @@ mod tests {
         assert_eq!(d(json!({"eta_seconds": 10.0})), 50.0);
         assert_eq!(d(json!({"eta_seconds": 0.0})), 30.0);
         // Missing, non-numeric, negative, absurd, or non-finite eta falls
-        // back to the flat ceiling instead of an unbounded (or zero) wait.
+        // back to the flat 10 min instead of an unbounded (or zero) wait.
         for h in [
             json!({}),
             json!({"eta_seconds": "soon"}),
@@ -503,8 +501,8 @@ mod proto_tests {
         ))
     }
 
-    /// Lean twin of `remote_query::proto_tests::serve` (that harness is
-    /// module-private): the real handler behind an injected member list.
+    /// Lean twin of `remote_query::proto_tests::serve` (theirs is
+    /// `#[cfg(test)]`): the real handler behind an injected member list.
     async fn serve(state: Arc<AppState>, members: Vec<Member>) -> (Router, EndpointAddr) {
         let proto = build_api_proto(
             state,
@@ -553,7 +551,6 @@ mod proto_tests {
             .unwrap();
         assert_eq!(body["paper_count"], 0);
         assert_eq!(remote.conns.lock().await.len(), 1);
-        // A remote error envelope surfaces typed, not as a body.
         router.shutdown().await.unwrap();
     }
 

@@ -165,8 +165,8 @@ pub fn delete(conn: &Connection, author: &Author) -> Result<()> {
 
 // ── PAPER_TO_AUTHOR links ───────────────────────────────────────────────────
 
-/// Attach one paper↔author link (idempotent — storage INSERT OR IGNORE). The
-/// light-touch alternative to `merge` when only a single paper is misfiled.
+/// Attach one paper↔author link — the light-touch alternative to `merge` when
+/// only a single paper is misfiled. Re-linking a pair duplicates the row.
 pub fn link_author_to_paper(
     conn: &Connection,
     author_id: i64,

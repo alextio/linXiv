@@ -1,7 +1,7 @@
 //! source — the Provider front door for consumers (ADR-0010). Route/CLI/MCP name
 //! a Provider; this dispatches to the Provider's module and hands it its own
-//! configuration, so no consumer passes `data_dir` or `mailto` (or reaches into
-//! `sources::` at all).
+//! configuration, so no consumer passes `data_dir` or `mailto` (or touches a
+//! Provider module).
 //!
 //! The config read lives here rather than in `sources::`, which stays pure DI.
 //! `config::{openalex,crossref}_mailto()` prefer the env var and fall back to
@@ -69,9 +69,8 @@ pub async fn resolve_doi(doi: &str) -> Result<PaperMetadata> {
 }
 
 /// Every record CrossRef and OpenAlex hold for one DOI, plus whether either
-/// lookup *failed* (as opposed to cleanly finding nothing) — the per-DOI step of
-/// an ORCID backfill pass. Order is CrossRef first: `service::orcid_backfill`
-/// takes the first ORCID it finds.
+/// lookup *failed* (vs. cleanly finding nothing) — the per-DOI step of an ORCID
+/// backfill pass. CrossRef first: `orcid_backfill` takes the first name match.
 pub async fn orcid_records_for_doi(doi: &str) -> (Vec<PaperMetadata>, bool) {
     fold_doi_results(
         crossref::fetch_by_doi_checked(doi, &config::crossref_mailto()).await,

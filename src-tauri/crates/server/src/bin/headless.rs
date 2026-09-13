@@ -1,14 +1,14 @@
 //! Headless linXiv node (containerized / self-hosted): the full `/api/*` router
-//! over HTTP — share routes included — plus the iroh share node and the
-//! background sync, no Tauri window. Same dispatch surface as the app.
+//! over HTTP — share routes included — plus the iroh share node, the background
+//! sync, and `/api/status`, `/api/relay-access`, `/api/admin/*`, `/admin`.
 //!
-//! Auth: `LINXIV_API_TOKEN` gates every request behind `Authorization:
-//! Bearer <token>`. Fail-closed: binding a non-loopback `LINXIV_HTTP_ADDR`
-//! without a token refuses to start (the container image binds `0.0.0.0:8000`,
-//! so it always requires one); loopback without a token stays open for the
-//! local dev loop. Relay settings are the same on-disk user settings as the
-//! app (`p2p_relay_url` / `p2p_relay_auth_token` / `p2p_relay_only`): set
-//! them via `PATCH /api/settings`, then `POST /api/share/relay/reconnect`.
+//! Auth: `LINXIV_API_TOKEN` gates every request but `GET /admin` behind
+//! `Authorization: Bearer <token>`. Fail-closed: a non-loopback
+//! `LINXIV_HTTP_ADDR` without a token refuses to start (the container image
+//! binds `0.0.0.0:8000`, so it always needs one); loopback without a token
+//! stays open for the dev loop. Relay settings are the app's own on-disk
+//! settings (`p2p_relay_url` / `p2p_relay_auth_token` / `p2p_relay_only`):
+//! set via `PATCH /api/settings`, then `POST /api/share/relay/reconnect`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -36,14 +36,14 @@ use linxiv_server::{full_text_worker, journal, p2p_config, share_sync};
 const MAX_BODY: usize = 200 * 1024 * 1024;
 
 /// Static admin page. Secretless, so served without auth at `GET /admin`;
-/// every API call it makes carries the bearer token.
+/// its calls carry the token from sessionStorage.
 const ADMIN_HTML: &str = include_str!("../headless_admin.html");
 
 #[derive(Clone)]
 struct Ctx {
     state: Arc<AppState>,
     share: Arc<ShareState>,
-    /// Bearer token every request must present; `None` only on loopback.
+    /// Bearer token; `None` only on loopback. `GET /admin` is exempt.
     token: Option<Arc<str>>,
     /// Process start, for `uptime_secs` in `GET /api/status`.
     started: Instant,
@@ -55,9 +55,9 @@ struct Ctx {
 }
 
 /// Seed `p2p_relay_url` / `p2p_relay_auth_token` from `LINXIV_P2P_RELAY_URL` /
-/// `LINXIV_P2P_RELAY_TOKEN` when the settings are blank — a fresh (or `--rm`)
-/// container has no settings file, and without a relay URL the node can't mint
-/// a Node Address. Env seeds first boot; `PATCH /api/settings` wins afterward.
+/// `LINXIV_P2P_RELAY_TOKEN` when blank — a fresh (or `--rm`) container has no
+/// settings file, and with no relay URL the node can't mint a Node Address.
+/// First boot only; `PATCH /api/settings` wins afterward.
 fn seed_relay_from_env() {
     let url = std::env::var("LINXIV_P2P_RELAY_URL").unwrap_or_default();
     if url.is_empty() {
@@ -140,7 +140,7 @@ async fn main() {
     full_text_worker::spawn_headless(ctx.state.clone());
     spawn_feed_poll(ctx.state.clone());
     // An always-on node on a laptop/desktop must not suspend out from under
-    // its peers; the fd releases itself on process exit, crash included.
+    // its peers.
     #[cfg(target_os = "linux")]
     let _sleep_inhibitor = inhibit_sleep().await;
 
@@ -166,8 +166,8 @@ async fn main() {
 }
 
 /// Take a systemd-logind sleep+idle inhibitor for the process lifetime (opt out:
-/// `LINXIV_ALLOW_SLEEP=1`). The lock is a pipe fd — logind releases it when this
-/// process exits, however it exits; where login1 is absent, one stderr line.
+/// `LINXIV_ALLOW_SLEEP=1`). The lock is a pipe fd — logind releases it however
+/// this process exits; where login1 is absent, one stderr line.
 #[cfg(target_os = "linux")]
 async fn inhibit_sleep() -> Option<zbus::zvariant::OwnedFd> {
     if std::env::var("LINXIV_ALLOW_SLEEP").as_deref() == Ok("1") {
@@ -255,7 +255,7 @@ fn check_auth(ctx: &Ctx, req: &Request) -> Option<Response> {
 
 /// Remote Query Mode: serve `linxiv-api/1` on the share node's endpoint.
 /// Registered through `install_api` so a relay-reconnect rebind re-applies
-/// the handler; knocks land in the relay/access log with `source: "api"`.
+/// the handler; refused knocks log with `source: "api"`.
 async fn install_remote_query(ctx: &Ctx) {
     let relay_log = ctx.relay.clone();
     let knock: linxiv_p2p::KnockLogFn = Arc::new(move |peer: &str| {
@@ -279,7 +279,7 @@ async fn install_remote_query(ctx: &Ctx) {
         .await;
 }
 
-/// Same 5-minute loop the app spawns, minus the `AppHandle`.
+/// Same sync loop the app spawns, minus the `AppHandle`.
 fn spawn_interval_sync(ctx: &Ctx) {
     let (state, share) = (ctx.state.clone(), ctx.share.clone());
     tokio::spawn(async move {
@@ -291,12 +291,12 @@ fn spawn_interval_sync(ctx: &Ctx) {
 }
 
 /// Feed poll default. Cadence comes from `headless_feed_poll_minutes` (default
-/// 30), re-read every tick so a settings PATCH takes effect without a restart;
+/// 30), re-read every tick so a settings PATCH applies without a restart;
 /// no-op while `home_feed_url` is unset.
 const FEED_POLL_DEFAULT: Duration = Duration::from_secs(30 * 60);
 
 /// `headless_feed_poll_minutes` → sleep duration. Missing / non-positive /
-/// non-integer / overflowing falls back to the default rather than a hot loop.
+/// overflowing falls back to the default rather than a hot loop.
 fn feed_poll_period(minutes: Option<i64>) -> Duration {
     minutes
         .filter(|&m| m > 0)
@@ -336,14 +336,13 @@ fn spawn_feed_poll(state: Arc<AppState>) {
 
 // --- Relay access control + Member List ------------------------------------
 // iroh-relay's `access.http` POSTs `/api/relay-access` with an
-// `X-Iroh-NodeId` header per connecting endpoint (that exact name — the 1.0.2
-// source's X_IROH_ENDPOINT_ID const is "X-Iroh-NodeId"; we also accept
-// `X-Iroh-Endpoint-Id`, the name the docs use, in case a later release renames
-// it). Only an exact 200 `true` (text/plain) allows. Decision source: the
-// Member List at `<data_dir>/relay_allowlist.json` (`remote_query::Member` —
-// `{id, role}`, legacy bare strings = role none) — missing/empty file denies
-// everyone. Relay admission is presence-based; the role only governs Remote
-// Query Mode rights.
+// `X-Iroh-NodeId` header per connecting endpoint (1.0.2's X_IROH_ENDPOINT_ID
+// const; we also accept `X-Iroh-Endpoint-Id`, the name its docs use, in case
+// a later release renames it). Only a 200 with the body `true` allows.
+// Decision source: the Member List at `<data_dir>/relay_allowlist.json`
+// (`remote_query::Member`; legacy bare strings = role none) — missing/empty
+// file denies everyone. Relay admission is presence-based; the role only
+// governs Remote Query Mode rights.
 
 const RELAY_LOG_CAP: usize = 200;
 
@@ -352,7 +351,7 @@ const RELAY_LOG_CAP: usize = 200;
 const RELAY_LOG_FILE_CAP: u64 = 5 * 1024 * 1024;
 
 /// `GET /api/admin/relay/log` entry — one access decision, also the JSONL
-/// line persisted on disk. Loads tolerate partial legacy lines.
+/// line persisted on disk. Loads default missing fields.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct RelayLogEntry {
@@ -363,9 +362,9 @@ struct RelayLogEntry {
     source: String,
 }
 
-/// Recent relay access decisions plus refused api knocks (`source` tells
-/// them apart: "relay" vs "api"). Appended as JSONL under the data dir so the
-/// audit trail survives restarts; the in-memory tail serves the admin route.
+/// Recent relay decisions plus refused api knocks (`source`: "relay" vs
+/// "api"), appended as JSONL under the data dir so the trail survives
+/// restarts; the in-memory tail serves the admin route.
 struct RelayLog {
     seq: u64,
     entries: VecDeque<RelayLogEntry>,
@@ -376,8 +375,7 @@ struct RelayLog {
 }
 
 /// Knock ids are attacker-controlled bytes (a real endpoint id is 64 hex
-/// chars): strip control characters and clamp the length before a log entry
-/// stores — and an admin page or terminal later renders — them.
+/// chars): strip control characters and clamp before storing and rendering.
 fn clean_log_id(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(128).collect()
 }
@@ -523,14 +521,14 @@ struct MemberUpsertBody {
     actors: Option<serde_json::Value>,
 }
 
-/// `GET /api/admin/node-address` — the copyable Node Address locator.
+/// `GET /api/admin/node-address` response.
 #[derive(Serialize)]
 struct NodeAddressResponse {
     node_address: String,
 }
 
-/// `/api/admin/*` — Member List, access/transfer logs and the Node Address,
-/// JSON like the rest. `None` when the request is not an admin route.
+/// `/api/admin/*` — Member List, logs, Node Address, actors; JSON like the
+/// rest. `None` when the request is not an admin route.
 async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
     const MEMBERS: &str = "/api/admin/relay/members";
     let path = req.path.split('?').next().unwrap_or("");
@@ -579,8 +577,8 @@ async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
                 },
             ))
         }
-        // Upsert: add with a role (default none), or change an existing
-        // member's role by POSTing the same id again.
+        // Upsert: add (role defaults to none), or edit an existing member
+        // by POSTing the same id again.
         ("POST", MEMBERS) => {
             // Shape failures (missing body, non-object, non-string id) fall
             // through as an empty id, keeping the id check's 400 first.
@@ -678,11 +676,10 @@ fn clean_member_name(s: &str) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-/// Member-list upsert. Absent fields preserve an existing member's values —
-/// old idempotent add scripts must not silently strip query rights or
-/// attribution. New members default to role `none`. `name`: outer `None`
-/// preserves, `Some(None)` clears. `actors`: `None` preserves, `Some`
-/// replaces wholesale (empty clears).
+/// Member-list upsert. Absent fields preserve an existing member's values, so
+/// old idempotent add scripts can't silently strip query rights or attribution.
+/// New members default to role `none`. `name`: `None` preserves, `Some(None)`
+/// clears; `actors`: `None` preserves, `Some` replaces wholesale (empty clears).
 fn upsert_member(
     members: &mut Vec<Member>,
     id: String,
@@ -726,8 +723,7 @@ struct ActorsList {
 }
 
 /// Per-actor change count and newest change time across every doc in `dirs`,
-/// newest first. Unreadable docs are skipped — one corrupt doc must not blank
-/// the whole discovery table.
+/// newest first. Unreadable docs are skipped, not fatal to the whole table.
 fn scan_actors(dirs: &[std::path::PathBuf]) -> Vec<ActorRow> {
     let mut acc: std::collections::HashMap<String, (u64, i64)> = std::collections::HashMap::new();
     for dir in dirs {
@@ -763,10 +759,9 @@ fn persist(members: Vec<Member>) -> Response {
     }
 }
 
-/// `GET /api/admin/node-address` — the copyable locator members dial
-/// (endpoint id + relay URL; a locator, not a capability). 409 until the
-/// node is bound to a configured custom relay — n0's default relay set has
-/// no single URL to encode.
+/// `GET /api/admin/node-address` — the locator members dial (endpoint id +
+/// relay URL; not a capability). 409 until the node is bound to a configured
+/// custom relay — n0's default relay set has no single URL to encode.
 async fn node_address(ctx: &Ctx) -> Response {
     let Some(id) = ctx.share.endpoint_id().await else {
         return detail(StatusCode::CONFLICT, "share node is not bound");
@@ -934,8 +929,8 @@ mod tests {
     // `linxiv_server::remote_query`.
 
     /// The admin page is a blind consumer of these routes; renaming one must
-    /// break this test, not the page at runtime. sessionStorage is the token
-    /// storage contract (never localStorage/URL).
+    /// break this test, not the page at runtime. sessionStorage, not
+    /// localStorage, is the token-storage contract.
     #[test]
     fn admin_html_matches_api_surface() {
         for needle in [

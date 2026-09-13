@@ -79,9 +79,9 @@ fn merge_candidates(state: &AppState, id: &str) -> Result<Value, ApiError> {
 }
 
 /// `POST /api/authors/{id}/papers/{paper_id}` — attach one paper to an author
-/// without merging whole author records. Idempotent: relinking an existing pair
-/// is a no-op (storage INSERT OR IGNORE). 404 if either side is absent — the
-/// FK constraint would otherwise surface as a 500.
+/// without merging whole author records. Relinking a pair adds a duplicate
+/// link row (no UNIQUE index). 404 if either side is absent — the FK
+/// constraint would otherwise surface as a 500.
 fn link_paper(state: &AppState, id: &str, pid: &str) -> Result<Value, ApiError> {
     let author_id = path_i64(id)?;
     let paper_id = path_i64(pid)?;

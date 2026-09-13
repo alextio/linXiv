@@ -3,9 +3,9 @@
 # exec-style queries. Both live in the Tauri-free linxiv-server/cli crates,
 # so no webkit/gtk anywhere in this image.
 #
-# The image binds 0.0.0.0 inside the container, so the bin fails closed:
-# LINXIV_API_TOKEN must be set and every request needs
-# `Authorization: Bearer <token>` (see docs/headless/docker-compose.yml).
+# The image binds 0.0.0.0, so the bin fails closed: LINXIV_API_TOKEN must be
+# set and every request but `GET /admin` carries `Authorization: Bearer
+# <token>` (see docs/headless/docker-compose.yml).
 #
 # Optional: LINXIV_P2P_RELAY_URL (+ LINXIV_P2P_RELAY_TOKEN) seeds the relay
 # setting on first boot so `/api/admin/node-address` can mint a Node Address

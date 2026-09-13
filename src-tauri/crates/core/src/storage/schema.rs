@@ -5,8 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-// Table DDL in FK-dependency order. Only the canonical lowercase `.sql`
-// variants are embedded; stale case-duplicate files were not copied.
+// Table DDL in FK-dependency order.
 const TABLE_DDL: &[&str] = &[
     include_str!("../../sql/tables/AUTHOR.sql"),
     include_str!("../../sql/tables/TAG.sql"),
@@ -29,17 +28,17 @@ const TABLE_DDL: &[&str] = &[
 ];
 
 // Views are DROP-then-CREATE (idempotent); each references columns added by the
-// 7 migrations, so on a legacy DB run_migrations MUST precede this — see init_db.
+// migrations, so on a legacy DB run_migrations MUST precede this — see init_db.
 const VIEW_DDL: &[&str] = &[
     include_str!("../../sql/views/author_paper_counts.sql"),
     include_str!("../../sql/views/papers.sql"),
     // After papers.sql: paper_index_text selects from `papers`. Carries the
-    // papers_fts sync triggers, which read that view — see the file header for
-    // why they cannot ride along with the table in TABLE_DDL.
+    // papers_fts sync triggers, which read it — see the file header for why
+    // they cannot ride along with the table in TABLE_DDL.
     include_str!("../../sql/views/paper_index_text.sql"),
 ];
 
-/// Create all bundled tables (FK-safe order). FTS5 + JSON1 are compiled in via
+/// Create the base tables (FK-safe order). FTS5 + JSON1 are compiled in via
 /// rusqlite's `bundled` feature, so `papers_fts` and `json_each` are available.
 pub fn apply_tables(conn: &Connection) -> Result<()> {
     Ok(TABLE_DDL
@@ -47,8 +46,7 @@ pub fn apply_tables(conn: &Connection) -> Result<()> {
         .try_for_each(|ddl| conn.execute_batch(ddl))?)
 }
 
-/// (Re)create the `papers` / `latest_papers` / `deleted_papers` and
-/// `author_paper_counts` views.
+/// (Re)create the five views and the papers_fts sync triggers.
 pub fn apply_views(conn: &Connection) -> Result<()> {
     Ok(VIEW_DDL
         .iter()
@@ -57,7 +55,7 @@ pub fn apply_views(conn: &Connection) -> Result<()> {
 
 // No tables+views shortcut: the sole init path is `super::init_db`, which runs
 // run_migrations *between* tables and views. A tables-then-views shortcut would
-// skip the four unique indexes the migrations create — never reintroduce one.
+// skip the unique indexes the migrations create — never reintroduce one.
 
 #[cfg(test)]
 mod tests {
@@ -109,9 +107,8 @@ mod tests {
             .any(|n| n.eq_ignore_ascii_case(col))
     }
 
-    /// `apply_tables` runs table DDL and NOTHING else: `CREATE TABLE IF NOT
-    /// EXISTS` never reconciles new columns onto an existing table — the contract
-    /// behind "a column added to a base `.sql` def needs a guarded migration".
+    /// `CREATE TABLE IF NOT EXISTS` never reconciles new columns onto an existing
+    /// table — the contract behind "a new column needs a guarded migration".
     #[test]
     fn apply_tables_does_not_reconcile_columns_onto_existing_tables() {
         let conn = legacy_conn();
@@ -198,8 +195,8 @@ mod tests {
         let conn = legacy_conn();
         apply_tables(&conn).unwrap();
 
-        // SQLite resolves a view body lazily, so the failure can surface either at
-        // CREATE VIEW or at first SELECT — either way the phase order is wrong.
+        // View and trigger bodies resolve lazily, so apply_views itself succeeds;
+        // the missing column surfaces at the first SELECT.
         let skipped_migrations = apply_views(&conn).and_then(|()| {
             Ok(conn.query_row("SELECT COUNT(*) FROM papers", [], |r| r.get::<_, i64>(0))?)
         });

@@ -1,13 +1,12 @@
-//! Background full-text indexer. While `full_text_worker_enabled` is on, it walks
-//! the same backfill list as `paper index-sources` (no TeX yet, oldest first).
-//!
-//! Off by default: the user opts in. Every arXiv GET goes through `sources::http`
+//! Background full-text indexer. While `full_text_worker_enabled` is on (off by
+//! default), it walks the same backfill list as `paper index-sources`: arXiv
+//! papers with no TeX yet, oldest first. Every GET goes through `sources::http`
 //! (shared 7 s spacing + 429 cool-down); `GAP` is an extra wait between papers.
 //!
-//! `ponytail: no cap on how much TeX this stores. A body averages ~150 KB and is
-//! capped at MAX_TEX_BYTES (16 MiB) per paper. papers_fts is a plain fts5 table,
-//! so it keeps its own copy plus an index: budget ~3x the raw text, i.e. north of
-//! a gigabyte for a 3000-paper library. Add a full_text_save_limit_mb setting,
+//! `ponytail: no cap on total stored TeX. A body averages ~150 KB and is capped
+//! at MAX_TEX_BYTES (16 MiB) per paper; papers_fts is a plain fts5 table, so it
+//! keeps its own copy plus an index — budget ~3x the raw text, north of a
+//! gigabyte for a 3000-paper library. Add a full_text_save_limit_mb setting,
 //! like pdf_save_limit_mb, if that bites.`
 
 use std::collections::{HashMap, VecDeque};
@@ -40,13 +39,13 @@ const RETRY_AFTER: Duration = Duration::from_secs(600);
 const MAX_ATTEMPTS: u32 = 5;
 /// Ceiling on the consecutive-failure backoff.
 const MAX_BACKOFF: Duration = Duration::from_secs(3600);
-/// Wait before restarting the loop after it panics, and how often to try.
+/// Wait between panic restarts; `MAX_RESTARTS` caps how many.
 const RESTART_DELAY: Duration = Duration::from_secs(60);
 const MAX_RESTARTS: u32 = 5;
 
 /// A paper the loop is holding off on. `until: None` means "not again this
-/// session" — either there is no arXiv source to fetch, or it has failed
-/// `MAX_ATTEMPTS` times.
+/// session": nothing fetchable, a re-fetch that produced no TeX, or
+/// `MAX_ATTEMPTS` failures.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Park {
     attempts: u32,
@@ -69,9 +68,9 @@ pub fn spawn_headless(state: Arc<AppState>) {
     }));
 }
 
-/// Bounded restart-on-panic driver shared by both spawn paths: each restart
-/// spawns a fresh task so a panic surfaces as a `JoinError` instead of taking
-/// the supervisor down with it.
+/// Bounded restart-on-panic driver shared by both spawn paths: every attempt is
+/// its own task, so a panic surfaces as a `JoinError` rather than killing the
+/// supervisor.
 pub async fn supervise<F, Fut>(mut task: F)
 where
     F: FnMut() -> Fut,
@@ -87,10 +86,9 @@ where
     eprintln!("[full-text] worker kept failing; not restarting again this session");
 }
 
-/// Sleep, but in `OFF_POLL` steps, giving up the rest as soon as the setting is
-/// switched off. The post-failure backoff runs to `MAX_BACKOFF`, so a single
-/// `sleep` would leave the toggle looking dead for up to an hour after a night
-/// offline.
+/// Sleep in `OFF_POLL` steps, dropping the rest once the setting goes off. The
+/// post-failure backoff runs to `MAX_BACKOFF`, so a single `sleep` would leave
+/// the toggle looking dead for up to an hour after a night offline.
 async fn nap(total: Duration) {
     let mut slept = Duration::ZERO;
     while slept < total {
@@ -103,18 +101,16 @@ async fn nap(total: Duration) {
     }
 }
 
-/// The loop itself. Reads the setting at the top of each pass and during long
-/// waits, so switching it off takes effect within `OFF_POLL` and switching it on
-/// within `OFF_POLL` of the current wait ending.
+/// The loop itself. Reads the setting at the top of each pass and between `nap`
+/// steps, so a toggle takes effect within `OFF_POLL` of any in-flight fetch.
 pub async fn run(state: &AppState) {
     // A failed fetch leaves DOWNLOADED_SOURCE unset, so without parking the loop
     // would retry the head of the list forever and never reach the rest.
     let mut parked: HashMap<String, Park> = HashMap::new();
     let mut queue: VecDeque<String> = VecDeque::new();
-    // Failures in a row across different papers. A global condition (offline,
-    // arXiv rate-limiting the whole IP) fails every paper it touches, so backing
-    // off on this rather than per-paper is what stops the loop from spending all
-    // day making doomed requests.
+    // Failures in a row, any paper. A global condition (offline, arXiv rate-
+    // limiting the whole IP) fails everything it touches, so the backoff keys
+    // off this rather than per-paper.
     let mut consecutive_failures: u32 = 0;
     loop {
         if !enabled() {
@@ -133,8 +129,8 @@ pub async fn run(state: &AppState) {
             continue;
         };
         // The work-list query selects only papers source_fetch_url accepts, so
-        // this rejects little; it is what keeps a query change from turning into
-        // a request per unfetchable paper.
+        // this rejects little; it keeps a query change from turning into a
+        // request per unfetchable paper.
         if let Err(e) = svc_paper::source_fetch_url(&paper) {
             eprintln!("[full-text] {} parked: {e}", paper.source_id);
             parked.insert(paper.source_id, Park::PERMANENT);
@@ -154,8 +150,8 @@ pub async fn run(state: &AppState) {
                         eprintln!("[full-text] {sid} — {} chars", chars.unwrap_or(0))
                     }
                     // Nothing was written, so DOWNLOADED_SOURCE is still unset
-                    // and the paper is still a candidate — park it rather than
-                    // fetch the same tarball again next pass.
+                    // and the paper still a candidate — park it rather than
+                    // re-fetch the same tarball next pass.
                     (false, _) => {
                         eprintln!("[full-text] {sid} — empty re-fetch, kept the stored text")
                     }
@@ -183,9 +179,9 @@ pub async fn run(state: &AppState) {
     }
 }
 
-/// Whether the setting is on. Loaded from disk each call (the settings file is
-/// the only channel the UI has to reach this task). Unreadable settings hold
-/// the worker off rather than starting network activity on a guess.
+/// Whether the setting is on. Read from disk each call — the settings file is
+/// the UI's only channel to this task. Unreadable settings hold the worker off
+/// rather than starting network activity on a guess.
 fn enabled() -> bool {
     match UserSettings::load() {
         Ok(s) => s.get(SETTING).and_then(Value::as_bool).unwrap_or(false),
@@ -196,11 +192,11 @@ fn enabled() -> bool {
     }
 }
 
-/// Park state after another failure: try again in `RETRY_AFTER`, until the paper
-/// has burned `MAX_ATTEMPTS` — a `/src/` URL that 404s (withdrawn submissions)
-/// would otherwise be re-fetched every 10 minutes forever. `isolated` is false
-/// when other papers are failing too, which counts against the run rather than
-/// against this paper.
+/// Park state after another failure: retry in `RETRY_AFTER` until the paper has
+/// burned `MAX_ATTEMPTS` — a `/src/` URL that 404s (a withdrawn submission)
+/// would otherwise be re-fetched every 10 minutes forever. `isolated` false
+/// means other papers are failing too, so it counts against the run, not this
+/// paper.
 fn park_after_failure(prev: Option<&Park>, now: Instant, isolated: bool) -> Park {
     let prev_attempts = prev.map_or(0, |p| p.attempts);
     let attempts = if isolated {
@@ -222,10 +218,9 @@ fn backoff(n: u32) -> Duration {
 /// Wait before rebuilding the work list: no longer than the nearest park expiry,
 /// so a paper due back in 10 s isn't held for the full `IDLE`.
 ///
-/// Deadlines already past are ignored. A park entry outlives its paper — the
-/// user can index it by hand, or delete it — and `saturating_duration_since`
-/// reports such a deadline as zero, which would spin the idle path into a scan
-/// loop with no sleep in it.
+/// Past deadlines are ignored — a park entry outlives its paper (indexed by
+/// hand, or deleted), and one would report zero, spinning the idle path into a
+/// scan loop with no sleep in it.
 fn idle_wait(parked: &HashMap<String, Park>, now: Instant) -> Duration {
     parked
         .values()
@@ -249,9 +244,9 @@ fn refill(conn: &Connection, queue: &mut VecDeque<String>) {
 /// Pop ids until one is due and still resolves to an unindexed paper. Ids that
 /// fail a check are consumed; the next `refill` puts back any that still qualify.
 ///
-/// The queue is rebuilt only when it empties, which for a large library is hours
-/// away, so `downloaded_source` is re-read here: the manual button, the MCP tool
-/// and the CLI all index papers this list already holds.
+/// The queue is rebuilt only when it empties — hours, for a large library — so
+/// `downloaded_source` is re-read here: the manual button, MCP and CLI all index
+/// papers this list already holds.
 fn take_next(
     conn: &Connection,
     queue: &mut VecDeque<String>,
@@ -404,7 +399,7 @@ mod tests {
     fn consecutive_failures_back_off_up_to_a_cap() {
         assert_eq!(backoff(1), GAP * 2);
         assert_eq!(backoff(4), GAP * 16);
-        // An outage that fails every paper stops hammering within an hour-long wait.
+        // An outage that fails every paper backs off to an hour, not further.
         assert_eq!(backoff(20), MAX_BACKOFF);
     }
 

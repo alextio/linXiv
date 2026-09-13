@@ -1,10 +1,10 @@
-//! `/api/{arxiv,openalex,doi}` source routes: these arms `.await` the live
-//! arXiv/OpenAlex/CrossRef source layer, then save through `service::paper`.
+//! `/api/{arxiv,openalex,crossref,doi}` source routes: these arms `.await` the
+//! live source layer, then save through `service::paper`.
 //!
-//! The shared wire shape is `SearchResultOut` (models.rs SERIALIZER 1): it strips
-//! the source namespace from `source_id`, blanks `published` on the `date.min`
-//! sentinel, renames url→paper_url / category→primary_category, and keeps the full
-//! id in `entry_id`. `SearchResultOut::from` is the single mapping point.
+//! The search/fetch arms share `SearchResultOut` (models.rs SERIALIZER 1): it
+//! strips the namespace from `source_id`, blanks `published` on the `date_min()`
+//! sentinel, renames url→paper_url / category→primary_category, and keeps the
+//! full id in `entry_id`. `SearchResultOut::from` is the single mapping point.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -232,9 +232,9 @@ pub struct CrossrefSearchBody {
     pub max_results: i64,
 }
 
-/// `POST /api/crossref/search` — same envelope as the openalex arm. The wire body
-/// carries no `sort`, so this arm pins relevance; a transport failure is a 502
-/// rather than an empty result list.
+/// `POST /api/crossref/search` — a `results`-only envelope. The wire body carries
+/// no `sort`, so this arm pins relevance; a transport failure is a 502 rather
+/// than an empty result list.
 async fn crossref_search(ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let b: CrossrefSearchBody = ctx.parse_body()?;
     if b.query.is_empty() {
@@ -307,7 +307,7 @@ mod tests {
         .await
     }
 
-    /// Build a synthetic PaperMetadata through serde (the app crate has no chrono dep).
+    /// Build a synthetic PaperMetadata through serde.
     fn meta(published: &str, url: Value, category: Value) -> PaperMetadata {
         serde_json::from_value(json!({
             "source_id": "arxiv:2204.12985",

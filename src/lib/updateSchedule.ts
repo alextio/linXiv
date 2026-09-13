@@ -1,10 +1,8 @@
-/** How often the app checks GitHub for a newer release on its own. Stored in
- *  user settings under `update_check_frequency`; "never" — no background
- *  update check — is the default for anyone who never touches the setting.
- *
- *  `update_check_frequency` must stay out of the bundled
- *  `default_settings.json`: `GET /api/settings` merges defaults over
- *  overrides, and its absence is what marks a user as not yet asked. */
+/** How often the app checks GitHub for a newer release. Stored in user
+ *  settings under `update_check_frequency`, which reads as "never" — no
+ *  background check — while unset. Its absence is what marks a user as not
+ *  yet asked, so it must stay out of the bundled `default_settings.json`:
+ *  the effective settings are `{...defaults, ...overrides}`. */
 export type UpdateFrequency = "never" | "daily" | "weekly" | "monthly";
 
 /** Offered as the default answer to the launch prompt. */
@@ -56,10 +54,9 @@ export function asFrequency(value: unknown): UpdateFrequency {
 }
 
 /**
- * Whether two versions were actually compared. A failed request, an unreadable
- * running version (outside the packaged app), or no published release to
- * compare against — GitHub answers 404 for a renamed or private repo just as
- * it does for one with no releases — all leave nothing to conclude.
+ * Whether two versions were actually compared. A failed request, no readable
+ * running version (outside the packaged app), or no published release (GitHub
+ * 404s for a renamed or private repo too) leaves nothing to conclude.
  */
 export function isConclusiveCheck(result: {
   error?: string;
@@ -70,9 +67,8 @@ export function isConclusiveCheck(result: {
 }
 
 /**
- * Whether a conclusive check spends the interval. A pending update does not:
- * it re-checks on the next launch, so dismissing the notice mutes it for the
- * session rather than for up to a month.
+ * Whether a conclusive check spends the interval. A pending update does not, so
+ * dismissing the notice mutes it for the session, not for up to a month.
  */
 export function shouldStampCheck(result: {
   error?: string;
@@ -104,11 +100,9 @@ export function pickBanner(state: BannerState): BannerKind | null {
   return null;
 }
 
-/**
- * Whether a background check is owed. A missing, unparseable, or
- * future-dated `lastCheck` counts as due — a clock change or a corrupted
- * localStorage entry must not silently disable checks forever.
- */
+/** Whether a background check is owed. A missing, unparseable, or future-dated
+ *  `lastCheck` counts as due — a clock change or corrupt localStorage entry
+ *  must not disable checks forever. */
 export function isUpdateCheckDue(
   frequency: UpdateFrequency,
   lastCheck: number | null,

@@ -10,12 +10,10 @@ CREATE TABLE IF NOT EXISTS PROJECT_TO_PAPER(
     FOREIGN KEY (SOURCE_FK) REFERENCES paper_roots(SOURCE_FK) ON DELETE CASCADE
 );
 -- idx_project_to_paper_unique on (PROJECT_FK, SOURCE_FK) is deliberately NOT created
--- here: a pre-existing DB can hold duplicate membership rows, and creating the index
--- from apply_tables would abort startup with "UNIQUE constraint failed" before the
--- dedup could run. Instead init_db runs migrations::dedup_project_to_paper BEFORE
--- apply_tables (it must precede this file too — see that fn: once PAPER_TO_READING's
--- composite FK exists, dedup DML on the unindexed parent key is itself an error),
--- and the project_to_paper_unique_index migration creates the index afterwards.
--- That's safe for PAPER_TO_READING's composite FK on these two columns: SQLite only
--- requires the parent key to be uniquely indexed by the time of DML, not at
--- CREATE TABLE time — and migrations run before any reading-status write.
+-- here: a pre-existing DB can hold duplicate membership rows, so creating it from
+-- apply_tables would abort startup with "UNIQUE constraint failed". init_db runs
+-- migrations::dedup_project_to_paper first and the project_to_paper_unique_index
+-- migration creates it afterwards; see those two fns for the ordering they need.
+-- Safe for PAPER_TO_READING's composite FK on these columns: SQLite wants the parent
+-- key uniquely indexed by DML time, not at CREATE TABLE time, and migrations run
+-- before any reading-status write.

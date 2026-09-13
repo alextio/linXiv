@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-// Settings -> Storage manages the LOCAL disk (saved-PDF files and their
+// Settings → Server & data manages the LOCAL disk (saved PDFs and their
 // linxiv:// links), so these never follow a remote default backend.
 import { apiFetch } from "./client";
 import type { SavedPdf, SavedPdfListing, DeletedPdf } from "../types/api";

@@ -23,7 +23,7 @@ const S2_HOSTS: &[&str] = &["api.semanticscholar.org"];
 const RATELIMIT_MSG: &str = "arXiv rate limit reached. Please wait ~60 s and try again.";
 
 // ---------------------------------------------------------------------------
-// Pure helpers (sync, fixture-tested).
+// Pure helpers (sync, unit-tested).
 // ---------------------------------------------------------------------------
 
 /// Strip a leading `http(s)://(dx.)doi.org/` and surrounding whitespace.
@@ -70,7 +70,7 @@ fn arxiv_doi_id(doi: &str) -> Option<String> {
         return Some(rest[..end].to_string());
     }
 
-    // old-style: [a-z-]+/\d+  (regex is IGNORECASE, so accept any letter)
+    // old-style: [A-Za-z-]+/\d+
     let cat = b
         .iter()
         .take_while(|&&c| c.is_ascii_alphabetic() || c == b'-')
@@ -242,8 +242,8 @@ pub async fn resolve_doi(doi: &str, data_dir: &Path, mailto: &str) -> Result<Pap
 }
 
 // ---------------------------------------------------------------------------
-// Tests — pure parsers against recorded S2/CrossRef shapes, plus the network-
-// free orchestration guards (empty / strips-to-empty DOI). No live network.
+// Tests — pure helpers against inline S2 shapes, plus the network-free
+// resolve_doi guards (empty / strips-to-empty DOI).
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -284,7 +284,7 @@ mod tests {
             arxiv_doi_id("10.48550/arXiv.2204.12985").as_deref(),
             Some("2204.12985")
         );
-        // case-insensitive prefix, like the IGNORECASE regex.
+        // case-insensitive prefix.
         assert_eq!(
             arxiv_doi_id("10.48550/ARXIV.2204.12985").as_deref(),
             Some("2204.12985")
@@ -294,7 +294,7 @@ mod tests {
             arxiv_doi_id("10.48550/arXiv.hep-th/9901001").as_deref(),
             Some("hep-th/9901001")
         );
-        // a 4-digit minor part is accepted (\d{4,5}); a 5th digit is greedily taken.
+        // a 5th minor digit is greedily taken (\d{4,5}).
         assert_eq!(
             arxiv_doi_id("10.48550/arXiv.2101.00001").as_deref(),
             Some("2101.00001")

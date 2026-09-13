@@ -6,11 +6,9 @@
 # linxiv-comprehensive-documentation repo's schemas/ dir (never into this
 # public repo -- see that repo's schemas/README.md for why).
 #
-# Only works from the point this script + the example exist onward (this
-# branch). v0.1.0/v0.1.1/v0.1.2-dev/v0.2.0 predate the Rust schema entirely
-# (no src-tauri/crates/core at those tags) -- there's nothing to snapshot
-# there; the pre-Rust-port shape those releases used is already hand-captured
-# by the legacy-schema tests in crates/core/src/storage/migrations.rs.
+# Only works on refs carrying that example: v0.3.0-beta onward. Earlier tags
+# have no src-tauri/crates/core at all; those releases are snapshotted from
+# the published .deb by the docs repo's scripts/snapshot_release_schema.sh.
 #
 # Usage: scripts/snapshot_schema.sh <git-ref> <output-dir>
 #   scripts/snapshot_schema.sh v0.3.0 ../linxiv-comprehensive-documentation/schemas

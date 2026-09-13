@@ -1,18 +1,15 @@
-// linXiv-side bridge for the embedded TeXbrain editor (additive — no existing
-// store/router is touched yet).
+// linXiv-side bridge for the embedded TeXbrain editor.
 //
 // Two pieces:
-//   1. pushThemeToEditor() — resolves the active palette and posts it to the iframe
-//      (the ThemeBridge host snippet). Sending RESOLVED colors (not a preset name)
-//      means the guest never needs linXiv's PRESETS table and the Navy-vs-Amber
-//      default mismatch is irrelevant to the wire.
+//   1. pushThemeToEditor() — posts RESOLVED colors (not a preset name), so the
+//      guest never needs linXiv's PRESETS table.
 //   2. EditorBridgeClient — owns the iframe message channel: replies to the
 //      'texbrain:ready' handshake with theme (+ optional doc:open), exposes
 //      sendDocOpen/sendCompile, and routes 'texbrain:fs' requests to an injected
 //      FsResponder, replying with 'texbrain:fs:result'.
 //
-// Origins are pinned: the host always posts to an explicit targetOrigin and the
-// client only accepts messages whose event.origin matches. Never use '*'.
+// Origins are pinned both ways (targetOrigin on post, event.origin on receive).
+// Never use '*'.
 
 import { getColors } from "./theme";
 import type { ColorAlphas, PresetName, ThemeColors, ThemeMode } from "./theme";
@@ -38,8 +35,8 @@ export interface ThemePushState {
 
 /**
  * Resolve the host's current palette to concrete colors and post it to the iframe.
- * Call this inside the theme store's applyAndSet AND in reply to a 'texbrain:ready'
- * handshake so the editor is themed before first paint (no Amber flash).
+ * Call from the theme store's applyAndSet AND on 'texbrain:ready', so the editor
+ * is themed before first paint.
  *
  * @param frame        the iframe's contentWindow (null is a no-op — frame not mounted)
  * @param targetOrigin the embedded editor's origin (EDITOR_ORIGIN); never '*'
@@ -84,10 +81,9 @@ export interface FsResponder {
 }
 
 /**
- * Safe default when no fs handler is configured: lists nothing, reads empty, and
- * accepts (silently drops) every write/mkdir/remove. Any bridge that needs real
- * persistence must pass an FsResponder (HostFsRouter, ApiFsResponder,
- * DiskFsResponder) via EditorBridgeHandlers.fs.
+ * Default when no fs handler is configured: lists nothing, reads empty, silently
+ * drops every write/mkdir/remove. Real persistence needs an FsResponder
+ * (HostFsRouter / ApiFsResponder / DiskFsResponder) via EditorBridgeHandlers.fs.
  */
 export class NoopFsResponder implements FsResponder {
   async list(): Promise<Extract<FsResult, { kind: "list" }>> {
@@ -131,11 +127,9 @@ function extractErrorMessage(err: unknown): string {
 export interface DocOpenPayload {
   /**
    * Stable host-side project identity (the note id). The editor keys its
-   * doc:open idempotency guard on THIS, not on (projectName, mainFile): those
-   * collide trivially (two "Untitled" projects, both main.tex) and a guard
-   * keyed on them would mistake a real switch for a re-send — keeping the old
-   * buffers mounted while the host believes the new project is open, so a save
-   * writes the wrong project's content. The id is unambiguous.
+   * doc:open idempotency guard on THIS: (projectName, mainFile) collides
+   * trivially (two "Untitled" projects, both main.tex), so a real switch would
+   * read as a re-send and a later save would write the wrong project.
    */
   projectId: number;
   mainFile: string;
@@ -170,12 +164,10 @@ export interface EditorBridgeHandlers {
   /** Editor buffer dirty-state changed. */
   onDirty?: (dirty: boolean) => void;
   /**
-   * Guest completed its boot handshake. `protocol` is the bridge protocol the
-   * live Editor build reports in texbrain:ready — a belt-and-suspenders runtime
-   * signal only (the REAL compat gate is the release-manifest check at
-   * install/update time, ADR 0017); compare against SUPPORTED_BRIDGE_PROTOCOLS
-   * (src/api/editorPlugin.ts, exported from the plugin's guest-js) to show a
-   * non-fatal warning on mismatch.
+   * Guest completed its boot handshake. `protocol` is what the live Editor build
+   * reports in texbrain:ready — a runtime cross-check only (the compat gate is
+   * the install/update-time manifest check, ADR 0017). Compare against
+   * SUPPORTED_BRIDGE_PROTOCOLS (src/api/editorPlugin.ts) for a non-fatal warning.
    */
   onReady?: (protocol?: number) => void;
 }
@@ -288,11 +280,10 @@ export class EditorBridgeClient {
   }
 
   private async handlePickFolder(id: string): Promise<void> {
-    // No handler configured = this host doesn't support folder picking. Must
-    // NOT ack: the ack means "supported, dialog opening" and cancels the
-    // guest's support-detection timer (see editorBridgeTypes.ts). Reject
-    // immediately instead — unforced, since with no ack sent a disposed
-    // bridge can fall back on the guest's own ack timeout.
+    // No handler = this host can't pick folders. Must NOT ack: the ack means
+    // "supported, dialog opening" and cancels the guest's support-detection
+    // timer (see editorBridgeTypes.ts). Reject immediately instead, unforced —
+    // with no ack sent, a disposed bridge still hits the guest's ack timeout.
     if (!this.handlers.onPickFolder) {
       this.post({ type: "texbrain:pick:folder:result", id, ok: false, error: "the host does not support folder picking" });
       return;
@@ -337,11 +328,10 @@ export class EditorBridgeClient {
       case "remove":
         return this.fs.remove(op.path, op.recursive ?? false);
       default: {
-        // parse() only checks the 'texbrain:' type prefix, so a tampered wire
-        // message can carry an unknown op.kind; falling through would resolve
-        // undefined and post a malformed `{ ok: true }` with no value. Throw so
-        // handleFs replies ok:false. The never binding keeps the switch
-        // exhaustive at compile time when FsOp grows.
+        // parse() only checks the 'texbrain:' type prefix, so a tampered
+        // message can carry an unknown op.kind; falling through would post a
+        // malformed `{ ok: true }`. Throw so handleFs replies ok:false. The
+        // never binding keeps the switch exhaustive as FsOp grows.
         const unknown: never = op;
         throw new Error(`unknown fs op kind: ${(unknown as { kind?: string }).kind}`);
       }

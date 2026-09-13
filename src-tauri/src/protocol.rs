@@ -64,8 +64,8 @@ async fn serve<R: Runtime>(
     }
 }
 
-/// `/pdf?id=<source_id>&version=N` — the saved PDF on disk; 404 if there is no
-/// local file (consumers only call this for `has_pdf` papers, so no remote-redirect branch).
+/// `/pdf?id=<source_id>&version=N` — the saved PDF on disk. No remote fallback,
+/// so a paper saved without a downloaded PDF 404s here.
 fn serve_local_pdf<R: Runtime>(app: &AppHandle<R>, query: &str) -> Response<Cow<'static, [u8]>> {
     let Some(source_id) = query_get(query, "id") else {
         return empty(StatusCode::BAD_REQUEST);
@@ -96,8 +96,8 @@ fn serve_local_pdf<R: Runtime>(app: &AppHandle<R>, query: &str) -> Response<Cow<
     }
 }
 
-/// `/pdf-proxy?url=<remote>` — host-allowlisted, redirect-guarded fetch through
-/// core under a total timeout; 400 host-not-allowed, 502 upstream, 504 timeout, 413 oversized.
+/// `/pdf-proxy?url=<remote>` — guarded fetch through core under a total timeout;
+/// 400 missing/rejected url, 502 upstream, 504 timeout, 413 oversized.
 async fn serve_proxy(query: &str) -> Response<Cow<'static, [u8]>> {
     let Some(url) = query_get(query, "url") else {
         return empty(StatusCode::BAD_REQUEST);
@@ -109,8 +109,8 @@ async fn serve_proxy(query: &str) -> Response<Cow<'static, [u8]>> {
 }
 
 async fn fetch_proxy(url: &str) -> Response<Cow<'static, [u8]>> {
-    // Prefer the free arXiv GCS mirror (no rate limit), falling back to the arXiv
-    // host inside `get_arxiv_pdf` when the bucket lacks the object.
+    // `get_arxiv_pdf` prefers the free GCS mirror (no arXiv rate limit) and falls
+    // back to the arXiv host on any miss.
     match core_http::get_arxiv_pdf(url).await {
         Ok(resp) if resp.status().is_success() => {
             if resp.content_length().is_some_and(|n| n > MAX_PDF_BYTES) {
@@ -123,7 +123,7 @@ async fn fetch_proxy(url: &str) -> Response<Cow<'static, [u8]>> {
             }
         }
         Ok(_) => empty(StatusCode::BAD_GATEWAY), // upstream non-success status
-        Err(CoreError::BadRequest(_)) => empty(StatusCode::BAD_REQUEST), // host not allowed
+        Err(CoreError::BadRequest(_)) => empty(StatusCode::BAD_REQUEST), // url rejected
         Err(_) => empty(StatusCode::BAD_GATEWAY),
     }
 }
@@ -142,7 +142,6 @@ fn pdf_response(bytes: Vec<u8>) -> Response<Cow<'static, [u8]>> {
 fn empty(status: StatusCode) -> Response<Cow<'static, [u8]>> {
     Response::builder()
         .status(status)
-        // linxiv:// is fetched cross-origin by the tauri:// webview.
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Cow::Borrowed(&b""[..]))
         .expect("static response builder")
@@ -165,7 +164,7 @@ mod tests {
     #[test]
     fn query_get_decodes_and_picks_the_named_key() {
         assert_eq!(query_get("version=3", "version").as_deref(), Some("3"));
-        // an encoded arXiv url survives intact (its own ?&= are %-escaped)
+        // an encoded arXiv url decodes back intact
         let q = "url=https%3A%2F%2Farxiv.org%2Fpdf%2F2204.12985";
         assert_eq!(
             query_get(q, "url").as_deref(),

@@ -22,9 +22,9 @@ pub async fn run(cmd: DoiCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
         fail(e)
     });
     match cmd {
-        // cmd_doi_resolve: dump metadata.
+        // Dump metadata.
         DoiCmd::Resolve { .. } => output(&meta),
-        // cmd_doi_save: persist, then emit the route's envelope
+        // Persist, then emit the route's envelope
         // (`POST /api/doi/save`): the resolved metadata + saved flag.
         DoiCmd::Save { .. } => {
             svc_paper::save_paper_metadata(&mut ctx.conn, &meta, None)?;

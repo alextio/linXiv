@@ -21,7 +21,7 @@ const INVITE_ROLE_OPTIONS: { value: "editor" | "viewer"; label: string }[] = [
   { value: "editor", label: "Editor" },
 ];
 
-/** Hoster-only e2ee members panel: sidecar list + invite + revoke. */
+/** Hoster-only e2ee members panel over the members sidecar. */
 export function MembersSection({ shareId }: { shareId: string }) {
   const queryClient = useQueryClient();
   const [code, setCode] = useState("");

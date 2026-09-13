@@ -15,8 +15,7 @@ export async function getAnnotations(
   allProjects?: boolean
 ): Promise<AnnotationListResponse> {
   const params = new URLSearchParams({ source_id: sourceId });
-  // all_projects is an unconditional override on the backend: when set, every
-  // scope is returned and project_id is ignored. Mirror that here.
+  // all_projects with project_id is a 422 on the backend; send exactly one.
   if (allProjects) {
     params.set("all_projects", "true");
   } else if (projectId !== undefined && projectId !== null) {

@@ -6,7 +6,7 @@
 //!   * papers_fts.paper_id holds the SOURCE_ID *string* (e.g. "arxiv:2204.12985"),
 //!     NOT the integer PAPER_ID — the column name is a historical misnomer. The
 //!     FTS join is `papers.source_id = papers_fts.paper_id`.
-//!   * FTS5 has no UPDATE: refresh an entry with DELETE-then-INSERT, never UPDATE.
+//!   * Refresh an FTS entry with DELETE-then-INSERT, never UPDATE.
 
 pub mod annotation;
 pub mod author;

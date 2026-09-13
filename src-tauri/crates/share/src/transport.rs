@@ -1,6 +1,6 @@
-//! Share transport over the vendored `linxiv-p2p` node: a [`ShareNode`] serves only
-//! top-level `share_dir/<id>.automerge` docs (the access check requires the file to
-//! exist there); received mirrors are quarantined under `share_dir/received/`.
+//! Share transport over the vendored `linxiv-p2p` node: on the share ALPN a
+//! [`ShareNode`] serves only top-level `share_dir/<id>.automerge` docs (access
+//! needs the file there); received mirrors are quarantined in `received/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,8 +49,8 @@ pub fn e2ee_received_dir(share_dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedInvite {
     pub share_id: String,
-    /// The host was unreachable, so the join is half done: the invite is parked,
-    /// the mirror on disk is an empty placeholder, and the interval sync finishes it.
+    /// Host unreachable, so the join is half done: parked invite, empty
+    /// placeholder mirror, finished by the interval sync.
     pub pending: bool,
 }
 
@@ -111,7 +111,7 @@ pub fn member_id_hex(m: &MemberId) -> String {
     m.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Inverse of [`member_id_hex`]; `None` unless `s` is exactly 32 hex bytes.
+/// Inverse of [`member_id_hex`]; `None` unless `s` is 64 hex chars.
 #[cfg(feature = "sync-beelay")]
 pub fn member_id_from_hex(s: &str) -> Option<MemberId> {
     Some(MemberId(decode_hex(s)?.try_into().ok()?))
@@ -128,8 +128,8 @@ pub struct ShareNode {
 }
 
 impl ShareNode {
-    /// Production node: iroh n0 defaults (relay + discovery). `share_dir` is the
-    /// only directory served; `p2p_dir` holds the persisted device key.
+    /// Production node: iroh n0 defaults (relay + discovery). Serves only
+    /// `share_dir`; `p2p_dir` holds the key files + keyhive/beelay state.
     pub async fn bind(share_dir: impl Into<PathBuf>, p2p_dir: &Path) -> Result<Self> {
         Self::bind_inner(share_dir.into(), p2p_dir, false, None, None).await
     }
@@ -147,8 +147,7 @@ impl ShareNode {
         Self::bind_inner(share_dir.into(), p2p_dir, false, relay, dek).await
     }
 
-    /// Offline/hermetic node: no relays or discovery, direct addrs only. Used by
-    /// tests and any same-host transfer.
+    /// Offline/hermetic test node: no relays or discovery, direct addrs only.
     pub async fn bind_offline(share_dir: impl Into<PathBuf>, p2p_dir: &Path) -> Result<Self> {
         Self::bind_inner(share_dir.into(), p2p_dir, true, None, None).await
     }
@@ -285,8 +284,8 @@ impl ShareNode {
         Ok(())
     }
 
-    /// (Re-)register `share_id` from its doc file so the registry serves the latest
-    /// bytes; missing file → `NotFound`. Reads/decodes off the runtime via `spawn_blocking`.
+    /// (Re-)register `share_id` from its doc file so the registry serves the
+    /// latest bytes; missing file → `NotFound`. Reads/decodes via `spawn_blocking`.
     pub async fn refresh(&self, share_id: &str) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -309,9 +308,9 @@ impl ShareNode {
         Ok(())
     }
 
-    /// Register `share_id` from the just-reconciled doc `save()` returned, skipping
-    /// [`Self::refresh`]'s re-read. Callers must have `save()`d the doc first, or the
-    /// access check will refuse to serve it.
+    /// Register `share_id` from the doc `save()` returned, skipping
+    /// [`Self::refresh`]'s re-read. Callers must `save()` first, or the access
+    /// check refuses to serve it.
     pub fn register_doc(&self, share_id: &str, mut doc: automerge::AutoCommit) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -349,7 +348,7 @@ impl ShareNode {
             .doc(share_id)
             .ok_or_else(|| net("synced doc missing from registry"))?;
         let sp: SharedProject = autosurgeon::hydrate(&doc).map_err(super::crdt)?;
-        // The doc-internal share_id is attacker-controlled and feeds save()'s paths.
+        // The doc-internal share_id is host-controlled and feeds caller paths.
         if !valid_share_id(&sp.share_id) {
             return Err(net(format!("remote share_id is unsafe: {:?}", sp.share_id)));
         }
@@ -359,9 +358,8 @@ impl ShareNode {
                 sp.share_id
             )));
         }
-        // Namespaced mirror dir — raw bytes, so the host's actors/timestamps
-        // survive into the mirror's history instead of being re-authored as
-        // this device by save()'s reconcile.
+        // Namespaced mirror dir; raw bytes so the host's actors/timestamps
+        // survive instead of being re-authored as this device.
         write_doc_bytes(&received_dir(dest_share_dir), share_id, doc.save())?;
         Ok(sp)
     }
@@ -390,7 +388,7 @@ impl ShareNode {
     }
 
     /// Remote Query Mode: installs the `linxiv-api/1` handler on this endpoint.
-    /// Never called by the desktop app — until installed, api-ALPN connections are refused.
+    /// Headless-only; until installed, api-ALPN connections are refused.
     pub fn set_api_protocol(&self, handler: Box<dyn linxiv_p2p::DynProtocolHandler>) {
         self.inner.set_api_protocol(handler);
     }
@@ -422,7 +420,7 @@ impl ShareNode {
     }
 
     /// Publish (or republish) a project as an e2ee share: evolve the doc under
-    /// `share_dir/e2ee`, then register/merge it in beelay. Content encrypts at invite/sync time.
+    /// `share_dir/e2ee`, then register/merge in beelay; encrypts at invite/sync.
     pub async fn publish_secure(&self, sp: &SharedProject) -> Result<()> {
         let beelay = self.beelay()?;
         if !valid_share_id(&sp.share_id) {
@@ -465,8 +463,8 @@ impl ShareNode {
         Ok(card.iter().map(|b| format!("{b:02x}")).collect())
     }
 
-    /// Grant the device behind `member_code` `role` on an e2ee share and mint its
-    /// pasteable invite. Returns the member id (the revoke/query_role handle) + invite string.
+    /// Grant the device behind `member_code` `role` on an e2ee share and mint
+    /// its invite. Returns the member id (the revoke/query_role handle) + invite.
     pub async fn invite_member(
         &self,
         share_id: &str,
@@ -536,9 +534,9 @@ impl ShareNode {
             .map_err(net)
     }
 
-    /// Change a member's role (viewer ↔ editor). A downgrade rotates the project key
-    /// (PCS) — re-key stored blobs afterwards. Dropping the doc's last reader
-    /// surfaces as [`ShareError::LastReader`].
+    /// Change a member's role. A downgrade rotates the project key (PCS) — re-key
+    /// stored blobs afterwards. Dropping the doc's last reader surfaces as
+    /// [`ShareError::LastReader`].
     pub async fn set_role(&self, share_id: &str, member: MemberId, role: Role) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -566,7 +564,7 @@ impl ShareNode {
     }
 
     /// Encrypt `bytes` under the share key and serve them as a blob; returns a
-    /// pasteable ticket. Size caps are the caller's job — the blobs API exposes no size before fetch.
+    /// pasteable ticket. Size caps are the caller's job (no size before fetch).
     pub async fn store_pdf_blob(&self, share_id: &str, bytes: &[u8]) -> Result<String> {
         self.beelay()?
             .store_blob(share_id, bytes)
@@ -611,8 +609,7 @@ impl ShareNode {
     /// `share_dir/e2ee/received`. An unreachable host is not an error.
     pub async fn accept_invite(&self, invite: &str) -> Result<AcceptedInvite> {
         let beelay = self.beelay()?;
-        // The invite's project id feeds file paths below; reject unsafe ids
-        // before adopting anything.
+        // The invite's project id feeds file paths below; reject it first.
         let parsed: linxiv_p2p::ProjectInvite = invite.parse().map_err(net)?;
         if !valid_share_id(parsed.project_id()) {
             return Err(net(format!(
@@ -621,13 +618,11 @@ impl ShareNode {
             )));
         }
         let share_id = beelay.accept_invite(invite).await.map_err(net)?;
-        // Persist the mirror before the first sync so the interval loop
-        // retries this share when that sync fails.
+        // Mirror before the first sync so the interval loop retries on failure.
         if let Some(doc) = beelay.doc(&share_id).await {
-            // Validate the doc-internal share_id (host-controlled) BEFORE the
-            // mirror lands on disk: a prior failed sync can leave a hostile
-            // merge in the in-memory doc, and this write must never persist
-            // it. A fresh adopt is an empty doc — nothing to validate.
+            // Validate the host-controlled doc-internal share_id BEFORE the
+            // mirror lands: a prior failed sync can leave a hostile merge in
+            // the in-memory doc. A fresh adopt is empty — nothing to validate.
             if !doc.get_heads().is_empty() {
                 let doc_id = doc_share_id(&doc)?;
                 if doc_id != share_id {
@@ -642,9 +637,8 @@ impl ShareNode {
                 .await
                 .map_err(net)??;
         }
-        // The host never answered: the adoption is parked, so there is nothing
-        // to fetch and no point failing on a sync against the same dead host.
-        // The placeholder mirror written above is what the interval loop finds.
+        // Host never answered: the adoption is parked, so a sync against the
+        // same dead host is pointless; the interval loop finds the placeholder.
         if beelay.join_pending(&share_id) {
             return Ok(AcceptedInvite {
                 share_id,
@@ -683,10 +677,9 @@ impl ShareNode {
             .doc(share_id)
             .await
             .ok_or_else(|| net("synced doc missing from beelay registry"))?;
-        // Nothing decrypted into the doc yet — the host was asleep at join time,
-        // or every commit came back no-key (revoked / not yet keyed). There is
-        // nothing to hydrate or mirror; the outcome carries the counts, and a
-        // later pass fills it in. Same empty-doc guard as accept_invite.
+        // Nothing decrypted yet — host asleep at join time, or every commit came
+        // back no-key (revoked / not yet keyed). Nothing to mirror; the outcome
+        // carries the counts and a later pass fills it in, as in accept_invite.
         if doc.get_heads().is_empty() {
             return Ok(outcome);
         }
@@ -707,7 +700,6 @@ impl ShareNode {
 
     /// Re-encrypt a hosted e2ee share's whole history under the current epoch —
     /// repairs shares invited before invites did this themselves.
-    /// TODO: Revisit if this should be exposed via the GUI
     pub async fn rekey_e2ee(&self, share_id: &str) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -718,9 +710,9 @@ impl ShareNode {
         self.beelay()?.reseal_project(share_id).await.map_err(net)
     }
 
-    /// Undo a join: drop the beelay registration, cached doc, and any parked invite
-    /// so a re-accept adopts from scratch. Returns whether beelay had it registered;
-    /// the caller deletes the on-disk mirror.
+    /// Undo a join: drop the beelay registration, cached doc, and parked invite
+    /// so a re-accept adopts from scratch. Returns whether beelay had it; the
+    /// caller deletes the on-disk mirror.
     pub async fn forget_e2ee(&self, share_id: &str) -> Result<bool> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -943,7 +935,7 @@ mod tests {
     }
 
     // A malicious host serves a doc whose INTERNAL share_id is a traversal path.
-    // fetch() must reject it before save() and write nothing outside received/.
+    // fetch() must reject it before the mirror write, leaving no `evil` file.
     #[tokio::test(flavor = "multi_thread")]
     async fn malicious_share_id_is_rejected_no_write() {
         let a_dir = tempfile::tempdir().unwrap();
@@ -1003,11 +995,10 @@ mod tests {
             member
         }
 
-        // Pasting an invite whose host is asleep is a success, not an error:
-        // the invite is parked and a placeholder mirror lands so the interval
-        // loop retries. The share stays out of the received listing until that
-        // first sync fills it in (list_shared skips a mirror whose hydrated id
-        // does not match its filename).
+        // Pasting an invite whose host is asleep is a success, not an error: the
+        // invite parks and a placeholder mirror lands for the interval loop. It
+        // stays out of the received listing until the first sync fills it in
+        // (list_shared skips a mirror whose hydrated id != its filename).
         #[tokio::test(flavor = "multi_thread")]
         async fn offline_invite_accept_is_pending_not_an_error() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1095,7 +1086,7 @@ mod tests {
             b.shutdown().await.unwrap();
         }
 
-        // §3.3: set_role transitions Read→Edit→Read; query_role is the truth.
+        // §3.4: set_role transitions Read→Edit→Read; query_role is the truth.
         #[tokio::test(flavor = "multi_thread")]
         async fn set_role_upgrades_and_downgrades() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1117,10 +1108,9 @@ mod tests {
             b.shutdown().await.unwrap();
         }
 
-        // §6 validate-before-persist: a host serving a doc whose INTERNAL
-        // share_id mismatches the invite id must never land in the reader's
-        // mirror — neither via the first sync (validated in sync_e2ee) nor
-        // via a re-accept persisting the poisoned in-memory doc.
+        // §6 validate-before-persist: a doc whose INTERNAL share_id mismatches
+        // the invite id must never reach the reader's mirror — not on the first
+        // sync (sync_e2ee validates) nor on a re-accept of the poisoned doc.
         #[tokio::test(flavor = "multi_thread")]
         async fn hostile_share_id_never_persisted_on_accept() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1160,8 +1150,7 @@ mod tests {
                 matches!(&r2, Err(ShareError::Transport(m)) if m.contains("does not match")),
                 "re-accept must not persist the hostile doc, got {r2:?}"
             );
-            // Whatever is on disk (empty placeholder or nothing), it is
-            // never the hostile doc.
+            // Whatever is on disk, it is never the hostile doc.
             match ShareNode::e2ee_received(b_dir.path(), "7") {
                 Err(_) => {}
                 Ok(mirror) => assert_ne!(mirror.share_id, "8", "hostile doc landed in the mirror"),

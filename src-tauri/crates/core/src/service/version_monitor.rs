@@ -1,8 +1,8 @@
-//! version_monitor — RSS-style polling for new arXiv versions, separate from the
+//! version_monitor — polling for new arXiv versions, separate from the
 //! opportunistic capture that happens on refetch. Each pass checks the stalest N
 //! saved arXiv papers (tracked per-root in VERSION_CHECK) and records any version
-//! newer than the max already stored, capturing it through the EXISTING path
-//! (`save_paper_metadata`, the same INSERT-OR-IGNORE-per-version write refetch uses).
+//! newer than the max already stored via the EXISTING write path
+//! (`write_paper_version_in_tx`, what `save_paper_metadata` wraps).
 //!
 //! The pass itself is orchestrated by the caller (route): `stale_candidates`
 //! → one batched `fetch_latest` → `apply_results`. Everything but that one
@@ -39,14 +39,13 @@ pub async fn fetch_latest(source_ids: &[String]) -> Result<Vec<PaperMetadata>> {
 }
 
 /// Process one candidate: for active, resolvable roots save any newer version and
-/// record the check (new version or None). Errors are caught/logged by apply_results
-/// so the candidate rotates out; deleted/inactive roots skip both save and record.
+/// record the check (new version or None). Deleted/inactive roots skip both, as
+/// does an error — leaving the candidate at the front of the staleness queue.
 fn process_candidate(
     conn: &mut Connection,
     cand: &Candidate,
     fetched: &[PaperMetadata],
 ) -> Result<Option<NewVersion>> {
-    // Check root status unconditionally; skip both save and record if deleted or inactive.
     let Some(root) = store::get_paper_root(conn, &cand.source_id)? else {
         return Ok(None);
     };
@@ -59,7 +58,7 @@ fn process_candidate(
         .filter(|m| m.version > cand.known_version);
     if let Some(m) = newer {
         // Save + flag as one transaction: either both land or neither does, so a
-        // crash mid-write can't silently raise known_version without capturing it.
+        // crash can't raise known_version with the discovery unflagged.
         transaction(conn, |tx| {
             store::write_paper_version_in_tx(tx, m, None)?;
             record_check(tx, root.source_fk, Some(m.version))
@@ -76,9 +75,8 @@ fn process_candidate(
     Ok(None)
 }
 
-/// Apply one pass's fetched metadata: for every candidate with an active root,
-/// capture a newer-than-known version and record the check. Missing/inactive roots
-/// are skipped; per-candidate errors are logged and swallowed so the pass continues.
+/// Apply one pass's fetched metadata: capture each candidate's newer-than-known
+/// version and record the check; per-candidate errors are logged and swallowed.
 pub fn apply_results(
     conn: &mut Connection,
     candidates: &[Candidate],

@@ -5,20 +5,19 @@ use tauri::{AppHandle, Manager};
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Resolve a bundled sidecar binary for installation. Install-time only: the
-/// AppImage branch mutates the filesystem — not a pure path lookup.
-/// Dev: `<src-tauri>/binaries/<name>-<triple>`; release: next to the main
-/// executable with the triple stripped; AppImage: a durable copy under
-/// `app_data_dir()/bin` (goes stale after an update until install is re-run).
+/// Resolve a bundled sidecar for installation — install-time only, since the
+/// AppImage branch mutates the filesystem. Dev:
+/// `<src-tauri>/binaries/<name>-<triple>`; release: next to the main
+/// executable, triple stripped; AppImage: a durable copy under
+/// `app_data_dir()/bin` (stale after an update until install is re-run).
 fn resolve_install_sidecar(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
-    // `app` is only used in release mode (AppImage data dir); silence the
-    // unused-variable warning in dev where resolution is purely path-based.
+    // `app` is only read on the release AppImage path; silence dev's warning.
     #[cfg(debug_assertions)]
     let _ = app;
 
     #[cfg(debug_assertions)]
     let path = {
-        // Dev binaries keep the triple suffix (see scripts/stage_sidecar.py).
+        // Dev binaries keep the triple suffix (scripts/stage_rust_bins.sh).
         let triple = tauri::utils::platform::target_triple().map_err(|e| e.to_string())?;
         #[cfg(not(target_os = "windows"))]
         let filename = format!("{}-{}", name, triple);
@@ -31,8 +30,7 @@ fn resolve_install_sidecar(app: &AppHandle, name: &str) -> Result<PathBuf, Strin
 
     #[cfg(not(debug_assertions))]
     let path = {
-        // Release sidecars sit next to the main executable with the triple
-        // suffix stripped at bundle time.
+        // Release sidecars sit beside the main exe, triple stripped at bundle time.
         #[cfg(not(target_os = "windows"))]
         let filename = name.to_string();
         #[cfg(target_os = "windows")]
@@ -43,8 +41,7 @@ fn resolve_install_sidecar(app: &AppHandle, name: &str) -> Result<PathBuf, Strin
             .ok_or("Could not determine executable directory")?;
         let in_mount = exe_dir.join(filename);
 
-        // Under AppImage the in-mount path is ephemeral; copy to a stable
-        // per-user dir and hand back the durable copy instead.
+        // The in-mount path is ephemeral; hand back a durable per-user copy.
         if std::env::var("APPIMAGE").is_ok() {
             appimage_stable_copy(app, name, &in_mount)?
         } else {
@@ -94,11 +91,10 @@ fn appimage_stable_copy(app: &AppHandle, name: &str, in_mount: &Path) -> Result<
         .join("bin");
     std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
 
-    // Copy to a temp file, chmod it, then atomically rename onto the final
-    // destination. `rename` is atomic on the same filesystem (tmp and dest both
-    // live in bin_dir), so a reinstall never leaves a partial/zero-byte dest,
-    // and it sidesteps ETXTBSY: if the old binary is still running, replacing
-    // its directory entry leaves the running process on its original inode.
+    // Copy to a temp file, chmod, then rename onto the destination — atomic
+    // since both live in bin_dir, so a reinstall never leaves a partial dest.
+    // Also sidesteps ETXTBSY: swapping the directory entry leaves a still-
+    // running old binary on its original inode.
     let dest = bin_dir.join(name);
     let tmp = bin_dir.join(format!("{}.tmp", name));
 
@@ -136,8 +132,8 @@ fn appimage_stable_copy(app: &AppHandle, name: &str, in_mount: &Path) -> Result<
 // CLI commands
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// CLI shim path — single source of truth for is/install/uninstall_cli:
-/// symlink `~/.local/bin/linxiv`, or `%LOCALAPPDATA%\Programs\linxiv\linxiv.bat` on Windows.
+/// CLI shim path for is/install/uninstall_cli: `~/.local/bin/linxiv`, or
+/// `%LOCALAPPDATA%\Programs\linxiv\linxiv.bat` on Windows.
 fn cli_shim_path() -> Result<PathBuf, String> {
     #[cfg(not(target_os = "windows"))]
     {
@@ -156,8 +152,8 @@ fn cli_shim_path() -> Result<PathBuf, String> {
     }
 }
 
-/// Check whether the shim from `install_cli` is present. Deliberately not a
-/// PATH lookup: deb/rpm ship `/usr/bin/linxiv`, which made PATH report "installed".
+/// Check whether the shim from `install_cli` is present. Not a PATH lookup:
+/// native packages ship `/usr/bin/linxiv`, which made PATH report "installed".
 #[tauri::command]
 pub fn is_cli_installed() -> bool {
     let shim = match cli_shim_path() {
@@ -174,7 +170,7 @@ pub fn is_cli_installed() -> bool {
         return false;
     }
 
-    // A shim pointing at a binary that no longer exists counts as not installed.
+    // A shim whose target is gone counts as not installed.
     if !shim.exists() {
         eprintln!(
             "[linxiv] is_cli_installed: shim at {} is dangling (target missing)",
@@ -190,8 +186,8 @@ pub fn is_cli_installed() -> bool {
     true
 }
 
-/// Install the bundled `linxiv` CLI onto PATH: symlink on Linux/macOS, `.bat`
-/// shim + user PATH registry entry on Windows. Dev builds refuse unless LINXIV_DEV_INSTALL=1.
+/// Install the bundled `linxiv` CLI onto PATH: symlink on unix, `.bat` shim +
+/// user PATH registry entry on Windows. Dev needs LINXIV_DEV_INSTALL=1.
 #[tauri::command]
 pub fn install_cli(app: AppHandle) -> Result<(), String> {
     dev_install_guard(std::env::var("LINXIV_DEV_INSTALL").ok().as_deref())?;
@@ -278,13 +274,12 @@ pub fn uninstall_cli() -> Result<(), String> {
 // ─────────────────────────────────────────────────────────────────────────────
 // In-place update: deb/rpm/pacman
 //
-// The Tauri updater plugin (main.rs) only ever swaps an AppImage, a macOS
-// app.tar.gz, or a Windows NSIS/MSI in place — it has no notion of a
-// package-manager-owned install. Rather than standing up distro repositories
-// (a separate hosting + package-signing project), a native install self-updates
-// by downloading the matching asset straight off the GitHub release and
-// installing it with `pkexec`, the same one-time privilege prompt a user
-// would see running `dpkg -i`/`rpm -U` by hand.
+// The Tauri updater plugin (main.rs) can only deliver what
+// `createUpdaterArtifacts` signs (AppImage/app.tar.gz/NSIS-MSI), never a
+// deb/rpm/pacman, and standing up distro repositories is a separate hosting +
+// signing project. So a native install downloads the matching asset off the
+// GitHub release and installs it with `pkexec`, the one privilege prompt a
+// user would see running `dpkg -i`/`rpm -U` by hand.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// "deb", "rpm", "pacman", or `None` (AppImage, dev build, or non-Linux) —
@@ -305,16 +300,15 @@ fn linux_package_kind() -> Option<&'static str> {
     } else if owned_by("rpm", &["-qf", &exe.to_string_lossy()]) {
         Some("rpm")
     } else if owned_by("pacman", &["-Qo", &exe.to_string_lossy()]) {
-        // Pacman packages cannot be replaced by Tauri's AppImage updater;
-        // route them through the native package path as well.
+        // Pacman installs aren't AppImages either; route them here too.
         Some("pacman")
     } else {
         None
     }
 }
 
-/// JS-facing: which package manager (if any) owns this install, so the UI can
-/// pick native-package update vs. the Tauri updater. Blocking probe, run off the main thread.
+/// Which package manager (if any) owns this install, so the UI picks
+/// native-package update vs. the Tauri updater. Blocking probe, off-thread.
 #[tauri::command]
 pub async fn get_linux_package_kind() -> Option<String> {
     tokio::task::spawn_blocking(|| linux_package_kind().map(str::to_string))
@@ -324,13 +318,11 @@ pub async fn get_linux_package_kind() -> Option<String> {
 }
 
 /// Asset download hosts trusted for `apply_linux_package_update` — defense in
-/// depth on top of the fact that the URL is no longer caller-supplied (see
-/// `resolve_release_asset` below): it comes from our own GET to the pinned
-/// `linxiv-dev/linXiv` repo's release, not from the webview. Not covered by
-/// `tauri.conf.json`'s CSP — CSP only gates the webview's own fetch/XHR, and
-/// this download runs in Rust via `reqwest`, which never sees it. Only checks
-/// the first hop (reqwest follows redirects by default); `verify_digest`
-/// below is the control that actually matters for what ends up on disk.
+/// depth on top of `resolve_release_asset`, which already sources the URL from
+/// our own GET to the pinned `linxiv-dev/linXiv` release, not the webview.
+/// `tauri.conf.json`'s CSP does not apply: it gates the webview's fetch/XHR,
+/// not `reqwest`. Only the first hop is checked (reqwest follows redirects);
+/// `verify_digest` is the control that decides what lands on disk.
 const ALLOWED_ASSET_HOSTS: [&str; 3] = [
     "github.com",
     "objects.githubusercontent.com",
@@ -349,8 +341,7 @@ fn is_allowed_asset_url(url: &str) -> bool {
             .is_some_and(|h| ALLOWED_ASSET_HOSTS.contains(&h))
 }
 
-/// Upper bound on a downloaded native package — generous for a desktop app,
-/// just enough to refuse an absurd/misconfigured response before install.
+/// Upper bound on a downloaded native package — refuses an absurd response.
 const MAX_UPDATE_PACKAGE_BYTES: u64 = 300 * 1024 * 1024;
 
 #[derive(serde::Deserialize)]
@@ -365,13 +356,11 @@ struct GhRelease {
     assets: Vec<GhReleaseAsset>,
 }
 
-/// Resolve the `.deb`/`.rpm` asset to install from the pinned repo's latest
-/// release — fetched here, not trusted from the webview. `apply_linux_
-/// package_update` is a root-privileged install; letting the caller pass in
-/// the URL (and a matching digest) would let any JS running in the webview
-/// point it at an arbitrary GitHub-hosted asset (the app renders untrusted
-/// LaTeX/abstracts, so webview JS execution is an in-scope threat, not a
-/// hypothetical one) and get it installed as root.
+/// Resolve the native-package asset from the pinned repo's latest release —
+/// fetched here, never taken from the webview. `apply_linux_package_update`
+/// installs as root, so a caller-supplied URL + digest would let webview JS
+/// (in scope: the app renders untrusted LaTeX/abstracts) get an arbitrary
+/// GitHub-hosted asset installed as root.
 async fn resolve_release_asset(
     client: &reqwest::Client,
     kind: &str,
@@ -402,8 +391,8 @@ fn package_asset_matches(name: &str, kind: &str, arch: &str) -> bool {
     name.starts_with("linxiv-") && name.ends_with(suffix) && name.contains(arch)
 }
 
-/// release.yml's asset naming: rpm carries the raw Rust arch ("x86_64",
-/// "aarch64", ...), deb uses Debian's names ("amd64", "arm64").
+/// Asset naming: deb uses Debian arch names ("amd64", "arm64"); rpm and
+/// pacman keep the raw arch ("x86_64", "aarch64").
 fn arch_token<'a>(rust_arch: &'a str, kind: &str) -> &'a str {
     match (rust_arch, kind) {
         ("x86_64", "deb") => "amd64",
@@ -412,13 +401,11 @@ fn arch_token<'a>(rust_arch: &'a str, kind: &str) -> &'a str {
     }
 }
 
-/// `dpkg -i`/`rpm -U`/`pacman -U` don't check a signature on what they install,
-/// and native package assets aren't covered by `createUpdaterArtifacts`'s minisign
-/// signing (that only signs the AppImage/app.tar.gz/NSIS-MSI artifacts) — so
-/// unlike that path, this one has no real code-signing: the sha256 checked
-/// here comes from the same GitHub API response as the download URL, so it
-/// catches transit/CDN corruption but not a forged API response or a
-/// malicious release. TLS to GitHub is the actual trust boundary.
+/// `dpkg -i`/`rpm -U`/`pacman -U` verify no signature, and native packages sit
+/// outside `createUpdaterArtifacts`'s minisign signing (AppImage/app.tar.gz/
+/// NSIS-MSI only) — so this path has no code-signing. The sha256 comes from
+/// the same GitHub API response as the URL, catching transit/CDN corruption
+/// but not a forged response. TLS to GitHub is the actual trust boundary.
 fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), String> {
     let Some(hex) = expected.strip_prefix("sha256:") else {
         return Err(format!("Unrecognized digest format: {expected}"));
@@ -432,8 +419,8 @@ fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), String> {
     }
 }
 
-/// Download the `.deb`/`.rpm` release asset and install it over the running
-/// app via `pkexec`. The caller relaunches on success (see `updates.ts`).
+/// Download the native-package release asset and install it over the running
+/// app via `pkexec`. Caller relaunches on success (`api/updates.ts`).
 #[tauri::command]
 pub async fn apply_linux_package_update() -> Result<(), String> {
     let kind = tokio::task::spawn_blocking(linux_package_kind)
@@ -461,9 +448,8 @@ pub async fn apply_linux_package_update() -> Result<(), String> {
         .await
         .map_err(|e| format!("Download failed: {e}"))?
         .bytes_stream();
-    // Bounded by running total as chunks arrive, not by trusting
-    // Content-Length (absent on a chunked response) or buffering an
-    // unbounded body before checking its length.
+    // Bounded by running total as chunks arrive: Content-Length is absent on
+    // a chunked response, and buffering first would defeat the bound.
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Download failed: {e}"))?;
@@ -479,15 +465,13 @@ pub async fn apply_linux_package_update() -> Result<(), String> {
         .ok_or("Release asset has no checksum on file; refusing to install")?;
     verify_digest(&bytes, expected_digest)?;
 
-    // Writing the package and running pkexec both block (a real temp file,
-    // then the interactive polkit prompt) — off the async runtime so a slow
-    // password prompt can't stall other in-flight commands.
+    // The temp-file write and the polkit prompt both block — off the runtime
+    // so a slow password prompt can't stall other in-flight commands.
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         use std::io::Write;
-        // O_EXCL unique temp path in the sticky-bit temp dir: a predictable
-        // shared-dir path could be symlink-swapped by another local user
-        // between write and pkexec's read; this one can't be pre-created or
-        // guessed.
+        // O_EXCL unique temp path: a predictable shared-dir path could be
+        // symlink-swapped by another local user between write and pkexec's
+        // read; this one can't be pre-created or guessed.
         let suffix = if kind == "pacman" {
             "pkg.tar.zst"
         } else {
@@ -537,8 +521,7 @@ pub async fn apply_linux_package_update() -> Result<(), String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Status of a supported MCP client on this machine.
-// NOTE: The struct is intentionally named `MpcClientStatus` (not `Mcp…`) to
-// match the identifier agreed with the frontend.
+// `MpcClientStatus` (not `Mcp…`) is deliberate: it matches api/integrations.ts.
 #[derive(serde::Serialize)]
 pub struct MpcClientStatus {
     pub id: String,
@@ -547,13 +530,10 @@ pub struct MpcClientStatus {
     pub installed: bool,
     /// `true` when the client application appears to be present on this machine.
     pub available: bool,
-    /// `true` when the registered command no longer exists on disk (e.g. a
-    /// since-deleted sidecar) and the entry needs a reinstall.
+    /// `true` when the registered command is gone from disk; needs reinstall.
     pub stale: bool,
-    /// `true` when the client's config file exists but could not be parsed as
-    /// JSON, so `installed`/`stale` could not be determined and default to
-    /// `false`. Distinct from "genuinely not installed" — the config needs
-    /// manual repair.
+    /// `true` when the config file exists but is not parseable JSON, so
+    /// `installed`/`stale` default to `false`. Needs manual repair.
     pub config_error: bool,
 }
 
@@ -592,9 +572,9 @@ impl Os {
 struct Roots {
     os: Os,
     home: PathBuf,
-    /// `%APPDATA%` — `None` off Windows.
+    /// `%APPDATA%`, if set.
     appdata: Option<PathBuf>,
-    /// `%LOCALAPPDATA%` — `None` off Windows.
+    /// `%LOCALAPPDATA%`, if set.
     local_appdata: Option<PathBuf>,
 }
 
@@ -610,7 +590,7 @@ impl Roots {
 }
 
 /// Key under which a client lists MCP servers: VS Code's `mcp.json` uses
-/// `servers` (with a `type` per entry); the rest use the reference `mcpServers` shape.
+/// `servers` (with a per-entry `type`); the rest use `mcpServers`.
 fn servers_key(client_id: &str) -> &'static str {
     match client_id {
         "vscode" => "servers",
@@ -664,7 +644,7 @@ fn mcp_config_path_in(client_id: &str, roots: &Roots) -> Result<PathBuf, String>
 }
 
 /// `mcp_config_path_in` for the current machine; Antigravity has two candidate
-/// paths (see `antigravity_target_path`), every other client one canonical path.
+/// paths (see `antigravity_target_path`), everyone else one.
 fn mcp_config_path(client_id: &str) -> Result<PathBuf, String> {
     let roots = Roots::current()?;
     if client_id == "antigravity" {
@@ -673,8 +653,7 @@ fn mcp_config_path(client_id: &str) -> Result<PathBuf, String> {
     mcp_config_path_in(client_id, &roots)
 }
 
-/// Return paths to check for Antigravity MCP config in order of preference.
-/// Checks the new Gemini path first, then falls back to the legacy Codeium path.
+/// Antigravity config paths, new Gemini path before legacy Codeium.
 fn antigravity_config_paths(roots: &Roots) -> Vec<PathBuf> {
     let home = &roots.home;
     let mut paths = vec![home.join(".gemini").join("config").join("mcp_config.json")];
@@ -698,8 +677,8 @@ fn antigravity_config_paths(roots: &Roots) -> Vec<PathBuf> {
     paths
 }
 
-/// Which Antigravity config path install/uninstall targets: whichever already
-/// has linxiv registered, else whichever config dir exists on disk, else the modern default.
+/// Which Antigravity config path install/uninstall targets: whichever has
+/// linxiv registered, else whichever config dir exists, else the new default.
 // ponytail: the dir-exists fallback can't tell "Antigravity 2.0 created this"
 // from "the Gemini CLI created this" — no signal distinguishes them. Fine
 // until a bug report shows that combination in the wild.
@@ -807,8 +786,7 @@ fn client_app_markers(client_id: &str, roots: &Roots) -> Vec<PathBuf> {
     }
 }
 
-/// Read the MCP JSON config file (or return an empty object if it doesn't
-/// exist), then return the parsed value.
+/// Parse the MCP config file; an empty object when it doesn't exist.
 fn read_mcp_config(path: &Path) -> Result<serde_json::Value, String> {
     if path.exists() {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -825,9 +803,8 @@ fn write_mcp_config(path: &Path, value: &serde_json::Value) -> Result<(), String
     }
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
 
-    // Write to temp file, then atomically rename into place — this function
-    // overwrites OTHER applications' config files, and a crash/full-disk mid-write
-    // would corrupt them. Mirroring appimage_stable_copy's safety pattern.
+    // Temp file then atomic rename: this overwrites OTHER apps' config files,
+    // and a crash mid-write would corrupt them (as in appimage_stable_copy).
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     if let Err(e) = std::fs::write(&tmp, &text).map_err(|e| e.to_string()) {
         let _ = std::fs::remove_file(&tmp);
@@ -851,10 +828,9 @@ fn is_client_available(client_id: &str, roots: &Roots) -> bool {
 
 /// `(installed, stale, config_error)`: installed when the `linxiv` entry is in
 /// the config (read live, never cached); stale when its command is an absolute
-/// path missing on disk (since-deleted sidecar, dead AppImage mount, moved dev
-/// checkout) — non-absolute commands are assumed live. `config_error` flags an
-/// unparseable config, kept distinct from "never installed" so a broken file
-/// surfaces as something to repair by hand.
+/// path missing on disk (deleted sidecar, dead AppImage mount, moved checkout)
+/// — non-absolute commands are assumed live. `config_error` flags unparseable
+/// JSON, kept distinct from "never installed" so a broken file gets repaired.
 fn registration_state(path: &Path, key: &str) -> (bool, bool, bool) {
     if !path.exists() {
         return (false, false, false);
@@ -911,9 +887,8 @@ pub fn list_mcp_clients() -> Vec<MpcClientStatus> {
         .iter()
         .map(|(id, name)| {
             let (installed, stale, config_error) = if *id == "antigravity" {
-                // Check both new and legacy paths, preferring whichever has a linxiv
-                // entry; if none is installed but any path had a broken config,
-                // surface that instead of reporting a flat "not installed".
+                // Prefer whichever path has a linxiv entry; if none does but
+                // one is unparseable, surface that over a flat "not installed".
                 let results: Vec<(bool, bool, bool)> = antigravity_config_paths(&roots)
                     .iter()
                     .map(|p| registration_state(p, servers_key(id)))
@@ -981,7 +956,7 @@ pub fn install_mcp(app: AppHandle, client_id: String) -> Result<(), String> {
 }
 
 /// Dev builds would persist the repo-local staged sidecar path — dead once the
-/// checkout moves — so refuse unless the override is exactly "1"; release builds pass through.
+/// checkout moves — so refuse unless override is "1". Release passes through.
 fn dev_install_guard(override_value: Option<&str>) -> Result<(), String> {
     #[cfg(debug_assertions)]
     if override_value != Some("1") {
@@ -995,8 +970,8 @@ fn dev_install_guard(override_value: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the `"linxiv"` entry from a client's `mcpServers` config.
-/// Succeeds silently if the file or key does not exist.
+/// Remove the `"linxiv"` entry from a client's server map; silent no-op when
+/// the file or key is missing.
 #[tauri::command]
 pub fn uninstall_mcp(client_id: String) -> Result<(), String> {
     let config_path = mcp_config_path(&client_id)?;
@@ -1071,8 +1046,8 @@ fn windows_path_add(dir: &str) -> Result<(), String> {
         format!("{};{}", current_path, dir)
     };
 
-    // NOTE: Running applications will not see this change until they restart;
-    // broadcasting WM_SETTINGCHANGE would notify them but requires a Win32 call.
+    // Running apps won't see this until restart; notifying them would need a
+    // WM_SETTINGCHANGE broadcast via Win32.
     env.set_raw_value(
         "Path",
         &RegValue {
@@ -1296,13 +1271,11 @@ mod tests {
         // Neither path's dir exists yet: default to the new canonical path.
         assert_eq!(antigravity_target_path(&roots), *new_path);
 
-        // Only the legacy dir exists (old Codeium-era app, never ran the new
-        // Gemini-based one): install must target the path that app reads.
+        // Only the legacy dir exists: install must target the path it reads.
         std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
         assert_eq!(antigravity_target_path(&roots), *legacy_path);
 
-        // Both dirs exist but only legacy has linxiv registered: reinstall/
-        // uninstall must keep targeting the one with the real entry.
+        // Both dirs exist, only legacy registered: keep targeting the entry.
         std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
         std::fs::write(
             legacy_path,
@@ -1324,9 +1297,8 @@ mod tests {
 
     #[test]
     fn registration_state_reports_config_error_not_plain_missing() {
-        // A client that IS installed but whose config got hand-edited into
-        // invalid JSON must not be reported identically to "never installed" —
-        // that hides a real problem the user needs to go fix.
+        // A hand-edited-to-invalid config must not read identically to "never
+        // installed" — that hides a problem the user needs to go fix.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("mcp.json");
         std::fs::write(&cfg, "{ not valid json").unwrap();
@@ -1377,8 +1349,7 @@ mod tests {
     #[test]
     fn digest_verification() {
         let bytes = b"hello world";
-        // Round-trip against our own hasher rather than a hand-typed hex
-        // digest, so the test can't just have the wrong constant.
+        // Round-trip our own hasher; a hand-typed hex could just be wrong.
         use sha2::{Digest, Sha256};
         let matching = format!("sha256:{:x}", Sha256::digest(bytes));
         assert!(verify_digest(bytes, &matching).is_ok());

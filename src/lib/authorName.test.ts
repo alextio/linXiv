@@ -69,9 +69,9 @@ test("parseFullName keeps a given name that collides with a surname particle", (
   const last = (s: string) => parseFullName(s).last;
   const first = (s: string) => parseFullName(s).first;
 
-  // "Van" and "Al" are surname particles (van Beethoven, al-Rashid), but here
-  // they're the given name of a 2-token full name — the particle walk must
-  // not swallow the whole name into last, leaving first empty.
+  // "Van" and "Al" are surname particles, but here they're the given name of
+  // a 2-token full name — the particle walk must not swallow the whole name
+  // into last, leaving first empty.
   assert.equal(last("Van Morrison"), "Morrison");
   assert.equal(first("Van Morrison"), "Van");
 

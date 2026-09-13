@@ -8,8 +8,7 @@ use serde::Serialize;
 use linxiv_core::formats::is_arxiv_id;
 use linxiv_core::models::PaperMetadata;
 
-/// arXiv template, embedded so it ships with the binary. Only `arxiv` has one —
-/// other sources fall back to a JSON dump (see `render_paper`).
+/// arXiv template, embedded so it ships with the binary.
 const ARXIV_TEMPLATE: &str = include_str!("../assets/arxiv_paper.md");
 
 /// Pretty JSON (2-space indent) to stdout + trailing "\n".

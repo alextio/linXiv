@@ -13,9 +13,9 @@
 //! ```
 //!
 //! Note access goes through the sibling note service; vault FS access through
-//! `service::vault` (its `safe_path`/`write_file`/`list_files` carry the
-//! trust-boundary guard). Standalone projects attach to the sentinel root
-//! `texbrain:local`. Vault roots map note_id -> `vault_dir/note_<id>`.
+//! `service::vault`, whose `safe_path` is the trust-boundary guard. Standalone
+//! projects attach to the sentinel root `texbrain:local`; vault roots are
+//! `vault_dir/note_<id>`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,8 +52,8 @@ Hello, world!
 
 // ── frontmatter parse / build ───────────────────────────────────────────────────
 
-/// Parse a note body's frontmatter map. A note with no leading `---` block (or an
-/// unterminated one) yields an empty map; the body is never materialized.
+/// Parse a note body's frontmatter map. No leading `---` fence, or an unterminated
+/// one, yields an empty map.
 pub fn parse_frontmatter(content: &str) -> HashMap<String, String> {
     let mut lines = content.lines();
     if lines.next().map(str::trim) != Some("---") {
@@ -78,8 +78,8 @@ fn sanitize_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ").trim().to_string()
 }
 
-/// Serialize the frontmatter fence + optional body. Sanitizes again here (defense
-/// in depth) so a stray newline can never break or inject into the fence.
+/// Serialize the frontmatter fence + optional body. Sanitizes the values so a
+/// stray newline can never break or forge the fence.
 pub fn build_content(project_name: &str, main_file: &str, body: &str) -> String {
     format!(
         "---\n{VAULT_FLAG}: true\nprojectName: {}\nmainFile: {}\n---\n{body}",
@@ -136,8 +136,8 @@ fn to_summary(note: &NoteDetails, meta: &HashMap<String, String>) -> EditorProje
     }
 }
 
-/// `{mainFile, files, projectName}` the host pushes to the editor. `files` is empty:
-/// the guest mounts the vault and pulls every file lazily over the FS RPC.
+/// Body of `GET /api/editor/projects/{id}/doc`. `files` is empty: the guest
+/// pulls each file over the vault FS RPC instead.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DocOpenPayload {
@@ -146,12 +146,12 @@ pub struct DocOpenPayload {
     pub project_name: String,
 }
 
-/// Absolute directory backing one editor project's vault root.
+/// Directory backing one editor project's vault.
 fn vault_root(vault_dir: &Path, note_id: i64) -> PathBuf {
     vault_dir.join(format!("note_{note_id}"))
 }
 
-// ── operations used by the /api/editor routes ────────────────────────────────────
+// ── operations ──────────────────────────────────────────────────────────────────
 
 /// Editor-project notes (frontmatter-flagged), newest first, optionally scoped
 /// to a linXiv project.
@@ -161,8 +161,7 @@ pub fn list_projects(
 ) -> Result<Vec<EditorProjectSummary>> {
     let mut out: Vec<EditorProjectSummary> = Vec::new();
     // SQL prefilters on the flag substring + project scope so we never load every
-    // note body; parse_frontmatter stays the exactness guard (the substring could
-    // appear in a plain note's body).
+    // note body; parse_frontmatter then rejects notes that merely mention the flag.
     for note in note_q::list_notes_containing(conn, VAULT_FLAG, project_id)? {
         let meta = parse_frontmatter(&note.content);
         if !is_editor_project(&meta) {
@@ -185,7 +184,6 @@ pub struct CreatedProject {
 }
 
 /// Create an editor-project note + scaffold its vault with a starter main file.
-/// `main_file` defaults to "main.tex" at the binary layer.
 pub fn create_project(
     conn: &mut rusqlite::Connection,
     vault_dir: &Path,
@@ -200,9 +198,8 @@ pub fn create_project(
     let main = Some(sanitize_line(main_file))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "main.tex".to_string());
-    // Validate the main file is a safe, contained relative path BEFORE creating the
-    // note, so a bad name fails clean rather than orphaning a note with no vault.
-    // (Validated against note 0's root; the relpath shape is what matters.)
+    // Validate main BEFORE creating the note, so a bad name fails clean instead of
+    // orphaning a vault-less note. Note 0's root stands in; only the shape matters.
     vault::safe_path(&vault_root(vault_dir, 0), &main)?;
 
     // Only "" (not whitespace) falls back to the standalone sentinel.
@@ -265,17 +262,15 @@ pub fn get_meta(
     Ok(Some((note, meta)))
 }
 
-/// `true` iff the note exists and is an editor project. The per-FS-RPC vault
-/// ownership guard: reads only the content column instead of hydrating the full
-/// note row like `get_meta`.
+/// `true` iff the note exists and is an editor project. Reads only the content
+/// column instead of hydrating the full row like `get_meta`.
 pub fn is_editor_project_note(conn: &rusqlite::Connection, note_id: i64) -> Result<bool> {
     Ok(note_q::get_note_content(conn, note_id)?
         .is_some_and(|c| is_editor_project(&parse_frontmatter(&c))))
 }
 
-/// Assemble the DocOpenPayload for the editor, or `None` if not an editor project.
-/// The recorded main file may be stale; fall back to a present `.tex` so the
-/// project never opens empty.
+/// Assemble the DocOpenPayload, or `None` if not an editor project. A missing
+/// recorded main file falls back to `main.tex`, else the first `.tex` present.
 pub fn get_doc(
     conn: &rusqlite::Connection,
     vault_dir: &Path,
@@ -431,7 +426,7 @@ mod tests {
         assert_eq!(scoped[0].project_name, "Draft B");
     }
 
-    /// The vault step is the reason every consumer deletes notes through here:
+    /// The vault step is why note deletes route through here:
     /// dropping the row alone leaves `note_<id>/` on disk forever.
     #[test]
     fn delete_note_removes_the_vault_tree() {
@@ -524,7 +519,7 @@ mod tests {
     #[test]
     fn create_rolls_back_note_when_scaffold_fails() {
         let mut conn = db();
-        // vault_dir is a regular FILE, so create_dir_all(note_root) fails -> rollback.
+        // vault_dir is a regular FILE, so the vault scaffold fails -> rollback.
         let tmp = tempfile::tempdir().unwrap();
         let bogus = tmp.path().join("not_a_dir");
         std::fs::write(&bogus, b"x").unwrap();
