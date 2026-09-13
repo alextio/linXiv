@@ -27,12 +27,16 @@ use linxiv_core::service::{
 };
 
 pub use linxiv_p2p::CustomRelay;
-pub use model::{SharedAnnotation, SharedNote, SharedPaper, SharedProject, SharedSummary};
+pub use model::{
+    MemberMeta, SharedAnnotation, SharedNote, SharedPaper, SharedProject, SharedSummary,
+};
+#[cfg(feature = "sync-beelay")]
+pub use transport::{
+    doc_admin_marker, doc_member_meta, E2eeSyncOutcome, MemberId, ProjectInvite, Role,
+};
 #[cfg(feature = "sync-beelay")]
 pub use transport::{e2ee_dir, e2ee_received_dir, member_id_from_hex, member_id_hex};
 pub use transport::{received_dir, valid_share_id, ShareNode, ShareTicket, ALPN};
-#[cfg(feature = "sync-beelay")]
-pub use transport::{E2eeSyncOutcome, MemberId, ProjectInvite, Role};
 
 const SHARE_EXT: &str = "automerge";
 const MAX_SHARED_TEXT: usize = 256 * 1024;
