@@ -473,7 +473,9 @@ mod tests {
         let names = list_from_sql(authors_json).unwrap();
         for (i, name) in names.iter().enumerate() {
             let fk = author_fk(conn, name);
-            let link = "INSERT INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) \
+            // OR IGNORE mirrors write.rs: the unique link index drops a
+            // same-author repeat (e.g. case-variant names) at insert time.
+            let link = "INSERT OR IGNORE INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) \
                         VALUES (?1, ?2, ?3)";
             conn.execute(link, [pid, fk, i as i64]).unwrap();
         }

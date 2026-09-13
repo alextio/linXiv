@@ -82,9 +82,12 @@ pub fn get_paper_authors(conn: &Connection, paper_id: i64) -> Result<Vec<BasicAu
         .map_err(Into::into)
 }
 
-/// Each paper's author ORCIDs (AUTHOR_INDEX order, index-aligned with the
-/// authors list), keyed by PAPER_ID — the batched sibling of `get_paper_authors`.
-/// Link-less papers are absent; chunked under SQLite's bound-variable limit.
+/// Each paper's author ORCIDs, index-aligned with the authors list, keyed by
+/// PAPER_ID — the batched sibling of `get_paper_authors`. ORCIDs are placed
+/// at their stored AUTHOR_INDEX: a repeated author only keeps its first link
+/// row (the unique link index), so the repeat's position reads `None` — the
+/// first occurrence already carries that author's ORCID. Link-less papers
+/// are absent; chunked under SQLite's bound-variable limit.
 pub fn paper_author_orcids(
     conn: &Connection,
     paper_ids: &[i64],
@@ -94,19 +97,37 @@ pub fn paper_author_orcids(
     for chunk in paper_ids.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT pta.PAPER_ID, a.AUTHOR_ORCID \
+            "SELECT pta.PAPER_ID, pta.AUTHOR_INDEX, a.AUTHOR_ORCID \
              FROM AUTHOR a \
              JOIN PAPER_TO_AUTHOR pta ON pta.AUTHOR_FK = a.AUTHOR_FK \
              WHERE pta.PAPER_ID IN ({placeholders}) \
-             ORDER BY pta.PAPER_ID, pta.AUTHOR_INDEX"
+             ORDER BY pta.PAPER_ID, (pta.AUTHOR_INDEX IS NULL), pta.AUTHOR_INDEX"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (pid, orcid) = row?;
-            by_paper.entry(pid).or_default().push(orcid);
+            let (pid, idx, orcid) = row?;
+            let v = by_paper.entry(pid).or_default();
+            match idx {
+                // Placement by stored index keeps alignment when a repeated
+                // author's later link row was dropped at insert.
+                Some(i) if i >= 0 => {
+                    let i = i as usize;
+                    if v.len() <= i {
+                        v.resize(i + 1, None);
+                    }
+                    v[i] = orcid;
+                }
+                // NULL-index rows (manual links) sort last, so they append
+                // past the indexed range instead of colliding with slot 0..m.
+                _ => v.push(orcid),
+            }
         }
     }
     Ok(by_paper)
@@ -308,8 +329,8 @@ pub fn delete_author(conn: &Connection, author_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Link row + optional author_index (order within the paper). Re-linking a
-/// pair duplicates it: no UNIQUE index.
+/// Link row + optional author_index (order within the paper). Idempotent:
+/// the (PAPER_ID, AUTHOR_FK) unique index makes a re-link a silent no-op.
 pub fn link_author_to_paper(
     conn: &Connection,
     author_fk: i64,
@@ -348,8 +369,8 @@ pub fn unlink_author_from_paper(conn: &Connection, author_fk: i64, paper_id: i64
 }
 
 /// Merge `dup_ids` into `canonical_id` in one transaction: resync
-/// PAPER_META.AUTHORS, re-point PAPER_TO_AUTHOR rows, collapse double-links (no
-/// UNIQUE index enforces one link per paper), then delete the duplicates.
+/// PAPER_META.AUTHORS, collapse would-be double-links, re-point
+/// PAPER_TO_AUTHOR rows, then delete the duplicates.
 /// `canonical_id` is skipped if listed; returns the dup_ids actually merged.
 pub fn merge_authors(
     conn: &mut Connection,
@@ -429,18 +450,30 @@ pub fn merge_authors(
             }
             update_meta.execute(params![db::list_to_sql(&merged), pid])?;
         }
+        // Collapse double-links BEFORE re-pointing: the unique
+        // (PAPER_ID, AUTHOR_FK) index rejects an UPDATE that would land two
+        // rows on the same pair, so keep the lowest PTA_FK per paper across
+        // canonical + dups and drop the rest first.
+        let all_placeholders = vec!["?"; dups.len() + 1].join(", ");
+        tx.execute(
+            &format!(
+                "DELETE FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK IN ({all_placeholders}) \
+                 AND PTA_FK NOT IN (\
+                     SELECT MIN(PTA_FK) FROM PAPER_TO_AUTHOR \
+                      WHERE AUTHOR_FK IN ({all_placeholders}) GROUP BY PAPER_ID)"
+            ),
+            params_from_iter(
+                std::iter::once(canonical_id)
+                    .chain(dups.iter().copied())
+                    .chain(std::iter::once(canonical_id))
+                    .chain(dups.iter().copied()),
+            ),
+        )?;
         tx.execute(
             &format!(
                 "UPDATE PAPER_TO_AUTHOR SET AUTHOR_FK = ? WHERE AUTHOR_FK IN ({placeholders})"
             ),
             params_from_iter(std::iter::once(canonical_id).chain(dups.iter().copied())),
-        )?;
-        // Drop rows that now double-link a paper to the canonical author, keeping
-        // the lowest PTA_FK per paper.
-        tx.execute(
-            "DELETE FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK = ? AND PTA_FK NOT IN (\
-                 SELECT MIN(PTA_FK) FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK = ? GROUP BY PAPER_ID)",
-            params![canonical_id, canonical_id],
         )?;
         let existing_dups: Vec<i64> = {
             let mut stmt = tx.prepare(&format!(
@@ -554,6 +587,18 @@ mod tests {
         assert_eq!(orcids.len(), 1);
         assert_eq!(orcids[&pid], vec![None, Some("0000-1".to_string())]);
         assert!(paper_author_orcids(&conn, &[]).unwrap().is_empty());
+
+        // A repeated author keeps only its first link row (unique index),
+        // leaving a gap in AUTHOR_INDEX; placement by stored index keeps the
+        // later author aligned with the 3-entry authors list.
+        conn.execute(
+            "UPDATE PAPER_TO_AUTHOR SET AUTHOR_INDEX = 2 \
+             WHERE PAPER_ID = ? AND AUTHOR_INDEX = 1",
+            params![pid],
+        )
+        .unwrap();
+        let dup = paper_author_orcids(&conn, &[pid]).unwrap();
+        assert_eq!(dup[&pid], vec![None, None, Some("0000-1".to_string())]);
 
         // previews: the one active latest paper.
         let prev = get_paper_previews(&conn, a1).unwrap();
