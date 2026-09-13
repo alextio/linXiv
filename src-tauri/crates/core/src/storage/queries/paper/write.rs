@@ -67,8 +67,10 @@ fn sync_paper_authors(
         tx.prepare_cached("DELETE FROM PAPER_TO_AUTHOR WHERE PAPER_ID = ?")?
             .execute([paper_id])?;
     }
+    // OR IGNORE: metadata occasionally lists the same author twice; the
+    // unique link index keeps the first occurrence (and its AUTHOR_INDEX).
     let mut link = tx.prepare_cached(
-        "INSERT INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) VALUES (?, ?, ?)",
     )?;
     let mut fill_orcid = tx.prepare_cached(
         "UPDATE AUTHOR SET AUTHOR_ORCID = ? WHERE AUTHOR_FK = ? AND AUTHOR_ORCID IS NULL",

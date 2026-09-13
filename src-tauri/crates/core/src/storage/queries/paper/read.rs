@@ -803,8 +803,8 @@ mod tests {
             false,
             "idx_paper_meta_published_dated",
         );
-        uses(PaperSort::Added, true, "idx_paper_source_fk");
-        uses(PaperSort::Added, false, "idx_paper_source_fk");
+        uses(PaperSort::Added, true, "idx_paper_source_fk_version");
+        uses(PaperSort::Added, false, "idx_paper_source_fk_version");
         uses(PaperSort::Title, false, "idx_paper_title_nocase");
         uses(PaperSort::Title, true, "idx_paper_title_nocase");
     }

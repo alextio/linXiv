@@ -183,7 +183,9 @@ JOIN map_paper m
 --    AUTHOR_INDEX preserved from JSON ordering (json_each.key gives 0-based idx)
 -- ---------------------------------------------------------------------------
 
-INSERT INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX)
+-- OR IGNORE: legacy authors JSON can repeat a name; the unique
+-- (PAPER_ID, AUTHOR_FK) index keeps the first occurrence (migration 21).
+INSERT OR IGNORE INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX)
 SELECT
     m.new_paper_id,
     a.AUTHOR_FK,

@@ -38,6 +38,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     paper_sort_indexes(conn)?;
     link_table_indexes(conn)?;
     paper_source_fk_index(conn)?;
+    paper_to_author_unique(conn)?;
     Ok(())
 }
 
@@ -397,11 +398,26 @@ fn link_table_indexes(conn: &Connection) -> Result<()> {
 
 // ── 20. PAPER(SOURCE_FK, VERSION) lookup index ──────────────────────────────
 
-/// PAPER root-FK speed index. A no-op today — the name collides with 18's.
+/// PAPER (SOURCE_FK, VERSION) speed index; also retires 18's old
+/// single-column index, whose name this once collided with.
 fn paper_source_fk_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!(
         "../../sql/migrations/20_paper_source_fk_index.sql"
     ))?;
+    Ok(())
+}
+
+// ── 21. PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK) unique index ──────────────────
+
+/// Dedupe + unique index so re-linking an author is idempotent. Guarded on
+/// the index: once it exists no duplicate can form, so the DELETE sweep only
+/// ever runs once per install.
+fn paper_to_author_unique(conn: &Connection) -> Result<()> {
+    if !index_exists(conn, "idx_paper_to_author_unique")? {
+        conn.execute_batch(include_str!(
+            "../../sql/migrations/21_paper_to_author_unique.sql"
+        ))?;
+    }
     Ok(())
 }
 
@@ -477,7 +493,9 @@ mod tests {
         ] {
             assert!(index_exists(&conn, idx).unwrap(), "{idx} must exist");
         }
-        assert!(index_exists(&conn, "idx_paper_source_fk").unwrap());
+        assert!(index_exists(&conn, "idx_paper_source_fk_version").unwrap());
+        // The composite replaced 18's single-column index; it must be gone.
+        assert!(!index_exists(&conn, "idx_paper_source_fk").unwrap());
         schema::apply_views(&conn).unwrap();
     }
 
@@ -506,7 +524,7 @@ mod tests {
     }
 
     /// Same existence-vs-use pin for migration 20: deleted_papers' correlated
-    /// MAX(VERSION) subquery must resolve via idx_paper_source_fk, not a full scan.
+    /// MAX(VERSION) subquery must resolve via the composite index, not a full scan.
     #[test]
     fn deleted_papers_version_subquery_uses_paper_source_fk_index() {
         let conn = crate::storage::db::open_in_memory().unwrap();
@@ -519,8 +537,9 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(
-            plan.iter().any(|d| d.contains("idx_paper_source_fk")),
-            "plan must use idx_paper_source_fk, got: {plan:?}"
+            plan.iter()
+                .any(|d| d.contains("idx_paper_source_fk_version")),
+            "plan must use idx_paper_source_fk_version, got: {plan:?}"
         );
     }
 
