@@ -65,7 +65,7 @@ function RemoteModeBadge({ collapsed }: { collapsed: boolean }) {
   return (
     <NavLink
       to="/settings#backends"
-      title={`Viewing remote library “${label}” — click to manage backends`}
+      title={`Viewing remote library “${label}”. Click to manage backends`}
       className="mx-2 mb-2 rounded-md px-2 py-1.5 text-xs flex items-center justify-center gap-1.5"
       style={{
         backgroundColor:

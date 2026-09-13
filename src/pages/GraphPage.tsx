@@ -434,7 +434,7 @@ export default function GraphPage() {
               <EmptyState
                 icon={<Network size={28} strokeWidth={1.5} />}
                 title="Nothing to graph yet"
-                description="The knowledge graph is drawn from your library — import a few papers and they'll appear here, linked by their authors and tags."
+                description="The knowledge graph is drawn from your library. Import a few papers and they'll appear here, linked by their authors and tags."
                 actionLabel="Go to Library"
                 onAction={() => navigate("/library")}
               />

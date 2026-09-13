@@ -10,7 +10,7 @@ type Article = {
 
 const ARTICLES: Article[] = [
   {
-    title: "Article 1 — Definitions",
+    title: "Article 1: Definitions",
     items: [
       ["Acceptance.", '"Acceptance" means your first download, installation, access to, or use of the Software, whichever occurs first.'],
       ["Derivative Work.", '"Derivative Work" means any work based upon the Software or any portion thereof, including any modification, enhancement, translation, abridgment, condensation, expansion, or any other form in which the Software may be recast, transformed, or adapted.'],
@@ -22,7 +22,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 2 — License Grant and Scope",
+    title: "Article 2: License Grant and Scope",
     items: [
       ["Grant of License.", "Subject to your compliance with these Terms and the Open Source License, we hereby grant you a worldwide, royalty-free, non-exclusive, perpetual (subject to termination as provided herein) license to use, copy, modify, merge, publish, distribute, and sublicense the Software and Documentation, in Source Code or object code form, and to create Derivative Works, all in accordance with the terms of the Open Source License."],
       ["Open Source License Governs.", "The rights and obligations set forth in the Open Source License shall control in the event of any conflict between these Terms and the Open Source License with respect to the scope of the license grant, permitted uses, modification rights, and redistribution requirements. You agree to comply fully with all terms and conditions of the Open Source License."],
@@ -32,7 +32,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 3 — Restrictions and Prohibited Uses",
+    title: "Article 3: Restrictions and Prohibited Uses",
     items: [
       ["Compliance with Law.", "You agree to use the Software only in compliance with all applicable federal, state, and local laws and regulations, including but not limited to laws governing data protection, export control, intellectual property, and computer fraud."],
       ["Prohibited Activities.", "You shall not:", [
@@ -48,7 +48,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 4 — Intellectual Property Ownership",
+    title: "Article 4: Intellectual Property Ownership",
     items: [
       ["Ownership of Software.", "All right, title, and interest in and to the Software, including all Intellectual Property Rights therein, are and shall remain the exclusive property of Lin Xiv and its licensors. These Terms do not convey to you any ownership interest in the Software, but only a limited right to use the Software in accordance with these Terms and the Open Source License."],
       ["Contributions.", 'If you submit, provide, or otherwise make available to us any suggestions, comments, feedback, enhancements, modifications, or other contributions related to the Software ("Contributions"), you hereby grant us a worldwide, royalty-free, fully paid-up, perpetual, irrevocable, non-exclusive, transferable, and sublicensable license to use, reproduce, modify, distribute, publicly display, publicly perform, and otherwise exploit such Contributions for any purpose, including incorporation into the Software or Derivative Works, without any obligation of attribution, compensation, or accounting to you.'],
@@ -57,7 +57,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 5 — Warranties and Disclaimers",
+    title: "Article 5: Warranties and Disclaimers",
     items: [
       ["AS-IS Basis.", 'THE SOFTWARE AND DOCUMENTATION ARE PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, WE DISCLAIM ALL WARRANTIES, INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, COMPLETENESS, QUIET ENJOYMENT, AND ANY WARRANTIES ARISING OUT OF COURSE OF DEALING OR USAGE OF TRADE.'],
       ["No Guarantee of Performance.", "WE DO NOT WARRANT THAT THE SOFTWARE WILL MEET YOUR REQUIREMENTS, OPERATE WITHOUT INTERRUPTION, BE ERROR-FREE, SECURE, OR FREE FROM VIRUSES OR OTHER HARMFUL COMPONENTS. WE DO NOT WARRANT THAT DEFECTS WILL BE CORRECTED OR THAT THE SOFTWARE WILL BE COMPATIBLE WITH YOUR HARDWARE, SOFTWARE, OR SYSTEMS."],
@@ -67,7 +67,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 6 — Limitation of Liability",
+    title: "Article 6: Limitation of Liability",
     items: [
       ["Exclusion of Damages.", "TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL WE, OUR AFFILIATES, OFFICERS, DIRECTORS, EMPLOYEES, AGENTS, LICENSORS, OR SUPPLIERS BE LIABLE TO YOU OR ANY THIRD PARTY FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, PUNITIVE, OR EXEMPLARY DAMAGES, INCLUDING BUT NOT LIMITED TO DAMAGES FOR LOSS OF PROFITS, GOODWILL, USE, DATA, OR OTHER INTANGIBLE LOSSES, ARISING OUT OF OR RELATED TO YOUR USE OF OR INABILITY TO USE THE SOFTWARE, EVEN IF WE HAVE BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES."],
       ["Cap on Direct Damages.", "TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, OUR TOTAL AGGREGATE LIABILITY TO YOU FOR ANY AND ALL CLAIMS ARISING OUT OF OR RELATED TO THESE TERMS OR YOUR USE OF THE SOFTWARE, WHETHER IN CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY, OR OTHERWISE, SHALL NOT EXCEED FIFTY DOLLARS ($50.00)."],
@@ -76,7 +76,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 7 — Indemnification",
+    title: "Article 7: Indemnification",
     items: [
       ["Your Indemnity Obligation.", "You agree to indemnify, defend, and hold harmless us, our affiliates, and our respective officers, directors, employees, agents, licensors, and suppliers from and against any and all claims, liabilities, damages, losses, costs, expenses, or fees (including reasonable attorneys' fees) arising out of or related to:", [
         "Your use or misuse of the Software.",
@@ -89,7 +89,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 8 — Data Privacy and Security",
+    title: "Article 8: Data Privacy and Security",
     items: [
       ["No Collection of Personal Data.", "The Software, as distributed by us, does not collect, transmit, or store any Personal Data. However, you acknowledge that your use of the Software, including any modifications you make or third-party components you integrate, may involve the collection, processing, or storage of Personal Data."],
       ["Your Privacy Obligations.", "If you use the Software in a manner that involves the collection, processing, or storage of Personal Data, you are solely responsible for complying with all applicable data protection and privacy laws, including but not limited to the Minnesota Government Data Practices Act (Minn. Stat. Ch. 13), the Health Insurance Portability and Accountability Act (HIPAA), the California Consumer Privacy Act (CCPA), and the General Data Protection Regulation (GDPR) if applicable. You agree to implement appropriate technical and organizational measures to protect any Personal Data."],
@@ -98,7 +98,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 9 — Termination",
+    title: "Article 9: Termination",
     items: [
       ["Termination by You.", "You may terminate these Terms at any time by ceasing all use of the Software and destroying all copies of the Software in your possession or control."],
       ["Termination by Us.", "We reserve the right to terminate or suspend your rights under these Terms immediately, without notice, if you breach any provision of these Terms or the Open Source License, or if we believe that your use of the Software poses a risk to us, other users, or third parties."],
@@ -111,7 +111,7 @@ const ARTICLES: Article[] = [
     ],
   },
   {
-    title: "Article 10 — Miscellaneous",
+    title: "Article 10: Miscellaneous",
     items: [
       ["Governing Law.", "These Terms and any disputes arising out of or related to these Terms or your use of the Software shall be governed by and construed in accordance with the laws of the State of Minnesota, without regard to its conflict of law principles."],
       ["Jurisdiction and Venue.", "You agree that any action or proceeding arising out of or related to these Terms or your use of the Software shall be brought exclusively in the state or federal courts located in Hennepin County, Minnesota, and you hereby consent to the personal jurisdiction and venue of such courts."],

@@ -106,9 +106,9 @@ const SYNC_REASON_LABELS: Record<string, string | undefined> = {
   "paused": "Sync paused",
   "direction": "Skipped by sync direction",
   "revoked or awaiting key": "Access revoked or key not yet received",
-  "awaiting first sync": "The host has not answered yet — nothing to show",
+  "awaiting first sync": "The host has not answered yet, nothing to show",
   "no key for any content":
-    "Content arrived but none of it decrypts — it was published before your invite, so the host must republish it",
+    "Content arrived but none of it decrypts; it was published before your invite, so the host must republish it",
 };
 
 function humanizeReason(code: string | undefined): string {
@@ -283,7 +283,7 @@ export function ShareCard({
           {share.paused
             ? "Sync paused"
             : share.pending
-              ? "Waiting for the host — nothing has arrived yet"
+              ? "Waiting for the host, nothing has arrived yet"
               : syncedText(share.synced_at)}
           {" · "}
           {hosted ? "published from your library" : "read-only mirror"}
@@ -391,7 +391,7 @@ export function ShareCard({
                 pdfs.data.total === 1 ? "" : "s"
               }${pdfs.data.stopped ? ` (${pdfs.data.stopped})` : ""}`}
           {pdfs.data.failed.length > 0 &&
-            ` — ${pdfs.data.failed.slice(0, 3).join("; ")}${
+            `: ${pdfs.data.failed.slice(0, 3).join("; ")}${
               pdfs.data.failed.length > 3
                 ? `; and ${pdfs.data.failed.length - 3} more failed`
                 : ""

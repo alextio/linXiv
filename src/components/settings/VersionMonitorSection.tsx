@@ -116,7 +116,7 @@ export function VersionMonitorSection() {
             {checkMutation.error instanceof ApiError &&
             checkMutation.error.status === 409
               ? "A check is already running."
-              : "Version check failed — arXiv may be unreachable or rate-limiting. Try again in a minute."}
+              : "Version check failed. arXiv may be unreachable or rate-limiting. Try again in a minute."}
           </p>
         )}
         {isListError && (

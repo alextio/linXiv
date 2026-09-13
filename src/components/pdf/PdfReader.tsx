@@ -22,6 +22,8 @@ import {
   writePdfPosition,
   type PdfPosition,
 } from "../../lib/pdfPosition";
+import { pdfCanvasDpr } from "../../lib/zoom";
+import { useUiStore } from "../../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -150,6 +152,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
 
   // Key must match PaperDetailPage's annotations query so the overlay and the
   // Annotations tab share one cache entry.
+  const zoom = useUiStore((s) => s.zoom);
+
   const { data: annData } = useQuery({
     queryKey: ["annotations", sourceId, { allProjects: true }],
     queryFn: () => getAnnotations(sourceId, undefined, true),
@@ -513,6 +517,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
                   <Page
                     pageNumber={pn}
                     width={pageWidth}
+                    devicePixelRatio={pdfCanvasDpr(zoom)}
                     onRenderSuccess={() => restorePosition(pn)}
                     className="shadow-md"
                     renderTextLayer
