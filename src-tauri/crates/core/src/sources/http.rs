@@ -26,8 +26,11 @@ const NUM_RETRIES: usize = 1;
 /// Redirect-follow ceiling for the guarded GET.
 const MAX_REDIRECTS: usize = 10;
 
-pub(crate) const USER_AGENT: &str =
-    "linXiv/0.2 (+https://github.com/jakeuribe/linXiv; mailto:jake.uribe@gmail.com)";
+pub(crate) const USER_AGENT: &str = concat!(
+    "linXiv/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/linxiv-dev/linXiv)"
+);
 
 /// Base UA for the polite pools (OpenAlex, CrossRef, and arXiv key off a mailto).
 const POLITE_USER_AGENT: &str = "linXiv/1.0";
@@ -215,12 +218,16 @@ where
 /// Per arXiv's guidance, a 429 whose body says "Rate exceeded" means the API is
 /// down for everyone, not that this client tripped its own limit.
 fn ratelimit_error(body: &str) -> CoreError {
+    const NUDGE: &str = "Setting your arXiv contact email in Settings helps arXiv \
+         tell botted traffic from real users; optional, but encouraged.";
     if body.contains("Rate exceeded") {
-        CoreError::Upstream(
-            "arXiv API is temporarily unavailable for all users — retry later".into(),
-        )
+        CoreError::Upstream(format!(
+            "arXiv API is temporarily unavailable for all users, retry later. {NUDGE}"
+        ))
     } else {
-        CoreError::Upstream("arXiv returned 429 — rate limited; retry in 60s".into())
+        CoreError::Upstream(format!(
+            "arXiv returned 429, rate limited; retry in 60s. {NUDGE}"
+        ))
     }
 }
 
@@ -355,6 +362,12 @@ mod tests {
             .to_string()
             .contains("retry in 60s"));
         assert!(ratelimit_error("").to_string().contains("retry in 60s"));
+        // Both variants nudge toward setting the contact email.
+        for body in ["Rate exceeded", ""] {
+            assert!(ratelimit_error(body)
+                .to_string()
+                .contains("arXiv contact email in Settings"));
+        }
     }
 
     #[test]
