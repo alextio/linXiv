@@ -413,6 +413,26 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     });
   }
 
+  // Stable per-page Page callbacks: react-pdf's text layer wipes and rebuilds
+  // its DOM (destroying any live text selection) whenever these props change
+  // identity, so inline arrows here would rebuild every page on every render.
+  const latestPageCbs = useRef({ restorePosition, onTextLayerRendered });
+  latestPageCbs.current = { restorePosition, onTextLayerRendered };
+  const pageCbsRef = useRef(
+    new Map<number, { render: () => void; text: () => void }>(),
+  );
+  function pageCbs(pn: number) {
+    let c = pageCbsRef.current.get(pn);
+    if (!c) {
+      c = {
+        render: () => latestPageCbs.current.restorePosition(pn),
+        text: () => latestPageCbs.current.onTextLayerRendered(pn),
+      };
+      pageCbsRef.current.set(pn, c);
+    }
+    return c;
+  }
+
   // --- In-PDF find -----------------------------------------------------
 
   const matches = useMemo(
@@ -702,8 +722,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
                     pageNumber={pn}
                     width={pageWidth}
                     devicePixelRatio={pdfCanvasDpr(zoom)}
-                    onRenderSuccess={() => restorePosition(pn)}
-                    onRenderTextLayerSuccess={() => onTextLayerRendered(pn)}
+                    onRenderSuccess={pageCbs(pn).render}
+                    onRenderTextLayerSuccess={pageCbs(pn).text}
                     customTextRenderer={findTextRenderer}
                     className="shadow-md"
                     renderTextLayer
