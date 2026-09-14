@@ -43,6 +43,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     paper_repairs_table(conn)?;
     schema_migration_events_table(conn)?;
     papers_fts_rowid_key(conn)?;
+    note_lineage_fk(conn)?;
     Ok(())
 }
 
@@ -76,6 +77,20 @@ fn paper_to_reading_has_cascade_fk(conn: &Connection) -> Result<bool> {
         .collect::<rusqlite::Result<Vec<String>>>()?
         .iter()
         .any(|t| t.eq_ignore_ascii_case("PROJECT_TO_PAPER")))
+}
+
+/// Whether NOTE already carries the composite same-lineage FK: only that FK
+/// contributes a foreign_key_list row referencing PAPER from SOURCE_FK
+/// (cols 2/3 = referenced table, from-column).
+fn note_has_lineage_fk(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .prepare("PRAGMA foreign_key_list(NOTE)")?
+        .query_map([], |r| Ok((r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()?
+        .iter()
+        .any(|(table, from)| {
+            table.eq_ignore_ascii_case("PAPER") && from.eq_ignore_ascii_case("SOURCE_FK")
+        }))
 }
 
 // ── 1. PAPER_ROOTS soft-delete columns ──────────────────────────────────────
@@ -484,6 +499,23 @@ fn papers_fts_rowid_key(conn: &Connection) -> Result<()> {
     }
 }
 
+// ── 25. NOTE composite same-lineage FK ───────────────────────────────────────
+
+/// Rebuild NOTE with a deferred composite (SOURCE_FK, PAPER_ID_FK) FK to PAPER
+/// so a version pin from another lineage is DDL-refused (SQLite cannot ADD a
+/// FK; fresh installs get it from TABLE_DDL). MUST follow `note_uuid` — the
+/// copy carries NOTE_UUID. Re-runs notes_fts.sql after: the rebuild drops the
+/// NOTE triggers, and apply_tables already ran this open.
+fn note_lineage_fk(conn: &Connection) -> Result<()> {
+    if note_has_lineage_fk(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch(include_str!(
+        "../../sql/migrations/25_note_composite_lineage_fk.sql"
+    ))?;
+    Ok(conn.execute_batch(include_str!("../../sql/tables/notes_fts.sql"))?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +719,20 @@ mod tests {
                      PRIMARY KEY (PROJECT_FK, SOURCE_FK),
                      FOREIGN KEY (PROJECT_FK) REFERENCES PROJECT(PROJECT_FK) ON DELETE CASCADE,
                      FOREIGN KEY (SOURCE_FK)  REFERENCES PAPER_ROOTS(SOURCE_FK) ON DELETE CASCADE
+                 );
+                 CREATE TABLE NOTE(
+                     NOTE_SK     INTEGER NOT NULL,
+                     SOURCE_FK   INTEGER NOT NULL,
+                     PAPER_ID_FK INTEGER,
+                     PROJECT_FK  INTEGER,
+                     TITLE       TEXT,
+                     NOTE        BLOB,
+                     CREATED_AT  TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+                     UPDATED_AT  TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+                     PRIMARY KEY (NOTE_SK),
+                     FOREIGN KEY (SOURCE_FK)   REFERENCES PAPER_ROOTS(SOURCE_FK) ON DELETE CASCADE,
+                     FOREIGN KEY (PAPER_ID_FK) REFERENCES PAPER(PAPER_ID)        ON DELETE SET NULL,
+                     FOREIGN KEY (PROJECT_FK)  REFERENCES PROJECT(PROJECT_FK)
                  );",
             )
             .unwrap();
@@ -709,6 +755,19 @@ mod tests {
             foreign_key_list(&legacy, "PAPER_TO_READING"),
             "fresh vs. migrated PAPER_TO_READING must have the same FKs"
         );
+        // Pre-uuid, pre-composite-FK NOTE: the uuid migration ALTERs the column
+        // on last, the lineage rebuild recreates in canonical order — both ends
+        // must land on the fresh shape.
+        assert_eq!(
+            table_info(&fresh, "NOTE"),
+            table_info(&legacy, "NOTE"),
+            "fresh vs. migrated NOTE schema must match column-for-column"
+        );
+        assert_eq!(
+            foreign_key_list(&fresh, "NOTE"),
+            foreign_key_list(&legacy, "NOTE"),
+            "fresh vs. migrated NOTE must have the same FKs"
+        );
     }
 
     /// A DB predating SHARE_ID / NOTE_UUID / ANNOTATION_UUID gains the columns
@@ -717,9 +776,18 @@ mod tests {
     fn legacy_db_without_share_and_uuid_columns_upgrades() {
         let conn = crate::storage::db::open_in_memory().unwrap();
         // Legacy shapes without the three columns (FK clauses omitted — their
-        // referents don't exist yet, as in the dedup test above).
+        // referents don't exist yet, as in the dedup test above). PAPER_ROOTS
+        // carries the SOURCE_FK parents: the NOTE lineage-FK rebuild copies
+        // rows into a table whose root FK is enforced immediately.
         conn.execute_batch(
-            "CREATE TABLE PROJECT(
+            "CREATE TABLE PAPER_ROOTS(
+                 SOURCE_FK  INTEGER PRIMARY KEY AUTOINCREMENT,
+                 SOURCE_ID  TEXT    NOT NULL UNIQUE,
+                 CREATED_AT TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+                 UPDATED_AT TIMESTAMP NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO PAPER_ROOTS (SOURCE_FK, SOURCE_ID) VALUES (1, 'arxiv:1');
+             CREATE TABLE PROJECT(
                  PROJECT_FK      INTEGER NOT NULL,
                  NAME            TEXT    NOT NULL,
                  DESCRIPTION     TEXT    DEFAULT '',
@@ -851,6 +919,82 @@ mod tests {
             })
             .unwrap();
         assert_eq!(again.as_deref(), Some(u.as_str()));
+    }
+
+    /// The NOTE rebuild keeps every row: a valid pin survives, a cross-lineage
+    /// pin is nulled (not dropped), the composite FK then refuses new ones, and
+    /// the notes_fts triggers dropped with the old table come back immediately.
+    #[test]
+    fn note_lineage_fk_rebuild_nulls_cross_lineage_pins_and_keeps_rows() {
+        let conn = crate::storage::db::open_in_memory().unwrap();
+        crate::storage::init_db(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO PAPER_ROOTS (SOURCE_FK, SOURCE_ID) VALUES (1, 'arxiv:a'), (2, 'arxiv:b');
+             INSERT INTO PAPER (PAPER_ID, SOURCE_ID, VERSION, TITLE, SOURCE_FK) VALUES
+                 (10, 'arxiv:a', 1, 't', 1), (20, 'arxiv:b', 1, 't', 2);
+             -- Regress NOTE to the pre-composite-FK shape and seed it with a
+             -- valid pin and a cross-lineage one the old DDL accepted.
+             DROP TABLE NOTE;
+             CREATE TABLE NOTE(
+                 NOTE_SK     INTEGER NOT NULL,
+                 SOURCE_FK   INTEGER NOT NULL,
+                 PAPER_ID_FK INTEGER,
+                 PROJECT_FK  INTEGER,
+                 TITLE       TEXT,
+                 NOTE        BLOB,
+                 NOTE_UUID   TEXT,
+                 CREATED_AT  TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+                 UPDATED_AT  TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+                 PRIMARY KEY (NOTE_SK),
+                 FOREIGN KEY (SOURCE_FK)   REFERENCES PAPER_ROOTS(SOURCE_FK) ON DELETE CASCADE,
+                 FOREIGN KEY (PAPER_ID_FK) REFERENCES PAPER(PAPER_ID)        ON DELETE SET NULL,
+                 FOREIGN KEY (PROJECT_FK)  REFERENCES PROJECT(PROJECT_FK)
+             );
+             INSERT INTO NOTE (NOTE_SK, SOURCE_FK, PAPER_ID_FK, TITLE, NOTE, NOTE_UUID) VALUES
+                 (1, 1, 10, 'same lineage', 'kept pin', 'u-1'),
+                 (2, 1, 20, 'cross lineage', 'nulled pin', 'u-2');",
+        )
+        .unwrap();
+
+        crate::storage::init_db(&conn).unwrap();
+
+        let pins: Vec<(i64, Option<i64>)> = conn
+            .prepare("SELECT NOTE_SK, PAPER_ID_FK FROM NOTE ORDER BY NOTE_SK")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            pins,
+            [(1, Some(10)), (2, None)],
+            "valid pin kept, cross-lineage pin nulled, no row dropped"
+        );
+        // Future cross-lineage writers are refused at commit.
+        let err = conn
+            .execute(
+                "INSERT INTO NOTE (SOURCE_FK, PAPER_ID_FK, TITLE, NOTE, NOTE_UUID) \
+                 VALUES (1, 20, 'bad', 'pin', 'u-3')",
+                [],
+            )
+            .expect_err("a cross-lineage pin must be DDL-refused");
+        assert!(err.to_string().contains("FOREIGN KEY"), "got: {err}");
+        // The rebuild dropped the notes_fts triggers; the migration restores
+        // them in the same run — a note written NOW must reach the index.
+        conn.execute(
+            "INSERT INTO NOTE (NOTE_SK, SOURCE_FK, TITLE, NOTE, NOTE_UUID) \
+             VALUES (5, 1, 'fresh trigger', 'searchable body', 'u-5')",
+            [],
+        )
+        .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes_fts WHERE notes_fts MATCH 'searchable' AND rowid = 5",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
     }
 
     /// Old-shape papers_fts (indexed paper_id, per-version rowids) is rebuilt

@@ -16,5 +16,11 @@ CREATE TABLE IF NOT EXISTS NOTE(
     PRIMARY KEY (NOTE_SK),
     FOREIGN KEY (SOURCE_FK)   REFERENCES PAPER_ROOTS(SOURCE_FK) ON DELETE CASCADE,
     FOREIGN KEY (PAPER_ID_FK) REFERENCES PAPER(PAPER_ID)        ON DELETE SET NULL,
-    FOREIGN KEY (PROJECT_FK)  REFERENCES PROJECT(PROJECT_FK)
+    FOREIGN KEY (PROJECT_FK)  REFERENCES PROJECT(PROJECT_FK),
+    -- Same-lineage guard: a pin must name a version of the note's own root
+    -- (NULL PAPER_ID_FK passes; composite FKs ignore NULL members). Deferred
+    -- to commit: merge re-pins PAPER_ID_FK and SOURCE_FK in separate
+    -- statements. Existing installs get it via the note_lineage_fk rebuild.
+    FOREIGN KEY (PAPER_ID_FK, SOURCE_FK) REFERENCES PAPER(PAPER_ID, SOURCE_FK)
+        DEFERRABLE INITIALLY DEFERRED
 );
