@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS SCHEMA_MIGRATION_EVENTS (
+    EVENT_FK       INTEGER   PRIMARY KEY AUTOINCREMENT,
+    FROM_VERSION   TEXT,
+    TARGET_VERSION TEXT      NOT NULL,
+    STATUS         TEXT      NOT NULL CHECK (STATUS IN ('succeeded', 'failed-restored', 'failed-unrestored')),
+    REPORT_PATH    TEXT,
+    CREATED_AT     TIMESTAMP NOT NULL DEFAULT (datetime('now'))
+);
