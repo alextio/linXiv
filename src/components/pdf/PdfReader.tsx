@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Document, Page, pdfjs } from "react-pdf";
+import { Document, Page, pdfjs, type DocumentProps } from "react-pdf";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Spinner } from "../ui/spinner";
 import {
@@ -23,6 +24,16 @@ import {
   type PdfPosition,
 } from "../../lib/pdfPosition";
 import { pdfCanvasDpr } from "../../lib/zoom";
+import {
+  PDF_FIND_EVENT,
+  buildPageIndex,
+  escapeHtml,
+  findMatches,
+  highlightHtml,
+  rangesForItem,
+  type HighlightRange,
+  type PageIndex,
+} from "../../lib/pdfFind";
 import { useUiStore } from "../../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -65,6 +76,8 @@ function estPageHeight(width: number) {
   return width ? Math.round((width - PAGE_INSET) * 1.3) : 800;
 }
 
+type LoadedPdf = Parameters<NonNullable<DocumentProps["onLoadSuccess"]>>[0];
+
 interface SelToolbar {
   top: number;
   left: number;
@@ -89,6 +102,11 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   const [popup, setPopup] = useState<ActivePopup | null>(null);
   const [draft, setDraft] = useState("");
   const [selError, setSelError] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCur, setFindCur] = useState(0);
+  // One PageIndex per page, extracted lazily the first time the bar opens.
+  const [pageIndexes, setPageIndexes] = useState<PageIndex[] | null>(null);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pagesWrapRef = useRef<HTMLDivElement | null>(null);
@@ -102,6 +120,10 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   const positionTimerRef = useRef<number | null>(null);
   const pendingPositionRef = useRef<PdfPosition | null>(null);
   const positionReadyRef = useRef(false);
+  const pdfDocRef = useRef<LoadedPdf | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  // Armed on a find jump; the target page's text-layer render completes it.
+  const findScrollPendingRef = useRef(false);
 
   const capturePosition = useCallback(
     (scroller: HTMLDivElement): PdfPosition | null => {
@@ -343,7 +365,10 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     if (popup) setPopup(null);
   }
 
-  function onDocumentLoad(loadedPages: number) {
+  function onDocumentLoad(pdf: LoadedPdf) {
+    const loadedPages = pdf.numPages;
+    pdfDocRef.current = pdf;
+    setPageIndexes(null);
     setNumPages(loadedPages);
     const pending = pendingPositionRef.current;
     if (!pending) {
@@ -370,6 +395,123 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       positionReadyRef.current = true;
     });
   }
+
+  // --- In-PDF find -----------------------------------------------------
+
+  const matches = useMemo(
+    () => (findOpen && pageIndexes ? findMatches(findQuery, pageIndexes) : []),
+    [findOpen, findQuery, pageIndexes],
+  );
+  // Clamped: a query edit can shrink the match list under findCur.
+  const cur = Math.min(findCur, Math.max(matches.length - 1, 0));
+
+  // Shortcut-driven open (lib/shortcuts.ts dispatches PDF_FIND_EVENT). Focus
+  // and select so a repeat Ctrl-F restarts the query.
+  useEffect(() => {
+    const onFind = () => {
+      setFindOpen(true);
+      requestAnimationFrame(() => {
+        findInputRef.current?.focus();
+        findInputRef.current?.select();
+      });
+    };
+    window.addEventListener(PDF_FIND_EVENT, onFind);
+    return () => window.removeEventListener(PDF_FIND_EVENT, onFind);
+  }, []);
+
+  // Extract every page's text once per document, on first open. Item order
+  // matches customTextRenderer's items (both come from getTextContent()).
+  useEffect(() => {
+    const pdf = pdfDocRef.current;
+    if (!findOpen || pageIndexes || !pdf) return;
+    let cancelled = false;
+    (async () => {
+      const idx: PageIndex[] = [];
+      try {
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const content = await (await pdf.getPage(i)).getTextContent();
+          idx.push(
+            buildPageIndex(content.items.map((it) => ("str" in it ? it.str : ""))),
+          );
+        }
+      } catch {
+        // keep the partial index; find covers the pages that extracted
+      }
+      if (!cancelled && pdfDocRef.current === pdf) setPageIndexes(idx);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [findOpen, pageIndexes, numPages]);
+
+  const scrollToCurrentMark = useCallback(() => {
+    const el = scrollerRef.current?.querySelector(".pdf-find-current");
+    if (!el) return false;
+    el.scrollIntoView({ block: "center" });
+    findScrollPendingRef.current = false;
+    return true;
+  }, []);
+
+  // A match jump only mounts the right page and arms the pending flag; the
+  // mark exists once that page's text layer re-renders, so
+  // onTextLayerRendered finishes the scroll.
+  useEffect(() => {
+    if (!findOpen || matches.length === 0) return;
+    findScrollPendingRef.current = true;
+    const m = matches[cur];
+    const slot =
+      scrollerRef.current?.querySelectorAll<HTMLElement>(".pdf-page-slot")[m.page - 1];
+    if (!slot?.querySelector(".react-pdf__Page")) goToPage(m.page);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findOpen, matches, cur]);
+
+  function onTextLayerRendered(pn: number) {
+    if (!findScrollPendingRef.current) return;
+    if (matches[cur]?.page === pn) scrollToCurrentMark();
+  }
+
+  function gotoMatch(i: number) {
+    if (matches.length === 0) return;
+    const next = ((i % matches.length) + matches.length) % matches.length;
+    if (next === cur) {
+      // wrapped onto itself (single match): still jump back to it
+      findScrollPendingRef.current = true;
+      if (!scrollToCurrentMark()) goToPage(matches[cur].page);
+      return;
+    }
+    setFindCur(next);
+  }
+
+  // Per-page match ranges with the current-match flag baked in.
+  const findRangesByPage = useMemo(() => {
+    const byPage = new Map<number, HighlightRange[]>();
+    matches.forEach((m, i) => {
+      const list = byPage.get(m.page) ?? [];
+      list.push({ start: m.start, end: m.end, current: i === cur });
+      byPage.set(m.page, list);
+    });
+    return byPage;
+  }, [matches, cur]);
+
+  // Wraps each text item's matched slices in <mark> (react-pdf sanitizes the
+  // returned HTML); undefined when idle so the text layer renders plainly.
+  const findTextRenderer = useMemo(() => {
+    if (!findOpen || !pageIndexes || findRangesByPage.size === 0) return undefined;
+    return ({
+      pageNumber,
+      itemIndex,
+      str,
+    }: {
+      pageNumber: number;
+      itemIndex: number;
+      str: string;
+    }) => {
+      const ranges = findRangesByPage.get(pageNumber);
+      const start = pageIndexes[pageNumber - 1]?.starts[itemIndex];
+      if (!ranges || start === undefined) return escapeHtml(str);
+      return highlightHtml(str, rangesForItem(start, str.length, ranges));
+    };
+  }, [findOpen, pageIndexes, findRangesByPage]);
 
   // On a real text selection inside a page, put the color picker at the
   // selection's end so one click commits the highlight.
@@ -471,7 +613,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       >
         <Document
           file={file}
-          onLoadSuccess={(pdf) => onDocumentLoad(pdf.numPages)}
+          onLoadSuccess={onDocumentLoad}
           loading={
             <div className="flex items-center justify-center gap-2 py-16 text-white/60 text-sm">
               <Spinner size={16} /> Loading PDF…
@@ -519,6 +661,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
                     width={pageWidth}
                     devicePixelRatio={pdfCanvasDpr(zoom)}
                     onRenderSuccess={() => restorePosition(pn)}
+                    onRenderTextLayerSuccess={() => onTextLayerRendered(pn)}
+                    customTextRenderer={findTextRenderer}
                     className="shadow-md"
                     renderTextLayer
                     renderAnnotationLayer
@@ -533,6 +677,63 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       </div>
 
       <PagePill page={page} total={numPages} onGo={goToPage} />
+
+      {findOpen && (
+        <div
+          className="absolute top-3 right-5 z-30 flex items-center gap-1.5 rounded-md bg-panel border border-border shadow-card px-2 py-1.5"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              setFindOpen(false);
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              gotoMatch(cur + (e.shiftKey ? -1 : 1));
+            }
+          }}
+        >
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            onChange={(e) => {
+              setFindQuery(e.target.value);
+              setFindCur(0);
+            }}
+            placeholder="Find in PDF"
+            autoFocus
+            className="w-44 bg-transparent text-xs text-text placeholder:text-muted focus:outline-none"
+          />
+          <span className="font-mono text-xs text-muted tabular-nums whitespace-nowrap">
+            {findQuery === ""
+              ? ""
+              : pageIndexes === null
+                ? "…"
+                : `${matches.length === 0 ? 0 : cur + 1}/${matches.length}`}
+          </span>
+          <button
+            aria-label="Previous match"
+            disabled={matches.length === 0}
+            onClick={() => gotoMatch(cur - 1)}
+            className="text-muted hover:text-text disabled:opacity-40 disabled:pointer-events-none p-0.5"
+          >
+            <ChevronUp size={14} />
+          </button>
+          <button
+            aria-label="Next match"
+            disabled={matches.length === 0}
+            onClick={() => gotoMatch(cur + 1)}
+            className="text-muted hover:text-text disabled:opacity-40 disabled:pointer-events-none p-0.5"
+          >
+            <ChevronDown size={14} />
+          </button>
+          <button
+            aria-label="Close find bar"
+            onClick={() => setFindOpen(false)}
+            className="text-muted hover:text-text p-0.5"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {selBar && (
         <div

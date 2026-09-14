@@ -195,3 +195,15 @@ mjx-container[jax="SVG"] > svg {
   outline: 0 !important;
 }
 
+/* ── PDF find-bar match highlights (PdfReader customTextRenderer) ─────────── */
+/* The text layer's glyphs are transparent (the canvas draws the visible ones),
+   so the mark must keep them transparent and only paint a background. */
+.pdf-find-mark {
+  background: rgba(255, 213, 79, 0.45);
+  color: transparent;
+  border-radius: 2px;
+}
+.pdf-find-current {
+  background: rgba(255, 138, 43, 0.65);
+}
+
