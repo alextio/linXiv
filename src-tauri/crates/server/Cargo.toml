@@ -82,6 +82,6 @@ wiremock = "0.6"
 iroh = "1.0.2"
 # Mints the empty placeholder doc an offline join leaves behind; same version
 # linxiv-share builds against.
-automerge = "0.10.0"
+automerge = "0.11.0"
 tempfile = "3"
 

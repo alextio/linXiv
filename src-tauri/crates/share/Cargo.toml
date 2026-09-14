@@ -20,9 +20,9 @@ linxiv-core = { path = "../core" }
 linxiv-p2p = { path = "../p2p", version = "0.2.0" }
 # Pinned to core's version so the `Connection` type unifies to one crate instance.
 rusqlite = "0.40"
-# CRDT engine: autosurgeon 0.12 derives Reconcile/Hydrate and requires automerge ^0.10.
-automerge = "0.10.0"
-autosurgeon = "0.12.0"
+# CRDT engine: autosurgeon 0.13 derives Reconcile/Hydrate and requires automerge ^0.11.
+automerge = "0.11.0"
+autosurgeon = "0.13.0"
 serde = { version = "1", features = ["derive"] }
 # SharedPaper::to_summary_value; preserve_order pins the projection's key order.
 serde_json = { version = "1", features = ["preserve_order"] }
