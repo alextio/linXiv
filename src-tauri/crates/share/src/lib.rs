@@ -1,27 +1,10 @@
-//! linxiv-share — Phase-0 quarantined CRDT store for "shared projects".
-//!
-//! A plain shared project is a read-only snapshot of one canonical project's subgraph
-//! (project row + its papers/authors/tags + project notes + project tags), held
-//! as an automerge document so a later phase can sync it peer-to-peer.
-//! Publishing goes through core service APIs; its one canonical write is
-//! `project::ensure_share_id` (persist the share uuid on first publish).
-//! The documents are the whole store — one `<share_id>.automerge` file per
-//! shared project under a share directory.
-//!
-//! The share directory is injected (`ShareStore::new(path)`); production resolves
-//! it as `config::data_dir()/share`. Phase 1 adds a one-way iroh transport (see
-//! `transport`) that serves every locally-published top-level doc to any peer
-//! that knows its id, quarantining `received/` mirrors via an existence-based
-//! access check. Plain shares carry no per-share secret or capability.
-//! With the `sync-beelay` feature, e2ee shares live under `share/e2ee/` and
-//! sync over beelay with capability-based membership via keyhive.
-//!
-//! ## Import (reader leg)
-//! `import_shared_project` is a second, additive-only write path that merges a
-//! received `SharedProject` into the canonical DB: notes and annotations match
-//! by uuid, papers by source_id, the project by SHARE_ID (created when absent).
-//! NOTE: Remote deletions are not propagated — the import surface is
-//! append+update only.
+//! linxiv-share — quarantined CRDT store for shared projects: one automerge doc
+//! per share (`<share_id>.automerge`) under an injected share dir. Publishing's
+//! one canonical write is `project::ensure_share_id`. Plain shares carry no
+//! per-share secret; e2ee shares (`sync-beelay`) live in its `e2ee/` subdir with
+//! keyhive membership. Import is additive+update only; the destructive sibling
+//! is `apply_removals` (deletion propagation + restore). `save` stamps every
+//! change with the pinned device actor, so `doc_history` answers who/what/when.
 
 mod model;
 mod transport;
@@ -44,15 +27,50 @@ use linxiv_core::service::{
 };
 
 pub use linxiv_p2p::CustomRelay;
-pub use model::{SharedAnnotation, SharedNote, SharedPaper, SharedProject, SharedSummary};
+pub use model::{
+    MemberMeta, SharedAnnotation, SharedNote, SharedPaper, SharedProject, SharedSummary,
+};
+#[cfg(feature = "sync-beelay")]
+pub use transport::{
+    doc_admin_marker, doc_member_meta, E2eeSyncOutcome, MemberId, ProjectInvite, Role,
+};
 #[cfg(feature = "sync-beelay")]
 pub use transport::{e2ee_dir, e2ee_received_dir, member_id_from_hex, member_id_hex};
 pub use transport::{received_dir, valid_share_id, ShareNode, ShareTicket, ALPN};
-#[cfg(feature = "sync-beelay")]
-pub use transport::{E2eeSyncOutcome, MemberId, ProjectInvite, Role};
 
 const SHARE_EXT: &str = "automerge";
 const MAX_SHARED_TEXT: usize = 256 * 1024;
+const MAX_SHARED_ITEMS: usize = 10_000;
+const MAX_SOURCE_ID: usize = 512;
+
+// ── device actor (attribution) ──────────────────────────────────────────────
+
+static DEVICE_ACTOR: std::sync::OnceLock<automerge::ActorId> = std::sync::OnceLock::new();
+
+/// Load-or-mint the persistent device actor (`<data_dir>/device_actor`, hex) and
+/// pin it process-wide; [`save`] stamps every change with it. First call wins;
+/// returns the pinned hex either way.
+pub fn init_device_actor(data_dir: &Path) -> std::io::Result<String> {
+    let path = data_dir.join("device_actor");
+    let stored = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| automerge::ActorId::try_from(s.trim()).ok());
+    let actor = match stored {
+        Some(a) => a,
+        None => {
+            let a = automerge::ActorId::random();
+            std::fs::create_dir_all(data_dir)?;
+            std::fs::write(&path, a.to_hex_string())?;
+            a
+        }
+    };
+    Ok(DEVICE_ACTOR.get_or_init(|| actor).to_hex_string())
+}
+
+/// The pinned device actor (hex), if [`init_device_actor`] has run.
+pub fn device_actor_hex() -> Option<String> {
+    DEVICE_ACTOR.get().map(|a| a.to_hex_string())
+}
 
 fn truncate_text(s: &str) -> String {
     if s.len() <= MAX_SHARED_TEXT {
@@ -72,7 +90,7 @@ fn truncate_text(s: &str) -> String {
     }
 }
 
-/// Lowercase hyphenated uuid form (8-4-4-4-12 hex) — the form core mints and stores.
+/// Lowercase hyphenated uuid (8-4-4-4-12 hex) — the form core mints and stores.
 fn canonical_uuid(s: &str) -> bool {
     s.len() == 36
         && s.bytes().enumerate().all(|(i, b)| match i {
@@ -110,9 +128,8 @@ pub type Result<T> = std::result::Result<T, ShareError>;
 
 // ── canonical → CRDT projection ─────────────────────────────────────────────
 
-/// Gather a canonical project's subgraph and project it onto the CRDT model.
-/// Missing project → `ShareError::NotFound`. The one canonical write is
-/// `project::ensure_share_id`, which persists the share uuid on first publish.
+/// Gather a canonical project's subgraph onto the CRDT model; missing project →
+/// `ShareError::NotFound`. The one canonical write is `project::ensure_share_id`.
 pub fn build_shared_project(conn: &Connection, project_id: i64) -> Result<SharedProject> {
     let project = project_svc::get(
         conn,
@@ -122,10 +139,34 @@ pub fn build_shared_project(conn: &Connection, project_id: i64) -> Result<Shared
     )?
     .ok_or_else(|| ShareError::NotFound(project_id.to_string()))?;
     let share_id = project_svc::ensure_share_id(conn, project_id)?;
+    gather_project(conn, project_id, project, share_id)
+}
 
-    // Batched: this runs once per shared project on every background sync tick,
-    // so the per-paper/per-note/per-annotation lookups it replaces were the
-    // hottest N+1 in the app.
+/// Same gathering under a caller-chosen doc id, no share-id mint — the journal
+/// snapshots untrashed projects without marking them share-linked.
+pub fn build_project_snapshot(
+    conn: &Connection,
+    project_id: i64,
+    doc_id: String,
+) -> Result<SharedProject> {
+    let project = project_svc::get(
+        conn,
+        &project_svc::Project {
+            project_fk: Some(project_id),
+        },
+    )?
+    .ok_or_else(|| ShareError::NotFound(project_id.to_string()))?;
+    gather_project(conn, project_id, project, doc_id)
+}
+
+fn gather_project(
+    conn: &Connection,
+    project_id: i64,
+    project: linxiv_core::models::ProjectDetails,
+    share_id: String,
+) -> Result<SharedProject> {
+    // Batched: runs per project on every journal pass and share-sync tick, so
+    // the per-paper/note/annotation lookups it replaces were the hottest N+1.
     let details = paper_svc::get_by_source_fks(conn, &project.source_fks)?;
     let paper_ids: Vec<i64> = details.iter().map(|p| p.paper_id).collect();
     let mut orcids = author_svc::paper_author_orcids(conn, &paper_ids)?;
@@ -169,7 +210,7 @@ pub fn build_shared_project(conn: &Connection, project_id: i64) -> Result<Shared
 
     let mut notes = Vec::new();
     for n in project_notes {
-        // Skip notes whose source_id no longer resolves (mirrors the annotation loop).
+        // Skip notes whose source_id no longer resolves (export_import parity).
         let Some(paper_source_id) = source_ids.get(&n.source_fk) else {
             continue;
         };
@@ -185,7 +226,7 @@ pub fn build_shared_project(conn: &Connection, project_id: i64) -> Result<Shared
 
     let mut annotations = Vec::new();
     for a in project_anns {
-        // Skip annotations whose source_id no longer resolves (mirrors build_manifest).
+        // Unresolved source_id → skip (export_import parity).
         let Some(paper_source_id) = source_ids.get(&a.source_fk) else {
             continue;
         };
@@ -241,11 +282,10 @@ fn paper_meta(p: &SharedPaper) -> PaperMetadata {
     }
 }
 
-/// Merge a shared project into the canonical DB — additive + update only:
-/// notes/annotations match by uuid, papers by source_id, the project by
-/// SHARE_ID (created and linked when absent). Returns the linked project_fk.
-// ponytail: no origin tracking, so remote deletions never propagate; upgrade
-// when W4 editors exist.
+/// Merge a shared project into the canonical DB, additive + update only: notes
+/// and annotations match by uuid, papers by source_id, the project by SHARE_ID
+/// (created when absent). Remote deletions go through [`apply_removals`], driven
+/// by the sync legs holding a prior + fresh mirror.
 pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Result<i64> {
     if !canonical_uuid(&sp.share_id) {
         return Err(ShareError::Crdt(format!(
@@ -253,7 +293,6 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
             sp.share_id
         )));
     }
-    const MAX_SHARED_ITEMS: usize = 10_000;
     if sp.papers.len() > MAX_SHARED_ITEMS
         || sp.notes.len() > MAX_SHARED_ITEMS
         || sp.annotations.len() > MAX_SHARED_ITEMS
@@ -282,7 +321,7 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
             }
             let new_name = truncate_text(&sp.name);
             let new_desc = truncate_text(&sp.description);
-            // Absent/out-of-range remote color maps to None = "no change" in ProjectUpdateIn.
+            // None = ProjectUpdateIn's "no change": absent, out-of-range, or same.
             let color = sp
                 .color
                 .and_then(|c| i32::try_from(c).ok())
@@ -327,12 +366,26 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
             fk
         }
     };
+    apply_content(conn, sp, Some(project_fk), false, false)?;
+    Ok(project_fk)
+}
 
+/// Additive apply shared by import and restore: papers created/tag-merged (+
+/// linked when scoped to a project), notes/annotations upserted by uuid.
+/// `untrash` restores locally-trashed papers instead of skipping them (library
+/// restore); imports keep "a trashed paper stays trashed". `force` makes the
+/// snapshot authoritative for note/annotation text, reverting edits made after
+/// the restore point that import's local-newer guard would keep.
+pub fn apply_content(
+    conn: &mut Connection,
+    sp: &SharedProject,
+    project_fk: Option<i64>,
+    untrash: bool,
+    force: bool,
+) -> Result<()> {
     let mut linked: Vec<String> = Vec::new();
-    const MAX_SOURCE_ID: usize = 512;
-    // Deleted/known status is resolved in two bulk queries up front instead of
-    // two queries per paper; nothing in the loop trashes papers, and `known`
-    // is kept current across duplicate source_ids by inserting after a save.
+    // Two bulk queries up front instead of two per paper. Nothing in the loop
+    // trashes papers, and each save inserts into `known`, so dupes stay current.
     let candidate_ids: Vec<String> = sp
         .papers
         .iter()
@@ -354,13 +407,15 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
             );
             continue;
         }
-        // A locally-trashed paper stays trashed.
         if trashed.contains(&p.source_id) {
-            continue;
+            if !untrash {
+                continue;
+            }
+            paper_svc::restore(conn, &paper_svc::PaperRef::source(p.source_id.clone()))?;
         }
         if !known.contains(&p.source_id) {
-            // Metadata writes apply only to papers not already in the DB.
-            // This also creates the paper root, so linking below resolves.
+            // Not in DB — `known` omits trashed, so restores land here too.
+            // Creates the paper root, so linking below resolves.
             paper_svc::save_paper_metadata(conn, &paper_meta(p), None)?;
             known.insert(p.source_id.clone());
         } else if !p.tags.is_empty() {
@@ -369,29 +424,27 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
         }
         linked.push(p.source_id.clone());
     }
-    if !linked.is_empty() {
-        project_svc::link_imported(conn, project_fk, &linked)?;
+    if let Some(fk) = project_fk {
+        if !linked.is_empty() {
+            project_svc::link_imported(conn, fk, &linked)?;
+        }
     }
     let linked: std::collections::HashSet<&str> = linked.iter().map(String::as_str).collect();
 
-    let existing_notes = note_svc::get_many(
-        conn,
-        &note_svc::Notes {
-            project_fk: Some(project_fk),
-            ..Default::default()
-        },
-    )?;
+    let existing_notes = scoped_notes(conn, project_fk)?;
     let notes_by_uuid: std::collections::HashMap<&str, _> = existing_notes
         .iter()
         .map(|e| (e.uuid.as_str(), e))
         .collect();
     for n in sp.notes.iter().take(MAX_SHARED_ITEMS) {
         if let Some(e) = notes_by_uuid.get(n.uuid.as_str()) {
-            // Skip when the local row was edited more recently than the remote entry.
-            let local_newer = match (e.updated_at.map(|t| t.to_string()), &n.updated_at) {
-                (Some(local), Some(remote)) => &local > remote,
-                _ => false,
-            };
+            // Skip when the local row is newer than the remote entry — unless
+            // the snapshot is authoritative (restore).
+            let local_newer = !force
+                && match (e.updated_at.map(|t| t.to_string()), &n.updated_at) {
+                    (Some(local), Some(remote)) => &local > remote,
+                    _ => false,
+                };
             if local_newer {
                 continue;
             }
@@ -437,29 +490,24 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
                     title: truncate_text(&n.title),
                     content: truncate_text(&n.body),
                     paper_id: None,
-                    project_fk: Some(project_fk),
+                    project_fk,
                     uuid: Some(n.uuid.clone()),
                 },
             )?;
         }
     }
 
-    let existing_anns = annotation_svc::get_many(
-        conn,
-        &annotation_svc::Annotations {
-            project_fk: Some(project_fk),
-            ..Default::default()
-        },
-    )?;
+    let existing_anns = scoped_annotations(conn, project_fk)?;
     let anns_by_uuid: std::collections::HashMap<&str, _> =
         existing_anns.iter().map(|e| (e.uuid.as_str(), e)).collect();
     for a in sp.annotations.iter().take(MAX_SHARED_ITEMS) {
         if let Some(e) = anns_by_uuid.get(a.uuid.as_str()) {
-            // Skip when the local row was edited more recently than the remote entry.
-            let local_newer = match (e.updated_at.map(|t| t.to_string()), &a.updated_at) {
-                (Some(local), Some(remote)) => &local > remote,
-                _ => false,
-            };
+            // Skip when the local row is newer than the remote entry.
+            let local_newer = !force
+                && match (e.updated_at.map(|t| t.to_string()), &a.updated_at) {
+                    (Some(local), Some(remote)) => &local > remote,
+                    _ => false,
+                };
             if local_newer {
                 continue;
             }
@@ -489,7 +537,7 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
                 );
                 continue;
             }
-            // Skip-not-fail on a bad anchor or an unlinked paper (export_import parity).
+            // Bad anchor or unlinked paper: skip, don't fail (export_import).
             if validate_anchor(&a.anchor).is_err() || !linked.contains(a.paper_source_id.as_str()) {
                 continue;
             }
@@ -500,13 +548,150 @@ pub fn import_shared_project(conn: &mut Connection, sp: &SharedProject) -> Resul
                     source_fk,
                     anchor: a.anchor.clone(),
                     comment: truncate_text(&a.comment),
-                    project_fk: Some(project_fk),
+                    project_fk,
                     uuid: Some(a.uuid.clone()),
                 },
             )?;
         }
     }
-    Ok(project_fk)
+    Ok(())
+}
+
+/// Notes in scope: a project's notes, or (None) the library's project-less notes.
+fn scoped_notes(
+    conn: &Connection,
+    project_fk: Option<i64>,
+) -> Result<Vec<linxiv_core::models::NoteDetails>> {
+    match project_fk {
+        Some(fk) => Ok(note_svc::get_many(
+            conn,
+            &note_svc::Notes {
+                project_fk: Some(fk),
+                ..Default::default()
+            },
+        )?),
+        None => {
+            let mut all = note_svc::list_all(conn)?;
+            all.retain(|n| n.project_id.is_none());
+            Ok(all)
+        }
+    }
+}
+
+/// Annotations in scope: same rule as [`scoped_notes`].
+fn scoped_annotations(
+    conn: &Connection,
+    project_fk: Option<i64>,
+) -> Result<Vec<linxiv_core::models::AnnotationDetails>> {
+    match project_fk {
+        Some(fk) => Ok(annotation_svc::get_many(
+            conn,
+            &annotation_svc::Annotations {
+                project_fk: Some(fk),
+                ..Default::default()
+            },
+        )?),
+        None => {
+            let mut all = annotation_svc::list_all(conn)?;
+            all.retain(|a| a.project_id.is_none());
+            Ok(all)
+        }
+    }
+}
+
+/// What a destructive apply removed — sync logs and restore receipts surface it.
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct RemovalOutcome {
+    pub papers: usize,
+    pub notes: usize,
+    pub annotations: usize,
+    pub tags: usize,
+}
+
+impl RemovalOutcome {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Destructive sibling of the additive import: remove what `fresh` lost relative
+/// to `prior`. Project scope unlinks papers and subtracts project tags; library
+/// scope (None) trashes them. Notes/annotations delete by uuid within the scope.
+/// Local-only additions (never in `prior`) are untouched.
+pub fn apply_removals(
+    conn: &mut Connection,
+    prior: &SharedProject,
+    fresh: &SharedProject,
+    project_fk: Option<i64>,
+) -> Result<RemovalOutcome> {
+    let mut out = RemovalOutcome::default();
+
+    let fresh_papers: std::collections::HashSet<&str> =
+        fresh.papers.iter().map(|p| p.source_id.as_str()).collect();
+    let removed_papers: Vec<String> = prior
+        .papers
+        .iter()
+        .filter(|p| !p.source_id.is_empty() && !fresh_papers.contains(p.source_id.as_str()))
+        .map(|p| p.source_id.clone())
+        .collect();
+    match project_fk {
+        Some(fk) => {
+            out.papers = removed_papers.len();
+            if !removed_papers.is_empty() {
+                // Only resolved ids count: one the import skipped isn't here.
+                let failed = project_svc::remove_papers(conn, fk, &removed_papers)?;
+                out.papers -= failed.len();
+            }
+            let removed_tags: Vec<String> = prior
+                .tags
+                .iter()
+                .filter(|t| !fresh.tags.contains(t))
+                .cloned()
+                .collect();
+            out.tags = removed_tags.len();
+            if !removed_tags.is_empty() {
+                project_svc::remove_project_tags(conn, fk, &removed_tags)?;
+            }
+        }
+        None => {
+            let resolved: std::collections::HashSet<String> =
+                paper_svc::existing_source_ids(conn, &removed_papers)?
+                    .into_iter()
+                    .collect();
+            for sid in &removed_papers {
+                paper_svc::delete(conn, &paper_svc::PaperRef::source(sid.clone()))?;
+            }
+            out.papers = resolved.len();
+        }
+    }
+
+    let fresh_notes: std::collections::HashSet<&str> =
+        fresh.notes.iter().map(|n| n.uuid.as_str()).collect();
+    let existing_notes = scoped_notes(conn, project_fk)?;
+    for e in &existing_notes {
+        let in_prior = prior.notes.iter().any(|n| n.uuid == e.uuid);
+        if in_prior && !fresh_notes.contains(e.uuid.as_str()) {
+            note_svc::delete(
+                conn,
+                &note_svc::Note {
+                    note_id: Some(e.note_id),
+                },
+            )?;
+            out.notes += 1;
+        }
+    }
+
+    let fresh_anns: std::collections::HashSet<&str> =
+        fresh.annotations.iter().map(|a| a.uuid.as_str()).collect();
+    let existing_anns = scoped_annotations(conn, project_fk)?;
+    for e in &existing_anns {
+        let in_prior = prior.annotations.iter().any(|a| a.uuid == e.uuid);
+        if in_prior && !fresh_anns.contains(e.uuid.as_str()) {
+            annotation_svc::delete(conn, e.annotation_id)?;
+            out.annotations += 1;
+        }
+    }
+    Ok(out)
 }
 
 // ── persistence (the store) ─────────────────────────────────────────────────
@@ -520,12 +705,24 @@ fn crdt<E: std::fmt::Display>(e: E) -> ShareError {
     ShareError::Crdt(e.to_string())
 }
 
-/// Reconcile `sp` into `<share_id>.automerge`, EVOLVING the existing doc when one
-/// is on disk (so republish extends CRDT history instead of rebuilding it); a
-/// missing or unloadable doc falls back to a fresh one (corrupt-skip spirit).
-/// Returns the reconciled doc so callers can register it in the p2p registry
-/// without re-reading and re-parsing the file just written.
+/// Reconcile `sp` into `<share_id>.automerge`: republish extends the on-disk
+/// doc's history, missing/unloadable → fresh. Returns it for registry reuse.
 pub fn save(share_dir: &Path, sp: &SharedProject) -> Result<AutoCommit> {
+    save_with(share_dir, sp, DEVICE_ACTOR.get().cloned())
+}
+
+/// [`save`] stamped as `actor_hex` instead of this device's actor — e.g. an
+/// authenticated remote member's endpoint id, for writes made on their behalf.
+pub fn save_as(share_dir: &Path, sp: &SharedProject, actor_hex: &str) -> Result<AutoCommit> {
+    let actor = automerge::ActorId::try_from(actor_hex).map_err(crdt)?;
+    save_with(share_dir, sp, Some(actor))
+}
+
+fn save_with(
+    share_dir: &Path,
+    sp: &SharedProject,
+    actor: Option<automerge::ActorId>,
+) -> Result<AutoCommit> {
     std::fs::create_dir_all(share_dir)?;
     let final_path = doc_path(share_dir, &sp.share_id);
     let mut doc = std::fs::read(&final_path)
@@ -533,8 +730,17 @@ pub fn save(share_dir: &Path, sp: &SharedProject) -> Result<AutoCommit> {
         .and_then(|bytes| AutoCommit::load(&bytes).ok())
         .unwrap_or_default();
     let before = doc.get_heads();
+    if let Some(actor) = actor {
+        doc.set_actor(actor);
+    }
     autosurgeon::reconcile(&mut doc, sp).map_err(crdt)?;
-    // No-op reconcile (heads unchanged) with the file already on disk: skip the write.
+    // Stamp the change with wall-clock time (automerge's default is 0) so
+    // history is dated. An op-less reconcile commits to nothing, so the
+    // no-op skip below still holds.
+    doc.commit_with(
+        automerge::transaction::CommitOptions::default().with_time(chrono::Utc::now().timestamp()),
+    );
+    // No-op reconcile (heads unchanged) and the file is on disk: skip the write.
     if doc.get_heads() == before && final_path.is_file() {
         return Ok(doc);
     }
@@ -545,9 +751,9 @@ pub fn save(share_dir: &Path, sp: &SharedProject) -> Result<AutoCommit> {
     Ok(doc)
 }
 
-/// Load `<share_id>.automerge` and hydrate it back into a `SharedProject`.
-/// Missing file, or a doc with no content yet → `ShareError::NotFound`.
-pub fn load(share_dir: &Path, share_id: &str) -> Result<SharedProject> {
+/// Load `<share_id>.automerge` as a doc. Missing file, or a doc with no content
+/// yet → `ShareError::NotFound`.
+fn load_doc(share_dir: &Path, share_id: &str) -> Result<AutoCommit> {
     let bytes = match std::fs::read(doc_path(share_dir, share_id)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -556,13 +762,70 @@ pub fn load(share_dir: &Path, share_id: &str) -> Result<SharedProject> {
         Err(e) => return Err(e.into()),
     };
     let mut doc = AutoCommit::load(&bytes).map_err(crdt)?;
-    // An empty doc has none of the keys hydrate requires, so hydrating it fails
-    // with "unexpected None". E2ee mirrors are written as empty placeholders
-    // before the first sync lands; that is "nothing here yet", not a CRDT fault.
+    // Hydrating an empty doc fails with "unexpected None", but an e2ee mirror
+    // is an empty placeholder until its first sync: nothing yet, not a fault.
     if doc.get_heads().is_empty() {
         return Err(ShareError::NotFound(share_id.to_string()));
     }
-    autosurgeon::hydrate(&doc).map_err(crdt)
+    Ok(doc)
+}
+
+/// Load `<share_id>.automerge` and hydrate it back into a `SharedProject`.
+pub fn load(share_dir: &Path, share_id: &str) -> Result<SharedProject> {
+    autosurgeon::hydrate(&load_doc(share_dir, share_id)?).map_err(crdt)
+}
+
+// ── history (the per-change "heavyweight" summary) ──────────────────────────
+
+/// One change's metadata: who (actor), when (unix seconds), and its place in
+/// the graph (hash + deps).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocChange {
+    pub hash: String,
+    pub actor: String,
+    pub time: i64,
+    pub message: Option<String>,
+    pub deps: Vec<String>,
+}
+
+/// Full change log of `<doc_id>.automerge`, oldest first.
+pub fn doc_history(dir: &Path, doc_id: &str) -> Result<Vec<DocChange>> {
+    let mut doc = load_doc(dir, doc_id)?;
+    Ok(doc
+        .get_changes(&[])
+        .iter()
+        .map(|c| DocChange {
+            hash: c.hash().to_string(),
+            actor: c.actor_id().to_hex_string(),
+            time: c.timestamp(),
+            message: c.message().map(str::to_string),
+            deps: c.deps().iter().map(|d| d.to_string()).collect(),
+        })
+        .collect())
+}
+
+/// Hydrate the doc's state as of `heads`. Empty `heads` = the pre-first-change
+/// empty project (the diff baseline for a doc's very first change).
+pub fn snapshot_at(dir: &Path, doc_id: &str, heads: &[String]) -> Result<SharedProject> {
+    if heads.is_empty() {
+        return Ok(SharedProject {
+            share_id: doc_id.to_string(),
+            name: String::new(),
+            description: String::new(),
+            color: None,
+            tags: Vec::new(),
+            papers: Vec::new(),
+            notes: Vec::new(),
+            annotations: Vec::new(),
+        });
+    }
+    let mut doc = load_doc(dir, doc_id)?;
+    let hashes = heads
+        .iter()
+        .map(|h| h.parse::<automerge::ChangeHash>().map_err(crdt))
+        .collect::<Result<Vec<_>>>()?;
+    let fork = doc.fork_at(&hashes).map_err(crdt)?;
+    autosurgeon::hydrate(&fork).map_err(crdt)
 }
 
 /// Build + save a project's snapshot. Returns the persisted share_id (uuid v4,
@@ -590,8 +853,7 @@ pub fn list_shared(share_dir: &Path) -> Result<Vec<SharedSummary>> {
         let Some(share_id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        // Skip a corrupt or partially-written doc rather than failing the whole
-        // listing on one bad file.
+        // One corrupt or half-written doc must not fail the whole listing.
         let summary = match summarize(&path, share_id) {
             Ok(s) => s,
             Err(e) => {
@@ -610,10 +872,9 @@ pub fn list_shared(share_dir: &Path) -> Result<Vec<SharedSummary>> {
     Ok(out)
 }
 
-/// A doc's listing summary read straight off the automerge document: only
-/// `share_id`/`name` are hydrated and the subgraphs are counted by list length,
-/// so listing never materializes paper summaries, note bodies, or annotation
-/// anchors the way a full `load` does.
+/// A doc's listing summary: only `share_id`/`name`/`description` are hydrated and
+/// subgraphs are counted by list length — never materializes bodies/anchors like a
+/// full `load`.
 fn summarize(path: &Path, share_id: &str) -> Result<SharedSummary> {
     let mut doc = AutoCommit::load(&std::fs::read(path)?).map_err(crdt)?;
     // Empty pre-first-sync e2ee placeholder: nothing here yet (mirrors `load`).
@@ -624,11 +885,13 @@ fn summarize(path: &Path, share_id: &str) -> Result<SharedSummary> {
     struct Meta {
         share_id: String,
         name: String,
+        description: String,
     }
     let meta: Meta = autosurgeon::hydrate(&doc).map_err(crdt)?;
     Ok(SharedSummary {
         share_id: meta.share_id,
         name: meta.name,
+        description: meta.description,
         paper_count: list_len(&doc, "papers")?,
         note_count: list_len(&doc, "notes")?,
         annotation_count: list_len(&doc, "annotations")?,
@@ -650,8 +913,8 @@ pub fn get_shared(share_dir: &Path, share_id: &str) -> Result<SharedProject> {
     load(share_dir, share_id)
 }
 
-/// Owns the injected share directory — the test seam mirroring core's
-/// `AppState::from_parts` (construct from an explicit path, never from config).
+/// Owns the injected share directory — the DI seam mirroring server's
+/// `AppState::from_parts`: built from an explicit path, never from config.
 pub struct ShareStore {
     share_dir: PathBuf,
 }
@@ -690,9 +953,9 @@ mod tests {
     // annotation_svc comes from `use super::*` (the crate-root service aliases).
     const ANCHOR: &str = r##"{"v":1,"version":1,"page":1,"color":"#ffd400","quote":"q","rects":[{"x":0,"y":0,"w":0.5,"h":0.1}]}"##;
 
-    // Seed a canonical in-memory DB via the real service WRITE APIs and return
-    // (conn, project_id). The project has two papers, two project tags, two
-    // project notes (plus one library note that must NOT be snapshotted).
+    // Seed a canonical in-memory DB via the real service WRITE APIs, returning
+    // (conn, project_id): two papers, two project tags, two project notes, one
+    // annotation, plus a library note the snapshot must exclude.
     fn seed() -> (Connection, i64) {
         let mut conn = open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
@@ -876,7 +1139,7 @@ mod tests {
             vec![Some("0000-0001-2345-6789".to_string()), None]
         );
 
-        // Import into a fresh DB: AUTHOR_ORCID lands via the existing fill-if-null path.
+        // Import into a fresh DB: AUTHOR_ORCID lands via the fill-if-null path.
         let mut conn2 = open_in_memory().unwrap();
         storage::init_db(&conn2).unwrap();
         import_shared_project(&mut conn2, &sp).unwrap();
@@ -1030,7 +1293,7 @@ mod tests {
         assert_eq!(row(&conn).0, None);
 
         let share_id = publish(&conn, dir.path(), pid).unwrap();
-        // Re-publish to exercise the idempotent-overwrite path too.
+        // Re-publish to exercise `save`'s no-op skip too.
         publish(&conn, dir.path(), pid).unwrap();
 
         assert_eq!(before, db_checksum(&conn));
@@ -1038,6 +1301,117 @@ mod tests {
         assert_eq!(stored.as_deref(), Some(share_id.as_str()));
         assert_eq!(name, "My Project");
         assert_eq!(description, "a project");
+    }
+
+    // The destructive sibling: what `fresh` lost relative to `prior` is removed
+    // (paper unlinked, note/annotation deleted, tag subtracted), while local-only
+    // additions — never present in `prior` — survive untouched.
+    #[test]
+    fn apply_removals_deletes_prior_minus_fresh_and_keeps_local_additions() {
+        let (mut conn, pid) = seed();
+        let prior = build_shared_project(&conn, pid).unwrap();
+
+        // Local-only addition after the "prior" snapshot: must survive.
+        let fk2 = paper_svc::ensure_paper_root(&mut conn, "arxiv:2").unwrap();
+        let local_note = note_svc::create(
+            &conn,
+            &NoteIn {
+                source_fk: fk2,
+                title: "local only".into(),
+                content: "kept".into(),
+                paper_id: None,
+                project_fk: Some(pid),
+                uuid: None,
+            },
+        )
+        .unwrap();
+
+        // Fresh doc: arxiv:1, note A, the annotation and tag RL all gone.
+        let mut fresh = prior.clone();
+        fresh.papers.retain(|p| p.source_id != "arxiv:1");
+        fresh.notes.retain(|n| n.title != "note A");
+        fresh.annotations.clear();
+        fresh.tags.retain(|t| t != "RL");
+
+        let out = apply_removals(&mut conn, &prior, &fresh, Some(pid)).unwrap();
+        assert_eq!(
+            out,
+            RemovalOutcome {
+                papers: 1,
+                notes: 1,
+                annotations: 1,
+                tags: 1
+            }
+        );
+
+        let p = project_svc::get_required(&conn, pid).unwrap();
+        assert_eq!(p.project_tags, vec!["Robotics"]);
+        let notes = note_svc::get_many(
+            &conn,
+            &note_svc::Notes {
+                project_fk: Some(pid),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let titles: Vec<_> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert!(titles.contains(&"note B") && titles.contains(&"local only"));
+        assert!(!titles.contains(&"note A"));
+        assert!(note_svc::get(
+            &conn,
+            &note_svc::Note {
+                note_id: Some(local_note.note_id)
+            }
+        )
+        .unwrap()
+        .is_some());
+        // arxiv:1 is unlinked from the project but NOT trashed.
+        assert!(!p
+            .source_fks
+            .contains(&paper_svc::ensure_paper_root(&mut conn, "arxiv:1").unwrap()));
+        assert!(!storage::queries::paper::is_paper_deleted(&conn, "arxiv:1").unwrap());
+        let anns = annotation_svc::get_many(
+            &conn,
+            &annotation_svc::Annotations {
+                project_fk: Some(pid),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(anns.is_empty());
+    }
+
+    // The device actor pins every change `save` writes, changes carry real
+    // timestamps, and `doc_history`/`snapshot_at` read the log back.
+    #[test]
+    fn history_is_attributed_timestamped_and_forkable() {
+        let (conn, pid) = seed();
+        let dir = tempfile::tempdir().unwrap();
+        let actor_dir = tempfile::tempdir().unwrap();
+        let actor = init_device_actor(actor_dir.path()).unwrap();
+        // First-wins across the process: whichever test pinned it, hex matches.
+        let actor = device_actor_hex().unwrap_or(actor);
+
+        let mut sp = build_shared_project(&conn, pid).unwrap();
+        save(dir.path(), &sp).unwrap();
+        sp.tags.push("later".into());
+        save(dir.path(), &sp).unwrap();
+
+        let log = doc_history(dir.path(), &sp.share_id).unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(log.iter().all(|c| c.actor == actor));
+        assert!(log.iter().all(|c| c.time > 0));
+        // Linear history: the second change depends on the first.
+        assert_eq!(log[1].deps, vec![log[0].hash.clone()]);
+
+        // State as of the first change lacks the later tag; latest has it.
+        let at_first = snapshot_at(dir.path(), &sp.share_id, &[log[0].hash.clone()]).unwrap();
+        assert!(!at_first.tags.contains(&"later".to_string()));
+        let at_second = snapshot_at(dir.path(), &sp.share_id, &[log[1].hash.clone()]).unwrap();
+        assert!(at_second.tags.contains(&"later".to_string()));
+        // Empty heads = the pre-first-change empty baseline.
+        let baseline = snapshot_at(dir.path(), &sp.share_id, &[]).unwrap();
+        assert!(baseline.papers.is_empty() && baseline.name.is_empty());
     }
 
     // Pins the paper-loop semantics of import_shared_project: a locally-trashed

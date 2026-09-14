@@ -5,20 +5,14 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::models::PaperDetails;
 
-/// `storage/db.py::search_full_text` — FTS5 over TeX source AND note content.
-/// Returns the latest version of each matching paper, ranked by bm25 (lower =
-/// better); a paper matched by both its full text and a note takes its best score.
+/// FTS5 over TeX source AND note content: the latest version of each matching
+/// paper, ranked by bm25 (lower = better); a paper matched both ways takes its
+/// best score.
 ///
-/// FTS misnomer: `papers_fts.paper_id` holds the SOURCE_ID *string*, so that half
-/// joins on `latest_papers.source_id = papers_fts.paper_id` (NOT the int PAPER_ID).
-/// notes_fts carries SOURCE_FK, joined back through PAPER_ROOTS to the same SOURCE_ID.
-/// init_db always creates both FTS tables, so Python's "table missing" guard is moot.
-///
-/// `query` is the raw search box input; `match_expr` turns it into FTS5 syntax.
-/// Each branch runs as its own prepared statement, and a prepare/query error
-/// from either is treated as "no matches from that branch" rather than aborting
-/// the whole search. `match_expr` emits nothing schema-specific; the fallback
-/// stays as a backstop for an index that is missing or corrupt.
+/// FTS misnomer: `papers_fts.paper_id` holds the SOURCE_ID *string* (NOT the
+/// int PAPER_ID) that `latest_papers` is then read by; notes_fts carries
+/// SOURCE_FK, joined back through PAPER_ROOTS. `match_expr` turns raw input
+/// into FTS5 syntax; an unqueryable index yields no hits, not an error.
 pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Vec<PaperDetails>> {
     let limit = limit.clamp(0, 1000);
     let Some(expr) = match_expr(query) else {
@@ -30,8 +24,8 @@ pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Ve
     // beaten by `limit` papers whose merged score is at least as good. The notes
     // branch is one row per NOTE, so it groups to per-paper best before limiting
     // — a row-limit could crowd a distinct paper out behind one many-note paper.
-    // MATERIALIZED is load-bearing: flattened, bm25() lands inside the aggregate
-    // where FTS5 refuses it ("unable to use function bm25 in this context").
+    // MATERIALIZED is load-bearing: flattened, bm25() would land inside min(),
+    // which FTS5 refuses.
     let mut best: HashMap<String, f64> = HashMap::new();
     for (sid, score) in fts_matches(
         conn,
@@ -89,21 +83,12 @@ pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Ve
         .collect())
 }
 
-/// Rewrite raw search box input into an FTS5 MATCH expression.
-///
-/// FTS5's query language reads `-` and `:` as column-filter syntax and rejects
-/// stray punctuation outright, so `encoder-decoder` parses as a filter on a
-/// column named `decoder` and `c++` is a syntax error near `+`. Both raise, and
-/// `fts_matches` reports a raise as "no rows" — so before this, a hyphenated
-/// query looked like a search that legitimately found nothing.
-///
-/// Each bare word becomes a quoted phrase, which FTS5 splits with the same
-/// tokenizer that split the document, so `encoder-decoder` matches the
-/// document's `encoder-decoder`. The syntax that already worked is preserved:
-/// double-quoted phrases, the AND/OR/NOT operators, and a trailing `*`.
-///
-/// `None` when nothing searchable is left — an empty MATCH is itself an error.
-///
+/// Rewrite raw search box input into an FTS5 MATCH expression. FTS5 reads
+/// `-`/`:` as column-filter syntax and rejects stray punctuation, so each bare
+/// word becomes a quoted phrase (tokenized like the document, so
+/// `encoder-decoder` still matches). Double-quoted phrases, AND/OR/NOT, and a
+/// trailing `*` are preserved. `None` when nothing searchable is left — an
+/// empty MATCH is itself an error.
 /// `ponytail: NEAR()/^ are not preserved (they'd need a real parser); they
 /// fall through to a literal term search.`
 fn match_expr(raw: &str) -> Option<String> {
@@ -146,8 +131,8 @@ fn match_expr(raw: &str) -> Option<String> {
     (!out.is_empty()).then(|| out.join(" "))
 }
 
-/// Classifies one raw token as an FTS5 operator (AND/OR/NOT, pushed only if
-/// it doesn't follow another operator) or a term/prefix (via `push_term`).
+/// Classifies one raw token as an FTS5 operator (AND/OR/NOT, kept only after
+/// a term) or a term/prefix (via `push_term`).
 fn match_expr_helper(out: &mut Vec<String>, tok: &str) {
     let prefix = tok.ends_with('*');
     let body = tok.strip_suffix('*').unwrap_or(tok);
@@ -167,8 +152,8 @@ fn is_operator(tok: Option<&String>) -> bool {
 
 /// Push one term as a quoted FTS5 phrase.
 fn push_term(out: &mut Vec<String>, term: &str, prefix: bool) {
-    // FTS5 drops punctuation when tokenizing, so an all-punctuation term holds
-    // no token to match and would emit `""` — itself a syntax error.
+    // FTS5 drops punctuation when tokenizing, so an all-punctuation term is an
+    // empty phrase matching nothing; alone it yields `None`.
     if !term.chars().any(char::is_alphanumeric) {
         return;
     }
@@ -240,9 +225,8 @@ mod tests {
         )
         .unwrap();
         // No hand-insert into papers_fts: the PAPER_META write above fires the
-        // sync trigger, which derives the row. Seeding it again would give every
-        // fixture paper two index rows and stop these tests running against the
-        // one-row-per-paper shape production actually has.
+        // sync trigger. Seeding it too would give each fixture paper two index
+        // rows, not the one-per-paper shape production has.
     }
 
     #[test]
@@ -322,9 +306,9 @@ mod tests {
         assert_eq!(hits[0].source_id, "arxiv:2204.12985");
     }
 
-    /// Punctuation FTS5 reads as syntax is searched for literally instead. Each
-    /// of these raised before, and a raise reads as "no matches" — so the search
-    /// silently returned nothing for terms that are all over a TeX corpus.
+    /// Punctuation FTS5 reads as syntax is searched for literally instead. All
+    /// but `encod*` raised before, and a raise reads as "no matches" — so the
+    /// search silently returned nothing for terms all over a TeX corpus.
     #[test]
     fn punctuation_in_a_query_searches_instead_of_raising() {
         let conn = db::open_in_memory().unwrap();
@@ -374,8 +358,8 @@ mod tests {
     }
 
     /// Column-filter syntax (`full_text:foo`) used to reach FTS5 and is now read
-    /// as literal text — the trade for making hyphens work. It finds papers
-    /// whose text holds those words, and nothing when it doesn't.
+    /// as literal text — the trade for making hyphens work. A plain query
+    /// still finds the paper.
     #[test]
     fn column_filter_syntax_is_searched_as_text() {
         let conn = db::open_in_memory().unwrap();

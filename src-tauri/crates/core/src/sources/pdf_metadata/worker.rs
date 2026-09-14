@@ -5,10 +5,6 @@ use std::path::Path;
 
 use super::extract::{extract_pdf_metadata, pdfium_lib_path, Extracted};
 
-// ---------------------------------------------------------------------------
-// Subprocess boundary — a native libpdfium crash kills the worker, not the app
-// ---------------------------------------------------------------------------
-
 /// The CLI subcommand the worker is invoked with (`linxiv pdf-meta <path>`).
 /// `crates/cli` names its clap command from this same constant, so renaming the
 /// subcommand is a one-const change both crates see at compile time.
@@ -62,9 +58,7 @@ pub fn extract_pdf_metadata_json(bytes: &[u8]) -> String {
 }
 
 /// Locate the worker (the CLI, which links this crate): `LINXIV_PDF_WORKER` env,
-/// else a CLI binary next to the current exe — `linxiv-cli` in the cargo target
-/// dir (dev), `linxiv` bundled-sidecar-adjacent (release). Every candidate takes
-/// the same `is_file` check, so a broken path degrades to the in-process path.
+/// else `linxiv-cli`/`linxiv` next to the current exe; a broken path degrades to in-process.
 fn pdf_worker_path() -> Option<std::path::PathBuf> {
     let env_var = std::env::var_os("LINXIV_PDF_WORKER");
     let env_set = env_var.is_some();
@@ -246,7 +240,7 @@ mod tests {
         assert_eq!(got.title.as_deref(), Some("FROM_WORKER"));
         assert_eq!(got.year, Some(2024));
 
-        // Nonzero exit (what a segfaulted child looks like) -> None -> default.
+        // Nonzero exit (a shell's 139 for SIGSEGV) -> None -> default.
         let boom = fake_worker(dir.path(), "boom.sh", "exit 139");
         assert_eq!(extract_via_worker(&boom, b"junk", timeout), None);
         assert_eq!(

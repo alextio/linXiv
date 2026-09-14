@@ -7,6 +7,8 @@ import {
   removeMember,
   revokeMember,
   setMemberRole,
+  transferAdmin,
+  type MembersListing,
   type ShareMember,
   shareErrText,
 } from "../../api/share";
@@ -21,8 +23,17 @@ const INVITE_ROLE_OPTIONS: { value: "editor" | "viewer"; label: string }[] = [
   { value: "editor", label: "Editor" },
 ];
 
-/** Hoster-only e2ee members panel: sidecar list + invite + revoke. */
-export function MembersSection({ shareId }: { shareId: string }) {
+// THE ADMIN can also promote to co-admin; co-admins only shuffle viewer/editor.
+const ADMIN_ROLE_OPTIONS: { value: "editor" | "viewer" | "co-admin"; label: string }[] = [
+  ...INVITE_ROLE_OPTIONS,
+  { value: "co-admin", label: "Co-admin" },
+];
+
+/** Admin-tier e2ee members panel (hosting device or a co-admin's), over the
+ * synced roster + local invite sidecar. Controls only offer what the current
+ * device's role permits: co-admins manage editors/viewers, THE ADMIN also
+ * manages co-admins and can transfer its role. */
+export function MembersSection({ shareId, hosted }: { shareId: string; hosted: boolean }) {
   const queryClient = useQueryClient();
   const [code, setCode] = useState("");
   const [role, setRole] = useState<"editor" | "viewer">("viewer");
@@ -33,6 +44,7 @@ export function MembersSection({ shareId }: { shareId: string }) {
   const [copied, setCopied] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [transferring, setTransferring] = useState<string | null>(null);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -87,13 +99,23 @@ export function MembersSection({ shareId }: { shareId: string }) {
   // §3.3 viewer ↔ editor dropdown: optimistic flip, rolled back on error
   // (the error line below is the page's toast equivalent).
   const roleM = useMutation({
-    mutationFn: ({ memberId, role }: { memberId: string; role: "editor" | "viewer" }) =>
-      setMemberRole(shareId, memberId, role),
+    mutationFn: ({
+      memberId,
+      role,
+    }: {
+      memberId: string;
+      role: "editor" | "viewer" | "co-admin";
+    }) => setMemberRole(shareId, memberId, role),
     onMutate: async ({ memberId, role }) => {
       await queryClient.cancelQueries({ queryKey: ["share", "members", shareId] });
-      const prev = queryClient.getQueryData<ShareMember[]>(["share", "members", shareId]);
-      queryClient.setQueryData<ShareMember[]>(["share", "members", shareId], (list) =>
-        list?.map((m) => (m.member_id === memberId ? { ...m, role } : m))
+      const prev = queryClient.getQueryData<MembersListing>(["share", "members", shareId]);
+      queryClient.setQueryData<MembersListing>(["share", "members", shareId], (listing) =>
+        listing && {
+          ...listing,
+          members: listing.members.map((m) =>
+            m.member_id === memberId ? { ...m, role } : m
+          ),
+        }
       );
       return { prev };
     },
@@ -101,6 +123,14 @@ export function MembersSection({ shareId }: { shareId: string }) {
       if (ctx?.prev) queryClient.setQueryData(["share", "members", shareId], ctx.prev);
     },
     onSettled: () => invalidateMembers(),
+  });
+  // THE-ADMIN handover: the marker moves, this device demotes to co-admin.
+  const transferM = useMutation({
+    mutationFn: (memberId: string) => transferAdmin(shareId, memberId),
+    onSuccess: () => {
+      setTransferring(null);
+      invalidateMembers();
+    },
   });
 
   async function handleCopy(key: string, text: string) {
@@ -116,7 +146,18 @@ export function MembersSection({ shareId }: { shareId: string }) {
     }
   }
 
-  const members = membersQ.data ?? [];
+  const listing = membersQ.data;
+  const members = listing?.members ?? [];
+  const selfRole = listing?.self_role;
+  const selfId = listing?.self_member_id;
+  // What this device's role may touch: THE ADMIN manages everyone but itself
+  // (it transfers, never demotes itself); a co-admin only editors/viewers.
+  const manageable = (m: ShareMember) =>
+    !m.revoked &&
+    m.member_id !== "" &&
+    m.member_id !== selfId &&
+    m.role !== "admin" &&
+    (selfRole === "admin" || m.role !== "co-admin");
   return (
     <div className="flex flex-col gap-3 border-t border-[var(--color-border)] pt-4">
       <span
@@ -126,7 +167,7 @@ export function MembersSection({ shareId }: { shareId: string }) {
         Members
       </span>
       {membersQ.isLoading && <Spinner size={16} />}
-      {members.some((m) => m.role !== "hoster" && !m.revoked) && (
+      {hosted && members.some((m) => m.member_id !== selfId && !m.revoked) && (
         <div className="flex items-center gap-2">
           <span className="flex-1 text-[11px]" style={{ color: "var(--color-ink-3)" }}>
             {rekeyM.isSuccess
@@ -155,21 +196,18 @@ export function MembersSection({ shareId }: { shareId: string }) {
               className="flex-1 truncate text-[13px]"
               style={{ color: m.revoked ? "var(--color-ink-3)" : "var(--color-text)" }}
             >
-              {m.name ||
-                (m.role === "hoster"
-                  ? "This device"
-                  : m.member_id.slice(0, 8) || "unknown device")}
+              {m.member_id === selfId
+                ? "This device"
+                : m.name || m.member_id.slice(0, 8) || "unknown device"}
             </span>
-            {!m.revoked && m.role !== "hoster" && m.verified && m.member_id ? (
-              // Viewer/Editor only — co-admin is keyhive-supported but
-              // app-deferred (spec §1.1); the route refuses admin targets.
+            {manageable(m) && m.verified ? (
               <OptionSelect
                 aria-label={`Role for ${m.name || m.member_id.slice(0, 8)}`}
                 size="sm"
-                value={m.role as "editor" | "viewer"}
+                value={m.role as "editor" | "viewer" | "co-admin"}
                 onChange={(r) => roleM.mutate({ memberId: m.member_id, role: r })}
                 disabled={roleM.isPending}
-                options={INVITE_ROLE_OPTIONS}
+                options={selfRole === "admin" ? ADMIN_ROLE_OPTIONS : INVITE_ROLE_OPTIONS}
               />
             ) : (
               <span
@@ -179,7 +217,35 @@ export function MembersSection({ shareId }: { shareId: string }) {
                 {m.revoked ? "revoked" : m.verified ? m.role : `${m.role} (unverified)`}
               </span>
             )}
-            {!m.revoked && m.role !== "hoster" && revoking === m.member_id && (
+            {selfRole === "admin" && m.role === "co-admin" && !m.revoked && (
+              <Button
+                variant={transferring === m.member_id ? "danger" : "ghost"}
+                size="sm"
+                disabled={transferM.isPending}
+                onClick={() => {
+                  if (transferring !== m.member_id) return setTransferring(m.member_id);
+                  transferM.mutate(m.member_id);
+                }}
+              >
+                {transferM.isPending && transferring === m.member_id ? (
+                  <Spinner size={14} />
+                ) : transferring === m.member_id ? (
+                  "Confirm transfer"
+                ) : (
+                  "Make admin"
+                )}
+              </Button>
+            )}
+            {transferring === m.member_id && !transferM.isPending && (
+              <Button
+                variant="muted"
+                size="sm"
+                onClick={() => setTransferring(null)}
+              >
+                Cancel
+              </Button>
+            )}
+            {manageable(m) && revoking === m.member_id && (
               <Button
                 variant="muted"
                 size="sm"
@@ -189,7 +255,7 @@ export function MembersSection({ shareId }: { shareId: string }) {
                 Cancel
               </Button>
             )}
-            {!m.revoked && m.role !== "hoster" && (
+            {manageable(m) && (
               <Button
                 variant={revoking === m.member_id ? "danger" : "ghost"}
                 size="sm"
@@ -210,7 +276,7 @@ export function MembersSection({ shareId }: { shareId: string }) {
               </Button>
             )}
           </div>
-          {m.role !== "hoster" && (
+          {m.member_id !== selfId && (
             // Outstanding-invite line: a member who never picks theirs up leaves
             // no other trace on this end, and the string is otherwise shown once.
             <div className="flex items-center gap-2">
@@ -242,7 +308,7 @@ export function MembersSection({ shareId }: { shareId: string }) {
                   Cancel
                 </Button>
               )}
-              {m.member_id && (
+              {m.member_id !== "" && (m.revoked || manageable(m)) && (
                 <Button
                   variant={removing === m.member_id ? "danger" : "ghost"}
                   size="sm"
@@ -276,6 +342,12 @@ export function MembersSection({ shareId }: { shareId: string }) {
         <p className="text-xs" style={{ color: "var(--color-muted)" }}>
           Revokes them and forgets the invite entirely, so re-inviting the same
           device starts clean. They should also leave the share on their end.
+        </p>
+      )}
+      {transferring != null && (
+        <p className="text-xs" style={{ color: "var(--color-muted)" }}>
+          Hands THE ADMIN role to this co-admin. This device becomes a
+          co-admin{hosted ? "; hosting stays here" : "; hosting is unaffected"}.
         </p>
       )}
       <div className="flex items-center gap-2">
@@ -314,9 +386,21 @@ export function MembersSection({ shareId }: { shareId: string }) {
           {inviteM.isPending ? <Spinner size={14} /> : "Invite"}
         </Button>
       </div>
-      {(inviteM.isError || revokeM.isError || roleM.isError || membersQ.isError) && (
+      {(inviteM.isError ||
+        revokeM.isError ||
+        removeM.isError ||
+        roleM.isError ||
+        transferM.isError ||
+        membersQ.isError) && (
         <p className="text-xs" style={{ color: "var(--color-danger)" }}>
-          {shareErrText(inviteM.error ?? revokeM.error ?? roleM.error ?? membersQ.error)}
+          {shareErrText(
+            inviteM.error ??
+              revokeM.error ??
+              removeM.error ??
+              roleM.error ??
+              transferM.error ??
+              membersQ.error
+          )}
         </p>
       )}
       {invite && (

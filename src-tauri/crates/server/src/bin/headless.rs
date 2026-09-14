@@ -1,0 +1,1172 @@
+//! Headless linXiv node (containerized / self-hosted): the full `/api/*` router
+//! over HTTP — share routes included — plus the iroh share node, the background
+//! sync, and `/api/status`, `/api/relay-access`, `/api/admin/*`, `/admin`.
+//!
+//! Auth: `LINXIV_API_TOKEN` gates every request but `GET /admin` behind
+//! `Authorization: Bearer <token>`. Fail-closed: a non-loopback
+//! `LINXIV_HTTP_ADDR` without a token refuses to start (the container image
+//! binds `0.0.0.0:8000`, so it always needs one); loopback without a token
+//! stays open for the dev loop. Relay settings are the app's own on-disk
+//! settings (`p2p_relay_url` / `p2p_relay_auth_token` / `p2p_relay_only`):
+//! set via `PATCH /api/settings`, then `POST /api/share/relay/reconnect`.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::{
+    extract::{Request, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::any,
+    Router,
+};
+
+use serde::{Deserialize, Serialize};
+
+use linxiv_server::remote_query::{
+    self, load_members, relay_allow, save_members, valid_endpoint_id, Member, Role, TransferLog,
+};
+use linxiv_server::route::share::ShareState;
+use linxiv_server::route::{feed, route, share, ApiRequest};
+use linxiv_server::state::AppState;
+use linxiv_server::{full_text_worker, journal, p2p_config, share_sync};
+
+/// Base64 file uploads ride the JSON body, so allow a large request body.
+const MAX_BODY: usize = 200 * 1024 * 1024;
+
+/// Static admin page. Secretless, so served without auth at `GET /admin`;
+/// its calls carry the token from sessionStorage.
+const ADMIN_HTML: &str = include_str!("../headless_admin.html");
+
+#[derive(Clone)]
+struct Ctx {
+    state: Arc<AppState>,
+    share: Arc<ShareState>,
+    /// Bearer token; `None` only on loopback. `GET /admin` is exempt.
+    token: Option<Arc<str>>,
+    /// Process start, for `uptime_secs` in `GET /api/status`.
+    started: Instant,
+    /// Relay access log + serialization of member-list file writes.
+    /// ponytail: one Mutex around list+log; split if relay checks ever contend.
+    relay: Arc<Mutex<RelayLog>>,
+    /// Byte-lane transfer outcomes (Remote Query Mode PDF lane).
+    transfers: Arc<Mutex<TransferLog>>,
+}
+
+/// Seed `p2p_relay_url` / `p2p_relay_auth_token` from `LINXIV_P2P_RELAY_URL` /
+/// `LINXIV_P2P_RELAY_TOKEN` when blank — a fresh (or `--rm`) container has no
+/// settings file, and with no relay URL the node can't mint a Node Address.
+/// First boot only; `PATCH /api/settings` wins afterward.
+fn seed_relay_from_env() {
+    let url = std::env::var("LINXIV_P2P_RELAY_URL").unwrap_or_default();
+    if url.is_empty() {
+        return;
+    }
+    let Ok(mut settings) = linxiv_core::config::UserSettings::load() else {
+        eprintln!("warning: settings unreadable; LINXIV_P2P_RELAY_URL not applied");
+        return;
+    };
+    let blank = |s: &linxiv_core::config::UserSettings, k: &str| {
+        s.get(k).and_then(|v| v.as_str()).is_none_or(str::is_empty)
+    };
+    if !blank(&settings, "p2p_relay_url") {
+        return;
+    }
+    let mut apply = || -> linxiv_core::error::Result<()> {
+        settings.set("p2p_relay_url", url.clone().into())?;
+        let token = std::env::var("LINXIV_P2P_RELAY_TOKEN").unwrap_or_default();
+        if !token.is_empty() && blank(&settings, "p2p_relay_auth_token") {
+            settings.set("p2p_relay_auth_token", token.into())?;
+        }
+        Ok(())
+    };
+    match apply() {
+        Ok(()) => eprintln!("linxiv headless: relay seeded from env: {url}"),
+        Err(e) => eprintln!("warning: seeding relay from env failed: {e}"),
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let started = Instant::now();
+    let data_dir = linxiv_core::config::init_data_dir().expect("init data dir");
+    eprintln!("linxiv headless: data dir {}", data_dir.display());
+    seed_relay_from_env();
+    let state = Arc::new(AppState::new().expect("init app state"));
+    // Keychain access is sync (and absent in containers, where the
+    // LINXIV_P2P_PASSPHRASE fallback applies) — keep it off the async runtime.
+    let dek = tokio::task::spawn_blocking(p2p_config::p2p_dek)
+        .await
+        .expect("resolve p2p dek");
+    let (share_state, node_bound) = share::startup_share_state(dek)
+        .await
+        .expect("init share state");
+    let addr = std::env::var("LINXIV_HTTP_ADDR").unwrap_or_else(|_| "127.0.0.1:8000".into());
+    let token: Option<Arc<str>> = std::env::var("LINXIV_API_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(Into::into);
+    // Fail closed: an unauthenticated API is only acceptable on loopback.
+    // An unparseable addr (e.g. a hostname) counts as non-loopback.
+    let loopback = addr
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback());
+    if token.is_none() && !loopback {
+        eprintln!(
+            "error: LINXIV_HTTP_ADDR={addr} is not loopback and LINXIV_API_TOKEN is unset; \
+             refusing to serve an unauthenticated API beyond localhost"
+        );
+        std::process::exit(1);
+    }
+
+    let ctx = Ctx {
+        state,
+        share: Arc::new(share_state),
+        token,
+        started,
+        relay: Arc::new(Mutex::new(RelayLog::open(
+            data_dir.join("relay_access_log.jsonl"),
+        ))),
+        transfers: Arc::new(Mutex::new(TransferLog::default())),
+    };
+    if node_bound && ctx.share.mark_sync_started() {
+        spawn_interval_sync(&ctx);
+    }
+    // Unconditional: history/undo must journal even with the p2p node unbound.
+    linxiv_server::journal::spawn_journal_loop(ctx.state.clone());
+    install_remote_query(&ctx).await;
+    // Idles until `full_text_worker_enabled` is switched on, same as the app.
+    full_text_worker::spawn_headless(ctx.state.clone());
+    spawn_feed_poll(ctx.state.clone());
+    // An always-on node on a laptop/desktop must not suspend out from under
+    // its peers.
+    #[cfg(target_os = "linux")]
+    let _sleep_inhibitor = inhibit_sleep().await;
+
+    let share = ctx.share.clone();
+    let auth = if ctx.token.is_some() {
+        "bearer auth"
+    } else {
+        "UNAUTHENTICATED (loopback)"
+    };
+    let app = Router::new().fallback(any(dispatch)).with_state(ctx);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("bind headless server");
+    eprintln!("linxiv headless on http://{addr} (node bound: {node_bound}, {auth})");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("headless serve");
+    // Close the iroh endpoint + router explicitly — Drop is not enough.
+    if let Err(e) = share.shutdown().await {
+        eprintln!("warning: share node shutdown: {e}");
+    }
+}
+
+/// Take a systemd-logind sleep+idle inhibitor for the process lifetime (opt out:
+/// `LINXIV_ALLOW_SLEEP=1`). The lock is a pipe fd — logind releases it however
+/// this process exits; where login1 is absent, one stderr line.
+#[cfg(target_os = "linux")]
+async fn inhibit_sleep() -> Option<zbus::zvariant::OwnedFd> {
+    if std::env::var("LINXIV_ALLOW_SLEEP").as_deref() == Ok("1") {
+        eprintln!("linxiv headless: LINXIV_ALLOW_SLEEP=1 set; system sleep settings apply");
+        return None;
+    }
+    let take = async {
+        let conn = zbus::Connection::system().await?;
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1",
+                Some("org.freedesktop.login1.Manager"),
+                "Inhibit",
+                &(
+                    "sleep:idle",
+                    "linxiv-headless",
+                    "serving the linXiv API and p2p node",
+                    "block",
+                ),
+            )
+            .await?;
+        reply.body().deserialize::<zbus::zvariant::OwnedFd>()
+    };
+    // A wedged (present but unresponsive) system bus must not block startup.
+    match tokio::time::timeout(Duration::from_secs(10), take).await {
+        Ok(Ok(fd)) => {
+            eprintln!("linxiv headless: sleep/idle inhibited while running (LINXIV_ALLOW_SLEEP=1 to opt out)");
+            Some(fd)
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "linxiv headless: sleep inhibit unavailable ({e}); system sleep settings apply"
+            );
+            None
+        }
+        Err(_) => {
+            eprintln!("linxiv headless: sleep inhibit timed out; system sleep settings apply");
+            None
+        }
+    }
+}
+
+/// Resolves on SIGTERM (docker/podman stop — this bin is PID 1, which gets no
+/// default signal handling) or ctrl-c.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .expect("install ctrl-c handler");
+    eprintln!("linxiv headless: shutting down");
+}
+
+/// Constant-time byte comparison (length still leaks; that's standard for
+/// bearer tokens).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// `Some(response)` when the request must be rejected.
+fn check_auth(ctx: &Ctx, req: &Request) -> Option<Response> {
+    let Some(token) = &ctx.token else { return None };
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match presented {
+        Some(p) if ct_eq(p.as_bytes(), token.as_bytes()) => None,
+        _ => Some(detail(
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid bearer token",
+        )),
+    }
+}
+
+/// Remote Query Mode: serve `linxiv-api/1` on the share node's endpoint.
+/// Registered through `install_api` so a relay-reconnect rebind re-applies
+/// the handler; refused knocks log with `source: "api"`.
+async fn install_remote_query(ctx: &Ctx) {
+    let relay_log = ctx.relay.clone();
+    let knock: linxiv_p2p::KnockLogFn = Arc::new(move |peer: &str| {
+        relay_log.lock().unwrap().push(Some(peer), false, "api");
+    });
+    let transfers = ctx.transfers.clone();
+    let transfer: linxiv_p2p::TransferLogFn = Arc::new(move |peer: &str, outcome| {
+        transfers.lock().unwrap().push(peer, outcome);
+    });
+    let proto = remote_query::build_api_proto(
+        ctx.state.clone(),
+        remote_query::file_member_check(),
+        knock,
+        transfer,
+        remote_query::pdf_rate_bps(),
+    );
+    ctx.share
+        .install_api(Arc::new(move |node| {
+            node.set_api_protocol(Box::new(proto.clone()));
+        }))
+        .await;
+}
+
+/// Same sync loop the app spawns, minus the `AppHandle`.
+fn spawn_interval_sync(ctx: &Ctx) {
+    let (state, share) = (ctx.state.clone(), ctx.share.clone());
+    tokio::spawn(async move {
+        loop {
+            share_sync::sync_all(&state, &share).await;
+            share_sync::next_sync_due().await;
+        }
+    });
+}
+
+/// Feed poll default. Cadence comes from `headless_feed_poll_minutes` (default
+/// 30), re-read every tick so a settings PATCH applies without a restart;
+/// no-op while `home_feed_url` is unset.
+const FEED_POLL_DEFAULT: Duration = Duration::from_secs(30 * 60);
+
+/// `headless_feed_poll_minutes` → sleep duration. Missing / non-positive /
+/// overflowing falls back to the default rather than a hot loop.
+fn feed_poll_period(minutes: Option<i64>) -> Duration {
+    minutes
+        .filter(|&m| m > 0)
+        .and_then(|m| (m as u64).checked_mul(60))
+        .map(Duration::from_secs)
+        .unwrap_or(FEED_POLL_DEFAULT)
+}
+
+fn spawn_feed_poll(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            let mut period = FEED_POLL_DEFAULT;
+            match linxiv_core::config::UserSettings::load() {
+                Ok(s) => {
+                    period = feed_poll_period(
+                        s.get("headless_feed_poll_minutes").and_then(|v| v.as_i64()),
+                    );
+                    let url = s
+                        .get("home_feed_url")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|u| !u.is_empty())
+                        .map(String::from);
+                    if let Some(url) = url {
+                        let days = s.rss_cache_retention_days();
+                        if let Err(e) = feed::refresh(&state, &url, days).await {
+                            eprintln!("feed poll {url}: {} {}", e.status, e.detail);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("feed poll: settings unreadable: {e}"),
+            }
+            tokio::time::sleep(period).await;
+        }
+    });
+}
+
+// --- Relay access control + Member List ------------------------------------
+// iroh-relay's `access.http` POSTs `/api/relay-access` with an
+// `X-Iroh-NodeId` header per connecting endpoint (1.0.2's X_IROH_ENDPOINT_ID
+// const; we also accept `X-Iroh-Endpoint-Id`, the name its docs use, in case
+// a later release renames it). Only a 200 with the body `true` allows.
+// Decision source: the Member List at `<data_dir>/relay_allowlist.json`
+// (`remote_query::Member`; legacy bare strings = role none) — missing/empty
+// file denies everyone. Relay admission is presence-based; the role only
+// governs Remote Query Mode rights.
+
+const RELAY_LOG_CAP: usize = 200;
+
+/// Rotate the on-disk audit file past this size (one `.1` generation kept),
+/// so a hammered public node can't grow it without bound.
+const RELAY_LOG_FILE_CAP: u64 = 5 * 1024 * 1024;
+
+/// `GET /api/admin/relay/log` entry — one access decision, also the JSONL
+/// line persisted on disk. Loads default missing fields.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct RelayLogEntry {
+    seq: u64,
+    at: String,
+    endpoint_id: Option<String>,
+    allowed: bool,
+    source: String,
+}
+
+/// Recent relay decisions plus refused api knocks (`source`: "relay" vs
+/// "api"), appended as JSONL under the data dir so the trail survives
+/// restarts; the in-memory tail serves the admin route.
+struct RelayLog {
+    seq: u64,
+    entries: VecDeque<RelayLogEntry>,
+    /// Append handle; `None` when the file can't be opened (warned once at
+    /// startup) — the in-memory log keeps working.
+    file: Option<std::fs::File>,
+    path: std::path::PathBuf,
+}
+
+/// Knock ids are attacker-controlled bytes (a real endpoint id is 64 hex
+/// chars): strip control characters and clamp before storing and rendering.
+fn clean_log_id(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(128).collect()
+}
+
+impl RelayLog {
+    /// Open (or create) the JSONL audit file and seed the in-memory tail +
+    /// `seq` from it, so restarts continue the sequence instead of resetting.
+    fn open(path: std::path::PathBuf) -> Self {
+        let mut seq = 0;
+        let mut entries = VecDeque::new();
+        // Rotated generation first, so a restart right after rotation still
+        // shows the recent tail, not just the few post-rotation entries.
+        let rotated = std::fs::read_to_string(path.with_extension("jsonl.1")).unwrap_or_default();
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        for e in rotated
+            .lines()
+            .chain(current.lines())
+            .filter_map(|l| serde_json::from_str::<RelayLogEntry>(l).ok())
+        {
+            seq = seq.max(e.seq);
+            if entries.len() >= RELAY_LOG_CAP {
+                entries.pop_front();
+            }
+            entries.push_back(e);
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| eprintln!("warning: access log {} unwritable: {e}", path.display()))
+            .ok();
+        // A crash mid-write leaves a torn final line; terminate it so the
+        // next entry doesn't merge into it and take both down at parse time.
+        if !current.is_empty() && !current.ends_with('\n') {
+            if let Some(f) = &mut file {
+                use std::io::Write;
+                let _ = f.write_all(b"\n");
+            }
+        }
+        Self {
+            seq,
+            entries,
+            file,
+            path,
+        }
+    }
+
+    fn push(&mut self, endpoint_id: Option<&str>, allowed: bool, source: &str) {
+        self.seq += 1;
+        let entry = RelayLogEntry {
+            seq: self.seq,
+            at: chrono::Utc::now().to_rfc3339(),
+            endpoint_id: endpoint_id.map(clean_log_id),
+            allowed,
+            source: source.to_string(),
+        };
+        if self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .is_some_and(|m| m.len() > RELAY_LOG_FILE_CAP)
+        {
+            // A failed rename would regrow the same file forever; dropping
+            // the handle keeps disk bounded and the warning one-time.
+            self.file = std::fs::rename(&self.path, self.path.with_extension("jsonl.1"))
+                .and_then(|()| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&self.path)
+                })
+                .map_err(|e| {
+                    eprintln!(
+                        "warning: access log {} rotation failed; disk logging off: {e}",
+                        self.path.display()
+                    )
+                })
+                .ok();
+        }
+        if let Some(f) = &mut self.file {
+            use std::io::Write;
+            let line = serde_json::to_string(&entry).expect("plain fields");
+            if let Err(e) = writeln!(f, "{line}") {
+                eprintln!(
+                    "warning: access log {} write failed; disk logging off: {e}",
+                    self.path.display()
+                );
+                self.file = None;
+            }
+        }
+        if self.entries.len() >= RELAY_LOG_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+}
+
+/// `POST /api/relay-access` — iroh-relay's access check. text/plain
+/// `true`/`false`, never the JSON envelope: the relay string-matches the body.
+fn relay_access(ctx: &Ctx, req: &Request) -> Response {
+    let id = req
+        .headers()
+        .get("x-iroh-nodeid")
+        .or_else(|| req.headers().get("x-iroh-endpoint-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let allowed = relay_allow(&load_members().unwrap_or_default(), id.as_deref());
+    ctx.relay
+        .lock()
+        .unwrap()
+        .push(id.as_deref(), allowed, "relay");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+        if allowed { "true" } else { "false" },
+    )
+        .into_response()
+}
+
+/// `/api/admin/relay/members` (GET/POST/DELETE) — the full Member List after
+/// the op.
+#[derive(Serialize)]
+struct MembersResponse<'a> {
+    members: &'a [Member],
+}
+
+/// `GET /api/admin/relay/log` and `GET /api/admin/transfers` — newest-last
+/// tail of log entries.
+#[derive(Serialize)]
+struct EntriesResponse<'a, T: Serialize> {
+    entries: &'a VecDeque<T>,
+}
+
+/// `POST /api/admin/relay/members` request body. `role`/`name`/`actors` stay
+/// raw JSON so each bespoke 400 fires separately from the endpoint-id check;
+/// absent fields preserve the member's existing values.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct MemberUpsertBody {
+    endpoint_id: String,
+    role: Option<serde_json::Value>,
+    name: Option<serde_json::Value>,
+    actors: Option<serde_json::Value>,
+}
+
+/// `GET /api/admin/node-address` response.
+#[derive(Serialize)]
+struct NodeAddressResponse {
+    node_address: String,
+}
+
+/// `/api/admin/*` — Member List, logs, Node Address, actors; JSON like the
+/// rest. `None` when the request is not an admin route.
+async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
+    const MEMBERS: &str = "/api/admin/relay/members";
+    let path = req.path.split('?').next().unwrap_or("");
+    // Corrupt member list: surface it and refuse writes rather than clobbering.
+    let loaded = |r: Result<Vec<Member>, String>| r.map_err(|e| detail(StatusCode::CONFLICT, e));
+    match (req.method.as_str(), path) {
+        ("GET", MEMBERS) => Some(match loaded(load_members()) {
+            Ok(l) => json(StatusCode::OK, &MembersResponse { members: &l }),
+            Err(resp) => resp,
+        }),
+        ("GET", "/api/admin/relay/log") => {
+            let log = ctx.relay.lock().unwrap();
+            Some(json(
+                StatusCode::OK,
+                &EntriesResponse {
+                    entries: &log.entries,
+                },
+            ))
+        }
+        ("GET", "/api/admin/transfers") => {
+            let log = ctx.transfers.lock().unwrap();
+            Some(json(
+                StatusCode::OK,
+                &EntriesResponse {
+                    entries: log.entries(),
+                },
+            ))
+        }
+        ("GET", "/api/admin/node-address") => Some(node_address(ctx).await),
+        // Attribution discovery: every journal actor seen in this node's docs,
+        // for pairing with members. ponytail: full doc scan per request; cache
+        // per-dir mtimes if doc counts ever make this route noticeable.
+        ("GET", "/api/admin/actors") => {
+            let share_dir = ctx.share.share_dir().to_path_buf();
+            let dirs = [
+                journal::journal_dir(),
+                share_dir.clone(),
+                linxiv_share::received_dir(&share_dir),
+                linxiv_share::e2ee_dir(&share_dir),
+                linxiv_share::e2ee_received_dir(&share_dir),
+            ];
+            Some(json(
+                StatusCode::OK,
+                &ActorsList {
+                    actors: scan_actors(&dirs),
+                },
+            ))
+        }
+        // Upsert: add (role defaults to none), or edit an existing member
+        // by POSTing the same id again.
+        ("POST", MEMBERS) => {
+            // Shape failures (missing body, non-object, non-string id) fall
+            // through as an empty id, keeping the id check's 400 first.
+            let b = MemberUpsertBody::deserialize(
+                req.body.as_ref().unwrap_or(&serde_json::Value::Null),
+            )
+            .unwrap_or_default();
+            let id = b.endpoint_id.to_ascii_lowercase();
+            if !valid_endpoint_id(&id) {
+                return Some(detail(
+                    StatusCode::BAD_REQUEST,
+                    "endpoint_id must be 64 hex chars",
+                ));
+            }
+            let role = match b.role {
+                None => None,
+                Some(v) => match serde_json::from_value(v) {
+                    Ok(r) => Some(r),
+                    Err(_) => {
+                        return Some(detail(
+                            StatusCode::BAD_REQUEST,
+                            "role must be none|read|read-write",
+                        ))
+                    }
+                },
+            };
+            // Absent/null preserves; a string sets (empty after cleanup clears).
+            let name = match &b.name {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(s)) => Some(clean_member_name(s)),
+                Some(_) => return Some(detail(StatusCode::BAD_REQUEST, "name must be a string")),
+            };
+            // Absent/null preserves; an array replaces wholesale (empty clears).
+            let actors = match &b.actors {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::Array(a)) => {
+                    let mut out: Vec<String> = Vec::new();
+                    for v in a {
+                        let Some(s) = v.as_str() else {
+                            return Some(detail(
+                                StatusCode::BAD_REQUEST,
+                                "actors must be an array of strings",
+                            ));
+                        };
+                        let s = s.trim().to_ascii_lowercase();
+                        if !remote_query::valid_actor_hex(&s) {
+                            return Some(detail(
+                                StatusCode::BAD_REQUEST,
+                                format!(
+                                    "invalid actor id {:?}: must be non-empty even-length hex (max 128 chars)",
+                                    clean_log_id(&s)
+                                ),
+                            ));
+                        }
+                        if !out.contains(&s) {
+                            out.push(s);
+                        }
+                    }
+                    Some(out)
+                }
+                Some(_) => {
+                    return Some(detail(
+                        StatusCode::BAD_REQUEST,
+                        "actors must be an array of strings",
+                    ))
+                }
+            };
+            let _guard = ctx.relay.lock().unwrap(); // serialize read-modify-write
+            let mut members = match loaded(load_members()) {
+                Ok(l) => l,
+                Err(resp) => return Some(resp),
+            };
+            upsert_member(&mut members, id, role, name, actors);
+            Some(persist(members))
+        }
+        ("DELETE", p) if p.starts_with("/api/admin/relay/members/") => {
+            let id = &p["/api/admin/relay/members/".len()..];
+            let _guard = ctx.relay.lock().unwrap();
+            let mut members = match loaded(load_members()) {
+                Ok(l) => l,
+                Err(resp) => return Some(resp),
+            };
+            members.retain(|m| !m.id.eq_ignore_ascii_case(id));
+            Some(persist(members))
+        }
+        _ => None,
+    }
+}
+
+/// Display names are operator input that history UIs render later: strip
+/// control characters, trim, cap at 64 chars. Empty result = clear the name.
+fn clean_member_name(s: &str) -> Option<String> {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    let cleaned: String = cleaned.trim().chars().take(64).collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Member-list upsert. Absent fields preserve an existing member's values, so
+/// old idempotent add scripts can't silently strip query rights or attribution.
+/// New members default to role `none`. `name`: `None` preserves, `Some(None)`
+/// clears; `actors`: `None` preserves, `Some` replaces wholesale (empty clears).
+fn upsert_member(
+    members: &mut Vec<Member>,
+    id: String,
+    role: Option<Role>,
+    name: Option<Option<String>>,
+    actors: Option<Vec<String>>,
+) {
+    match members.iter_mut().find(|m| m.id.eq_ignore_ascii_case(&id)) {
+        Some(m) => {
+            if let Some(role) = role {
+                m.role = role;
+            }
+            if let Some(name) = name {
+                m.name = name;
+            }
+            if let Some(actors) = actors {
+                m.actors = actors;
+            }
+        }
+        None => members.push(Member {
+            id,
+            role: role.unwrap_or_default(),
+            name: name.flatten(),
+            actors: actors.unwrap_or_default(),
+        }),
+    }
+}
+
+/// `GET /api/admin/actors` row: one journal actor seen in this node's docs.
+#[derive(serde::Serialize)]
+struct ActorRow {
+    actor: String,
+    changes: u64,
+    last_time: i64,
+}
+
+/// `GET /api/admin/actors` envelope.
+#[derive(serde::Serialize)]
+struct ActorsList {
+    actors: Vec<ActorRow>,
+}
+
+/// Per-actor change count and newest change time across every doc in `dirs`,
+/// newest first. Unreadable docs are skipped, not fatal to the whole table.
+fn scan_actors(dirs: &[std::path::PathBuf]) -> Vec<ActorRow> {
+    let mut acc: std::collections::HashMap<String, (u64, i64)> = std::collections::HashMap::new();
+    for dir in dirs {
+        for id in share_sync::doc_ids(dir) {
+            let Ok(history) = linxiv_share::doc_history(dir, &id) else {
+                continue;
+            };
+            for c in history {
+                let e = acc.entry(c.actor).or_insert((0, i64::MIN));
+                e.0 += 1;
+                e.1 = e.1.max(c.time);
+            }
+        }
+    }
+    let mut rows: Vec<_> = acc.into_iter().collect();
+    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then(a.0.cmp(&b.0)));
+    rows.into_iter()
+        .map(|(actor, (changes, last_time))| ActorRow {
+            actor,
+            changes,
+            last_time,
+        })
+        .collect()
+}
+
+fn persist(members: Vec<Member>) -> Response {
+    match save_members(&members) {
+        Ok(()) => json(StatusCode::OK, &MembersResponse { members: &members }),
+        Err(e) => detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("persist member list: {e}"),
+        ),
+    }
+}
+
+/// `GET /api/admin/node-address` — the locator members dial (endpoint id +
+/// relay URL; not a capability). 409 until the node is bound to a configured
+/// custom relay — n0's default relay set has no single URL to encode.
+async fn node_address(ctx: &Ctx) -> Response {
+    let Some(id) = ctx.share.endpoint_id().await else {
+        return detail(StatusCode::CONFLICT, "share node is not bound");
+    };
+    let p2p_config::RelaySetting::Custom(relay) = p2p_config::relay_setting() else {
+        return detail(
+            StatusCode::CONFLICT,
+            "node-address needs a configured relay (p2p_relay_url)",
+        );
+    };
+    let id: linxiv_p2p::EndpointId = match id.parse() {
+        Ok(id) => id,
+        Err(e) => {
+            return detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("endpoint id: {e}"),
+            )
+        }
+    };
+    let addr = linxiv_p2p::NodeAddress::new(id, relay.url().clone());
+    json(
+        StatusCode::OK,
+        &NodeAddressResponse {
+            node_address: addr.to_string(),
+        },
+    )
+}
+
+async fn dispatch(State(ctx): State<Ctx>, req: Request) -> Response {
+    // Static, secretless — the only route outside bearer auth.
+    if req.method() == axum::http::Method::GET && req.uri().path() == "/admin" {
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            ADMIN_HTML,
+        )
+            .into_response();
+    }
+    if let Some(rejection) = check_auth(&ctx, &req) {
+        return rejection;
+    }
+    // Headless-only aggregate, answered here rather than in the shared router.
+    if req.method() == axum::http::Method::GET && req.uri().path() == "/api/status" {
+        return status(&ctx).await;
+    }
+    // iroh-relay access check: text/plain true/false, not the JSON envelope.
+    if req.method() == axum::http::Method::POST && req.uri().path() == "/api/relay-access" {
+        return relay_access(&ctx, &req);
+    }
+    let method = req.method().as_str().to_string();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_default();
+    let bytes = axum::body::to_bytes(req.into_body(), MAX_BODY)
+        .await
+        .unwrap_or_default();
+    let body = if bytes.is_empty() {
+        None
+    } else {
+        serde_json::from_slice(&bytes).ok()
+    };
+    let api_req = ApiRequest { method, path, body };
+    if let Some(resp) = relay_admin(&ctx, &api_req).await {
+        return resp;
+    }
+
+    let result = if api_req
+        .path
+        .trim_start_matches('/')
+        .starts_with("api/share")
+    {
+        let spawn_sync = || spawn_interval_sync(&ctx);
+        share::dispatch(&ctx.state, &ctx.share, &spawn_sync, api_req).await
+    } else {
+        route(&ctx.state, api_req).await
+    };
+    match result {
+        Ok(value) => json(StatusCode::OK, &value),
+        Err(e) => {
+            let status =
+                StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            detail(status, e.detail)
+        }
+    }
+}
+
+/// Most recent `synced_at` across share listings. All values come from one
+/// `to_rfc3339` (UTC, fixed offset), so lexicographic max is chronological.
+fn latest_synced_at<'a>(
+    entries: impl IntoIterator<Item = &'a serde_json::Value>,
+) -> Option<&'a str> {
+    entries
+        .into_iter()
+        .filter_map(|e| e["synced_at"].as_str())
+        .max()
+}
+
+/// `GET /api/status` — one-call health/config aggregate for a headless node.
+#[derive(Serialize)]
+struct StatusResponse<'a> {
+    node_bound: bool,
+    endpoint_id: Option<String>,
+    relay: String,
+    hosted_shares: Option<usize>,
+    received_shares: Option<usize>,
+    last_synced_at: Option<&'a str>,
+    full_text_worker_enabled: bool,
+    home_feed_url_set: bool,
+    uptime_secs: u64,
+    version: &'static str,
+}
+
+async fn status(ctx: &Ctx) -> Response {
+    let endpoint_id = ctx.share.endpoint_id().await;
+    let settings = linxiv_core::config::UserSettings::load().ok();
+    let get = |k: &str| settings.as_ref().and_then(|s| s.get(k));
+    let relay = match p2p_config::relay_setting() {
+        p2p_config::RelaySetting::Default => "default".to_string(),
+        p2p_config::RelaySetting::RequireCustomButMissing => "require-custom-missing".into(),
+        // `CustomRelay` also carries the auth token, so report the URL setting
+        // it was parsed from — never the relay struct itself.
+        p2p_config::RelaySetting::Custom(_) => get("p2p_relay_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .into(),
+    };
+    // Reuse the share listings; a failed listing degrades to null counts.
+    let hosted = share::list_shared(&ctx.state, &ctx.share)
+        .ok()
+        .and_then(|v| v["shared_projects"].as_array().cloned());
+    let received = share::list_received(&ctx.state, &ctx.share)
+        .ok()
+        .and_then(|v| v["received"].as_array().cloned());
+    json(
+        StatusCode::OK,
+        &StatusResponse {
+            node_bound: endpoint_id.is_some(),
+            endpoint_id,
+            relay,
+            hosted_shares: hosted.as_ref().map(Vec::len),
+            received_shares: received.as_ref().map(Vec::len),
+            last_synced_at: latest_synced_at(
+                hosted.iter().flatten().chain(received.iter().flatten()),
+            ),
+            full_text_worker_enabled: get("full_text_worker_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            home_feed_url_set: get("home_feed_url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|u| !u.trim().is_empty()),
+            uptime_secs: ctx.started.elapsed().as_secs(),
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latest_synced_at;
+    use serde_json::json;
+
+    // relay_allow / member-list parsing tests live with the code in
+    // `linxiv_server::remote_query`.
+
+    /// The admin page is a blind consumer of these routes; renaming one must
+    /// break this test, not the page at runtime. sessionStorage, not
+    /// localStorage, is the token-storage contract.
+    #[test]
+    fn admin_html_matches_api_surface() {
+        for needle in [
+            "/api/status",
+            "/api/admin/relay/members",
+            "/api/admin/relay/log",
+            "/api/admin/transfers",
+            "/api/admin/node-address",
+            "/api/admin/actors",
+            "sessionStorage",
+        ] {
+            assert!(super::ADMIN_HTML.contains(needle), "missing {needle}");
+        }
+        assert!(!super::ADMIN_HTML.contains("localStorage"));
+    }
+
+    /// Body-shape failures must degrade to an empty id (→ the hex 400), and
+    /// `role: null` must read as absent — the hand parser's contract.
+    #[test]
+    fn member_upsert_body_defaults_on_shape_failures() {
+        use super::MemberUpsertBody;
+        use serde::Deserialize;
+        let parse = |v: &serde_json::Value| MemberUpsertBody::deserialize(v).unwrap_or_default();
+        for bad in [json!(null), json!([1]), json!({ "endpoint_id": 5 })] {
+            assert_eq!(parse(&bad).endpoint_id, "", "{bad}");
+        }
+        let b = parse(&json!({ "endpoint_id": "AB", "role": null }));
+        assert_eq!(b.endpoint_id, "AB");
+        assert!(b.role.is_none());
+        assert_eq!(
+            parse(&json!({ "role": "bogus" })).role.as_ref().unwrap(),
+            "bogus"
+        );
+    }
+
+    #[test]
+    fn upsert_absent_role_preserves_existing_and_defaults_new_to_none() {
+        use super::{upsert_member, Member, Role};
+        let id = "ab".repeat(32);
+        let mut members = Vec::new();
+        // New member, no role: defaults to none.
+        upsert_member(&mut members, id.clone(), None, None, None);
+        assert_eq!(
+            members,
+            vec![Member {
+                id: id.clone(),
+                role: Role::None,
+                ..Default::default()
+            }]
+        );
+        // Role grant sticks (case-insensitive id match, no duplicate).
+        upsert_member(
+            &mut members,
+            id.to_uppercase(),
+            Some(Role::Read),
+            None,
+            None,
+        );
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].role, Role::Read);
+        // Idempotent re-add without a role: rights are preserved, not reset.
+        upsert_member(&mut members, id, None, None, None);
+        assert_eq!(members[0].role, Role::Read);
+    }
+
+    /// Attribution fields mirror the role contract: absent preserves,
+    /// `Some(None)` name / empty actors clears, present actors replaces.
+    #[test]
+    fn upsert_name_and_actors_preserve_clear_and_replace() {
+        use super::{upsert_member, Role};
+        let id = "cd".repeat(32);
+        let mut members = Vec::new();
+        upsert_member(
+            &mut members,
+            id.clone(),
+            None,
+            Some(Some("Ada".into())),
+            Some(vec!["aa11".into()]),
+        );
+        assert_eq!(members[0].name.as_deref(), Some("Ada"));
+        assert_eq!(members[0].actors, vec!["aa11"]);
+        // Absent name + actors (a bare role change) preserves both.
+        upsert_member(&mut members, id.clone(), Some(Role::Read), None, None);
+        assert_eq!(members[0].name.as_deref(), Some("Ada"));
+        assert_eq!(members[0].actors, vec!["aa11"]);
+        assert_eq!(members[0].role, Role::Read);
+        // Present actors replaces wholesale; empty clears. Name clear is
+        // Some(None) — what an empty-after-trim input parses to.
+        upsert_member(
+            &mut members,
+            id.clone(),
+            None,
+            None,
+            Some(vec!["bb22".into(), "cc33".into()]),
+        );
+        assert_eq!(members[0].actors, vec!["bb22", "cc33"]);
+        upsert_member(&mut members, id.clone(), None, Some(None), Some(Vec::new()));
+        assert_eq!(members[0].name, None);
+        assert!(members[0].actors.is_empty());
+        assert_eq!(members[0].role, Role::Read); // untouched throughout
+        assert_eq!(members.len(), 1);
+    }
+
+    #[test]
+    fn clean_member_name_trims_strips_and_caps() {
+        use super::clean_member_name;
+        assert_eq!(
+            clean_member_name("  Ada \x1b[31m Lovelace\n "),
+            Some("Ada [31m Lovelace".into())
+        );
+        assert_eq!(clean_member_name("   "), None);
+        assert_eq!(clean_member_name("\x07\x00"), None);
+        assert_eq!(clean_member_name(&"x".repeat(200)).unwrap().len(), 64);
+    }
+
+    /// One readable doc yields its actors; a corrupt doc and a missing dir
+    /// are skipped rather than failing the scan.
+    #[test]
+    fn scan_actors_aggregates_and_skips_unreadable_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sp = linxiv_share::SharedProject {
+            share_id: "s1".into(),
+            name: "P".into(),
+            description: String::new(),
+            color: None,
+            tags: Vec::new(),
+            papers: Vec::new(),
+            notes: Vec::new(),
+            annotations: Vec::new(),
+        };
+        linxiv_share::save(dir.path(), &sp).unwrap();
+        std::fs::write(dir.path().join("bad.automerge"), b"not automerge").unwrap();
+        let rows = super::scan_actors(&[dir.path().to_path_buf(), dir.path().join("missing")]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].changes, 1);
+        assert!(super::remote_query::valid_actor_hex(&rows[0].actor));
+        assert!(rows[0].last_time > 0, "save() stamps wall-clock time");
+    }
+
+    /// Restart survival: a reopened log continues the sequence and still
+    /// holds the persisted entries.
+    #[test]
+    fn relay_log_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay_access_log.jsonl");
+        let mut log = super::RelayLog::open(path.clone());
+        log.push(Some("aa"), false, "relay");
+        log.push(None, true, "api");
+        drop(log);
+        let mut reopened = super::RelayLog::open(path);
+        assert_eq!(reopened.entries.len(), 2);
+        assert_eq!(reopened.seq, 2);
+        reopened.push(Some("bb"), true, "relay");
+        assert_eq!(reopened.entries.back().unwrap().seq, 3);
+    }
+
+    /// A restart right after rotation still seeds the tail (and seq) from the
+    /// rotated generation.
+    #[test]
+    fn relay_log_reads_rotated_generation_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay_access_log.jsonl");
+        let mut log = super::RelayLog::open(path.clone());
+        log.push(Some("aa"), false, "relay");
+        log.push(None, true, "api");
+        drop(log);
+        std::fs::rename(&path, path.with_extension("jsonl.1")).unwrap();
+        let reopened = super::RelayLog::open(path);
+        assert_eq!(reopened.entries.len(), 2);
+        assert_eq!(reopened.seq, 2);
+    }
+
+    /// A torn final line (crash mid-write) is newline-terminated on open so
+    /// the next entry doesn't merge into it.
+    #[test]
+    fn relay_log_heals_torn_final_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay_access_log.jsonl");
+        std::fs::write(&path, "{\"seq\":1,\"allowed\":true}\n{\"seq\":2,\"allo").unwrap();
+        let mut log = super::RelayLog::open(path.clone());
+        assert_eq!(log.seq, 1);
+        log.push(None, true, "api");
+        drop(log);
+        let reopened = super::RelayLog::open(path);
+        assert_eq!(reopened.entries.len(), 2);
+        assert_eq!(reopened.seq, 2);
+    }
+
+    #[test]
+    fn feed_poll_period_defaults_and_rejects_nonpositive() {
+        use super::{feed_poll_period, FEED_POLL_DEFAULT};
+        use std::time::Duration;
+        assert_eq!(feed_poll_period(None), FEED_POLL_DEFAULT);
+        assert_eq!(feed_poll_period(Some(0)), FEED_POLL_DEFAULT);
+        assert_eq!(feed_poll_period(Some(-5)), FEED_POLL_DEFAULT);
+        assert_eq!(feed_poll_period(Some(i64::MAX)), FEED_POLL_DEFAULT);
+        assert_eq!(feed_poll_period(Some(5)), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn clean_log_id_strips_control_chars_and_clamps() {
+        assert_eq!(super::clean_log_id("ab\x1b[31m\ncd\r\0"), "ab[31mcd");
+        assert_eq!(super::clean_log_id(&"x".repeat(500)).len(), 128);
+    }
+
+    #[test]
+    fn latest_synced_at_picks_max_and_skips_nulls() {
+        let entries = [
+            json!({ "synced_at": "2026-08-01T00:00:00+00:00" }),
+            json!({ "synced_at": serde_json::Value::Null }), // pending mirror
+            json!({ "synced_at": "2026-09-01T12:30:00+00:00" }),
+        ];
+        assert_eq!(
+            latest_synced_at(&entries),
+            Some("2026-09-01T12:30:00+00:00")
+        );
+        assert_eq!(latest_synced_at(&[]), None);
+    }
+}
+
+fn json(status: StatusCode, value: &impl Serialize) -> Response {
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_vec(value).unwrap_or_default(),
+    )
+        .into_response()
+}
+
+/// Every non-2xx JSON body this bin emits: `{"detail": …}`, the shared
+/// router's error envelope.
+#[derive(Serialize)]
+struct Detail {
+    detail: String,
+}
+
+fn detail(status: StatusCode, msg: impl Into<String>) -> Response {
+    json(status, &Detail { detail: msg.into() })
+}

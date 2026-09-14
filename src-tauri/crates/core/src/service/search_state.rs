@@ -2,8 +2,7 @@
 //!
 //! The history side-effect is the whole reason this seam exists: saving state also
 //! records each non-empty clause term, gated on `search_history_enabled` and capped
-//! by `search_history_max`. That rule used to live in the route handler, which made
-//! it unavailable to any other surface (ADR 0010).
+//! by `search_history_max` (ADR 0010: shared by every surface, not the route).
 
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
@@ -21,6 +20,17 @@ pub struct SavedSearch {
     pub results: Vec<Value>,
     pub saved_ids: Vec<String>,
     pub sort_prefs: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct SearchHistoryResponse {
+    pub suggestions: Vec<String>,
+}
+
+/// `GET /api/search/state` envelope — the saved blob (untyped JSON) or `null`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchStateResponse {
+    pub state: Option<Value>,
 }
 
 /// Past search terms starting with `prefix`, newest first.

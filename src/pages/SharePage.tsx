@@ -14,7 +14,8 @@ import { useSlowHint } from "../hooks/useSlowHint";
 import { Button } from "../components/ui/button";
 import { Input, Textarea } from "../components/ui/input";
 import { Spinner } from "../components/ui/spinner";
-import { ShareCard, type ShareRole } from "../components/share/ShareCard";
+import { ShareCard, type ShareRoleLabel } from "../components/share/ShareCard";
+import { SyncStatusPill } from "../components/share/SyncStatusPill";
 import { ShareSettingsDialog } from "../components/share/ShareSettingsDialog";
 import { ShareProjectDialog } from "../components/share/ShareProjectDialog";
 
@@ -26,14 +27,13 @@ export default function SharePage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [settingsFor, setSettingsFor] = useState<{
     shareId: string;
-    role: ShareRole;
+    role: ShareRoleLabel;
   } | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinErr, setJoinErr] = useState("");
   // set when a join was accepted but its host was offline: the invite is saved
-  // and the share only appears in the received list once it syncs, so this is
-  // the only feedback the user gets that anything happened.
+  // and lists as a Pending card with no name or counts until a sync lands.
   const [joinPending, setJoinPending] = useState("");
   const joinSlow = useSlowHint(joining);
   const [codeCopied, setCodeCopied] = useState(false);
@@ -134,7 +134,7 @@ export default function SharePage() {
   }
 
   const loading = published.isLoading || received.isLoading;
-  const cards: { share: SharedSummary; role: ShareRole }[] = [
+  const cards: { share: SharedSummary; role: ShareRoleLabel }[] = [
     ...(published.data ?? []).map((s) => ({ share: s, role: "Hoster" as const })),
     ...(received.data ?? []).map((s) => ({ share: s, role: "Reader" as const })),
   ];
@@ -153,6 +153,7 @@ export default function SharePage() {
           </p>
         </div>
         <div className="flex-1" />
+        <SyncStatusPill shares={cards.map((c) => c.share)} />
         <Button onClick={() => setDialogOpen(true)}>Share a project</Button>
       </div>
 
@@ -239,7 +240,7 @@ export default function SharePage() {
           className="flex flex-1 items-center justify-center text-sm"
           style={{ color: "var(--color-muted)" }}
         >
-          No shared projects yet. Press Create Shared Project to share one of yours, or join with a ticket provided by another linXiv user.
+          Invite collaborators to start sharing papers, tags and annotations.
         </div>
       )}
       {!loading && cards.length > 0 && (

@@ -228,7 +228,7 @@ export function HomeFeedSection() {
       <SettingGroup>
         <SettingRow
           label="Home feed URL"
-          description="RSS/Atom feed shown on the home page, e.g. https://rss.arxiv.org/rss/cs.LG — leave empty for the default dashboard"
+          description="RSS/Atom feed shown on the home page, e.g. https://rss.arxiv.org/rss/cs.LG. Leave empty for the default dashboard"
           descriptionId="home-feed-url-desc"
         >
           {settingsLoading ? (

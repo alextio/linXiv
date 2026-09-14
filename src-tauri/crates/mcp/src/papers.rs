@@ -1,13 +1,5 @@
-//! Paper tools cluster. Owned by the `papers` Fill agent — do not edit other
-//! cluster files.
-//!
-//! Every body reaches the DB via `self.with_conn(|conn| ...)` and calls into
-//! `linxiv_core::service::paper` (and `::tag` for full-text/categories as the
-//! Python port does). Return `Ok(Json(value))` on success; on the error paths
-//! the Python code raises `ValueError`, so map those to
-//! `Err(ErrorData::invalid_params(msg, None))` with the EXACT message string
-//! Misses word themselves via `CoreError::PaperNotFound`'s Display — no
-//! per-surface message building.
+//! Paper tools cluster. User-facing refusals map to `invalid_params` with the exact
+//! message; misses word themselves via `CoreError::PaperNotFound`'s Display.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router, ErrorData};
@@ -26,7 +18,6 @@ use crate::Server;
 
 use crate::util::{core_err, invalid, json_ok};
 
-/// `Paper(source_id=paper_id)` lookup key, as the Python tools build it.
 fn paper_key(paper_id: &str) -> svc_paper::PaperRef {
     svc_paper::PaperRef::source(paper_id.to_string())
 }
@@ -181,7 +172,7 @@ impl Server {
             max_results,
         }): Parameters<SearchPapersParams>,
     ) -> Result<String, ErrorData> {
-        // Python `source.search(query, max_results)` defaults sort="relevance".
+        // Remote search always uses sort="relevance".
         let results = svc_source::search(&source, &query, max_results as u32, "relevance")
             .await
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
@@ -222,7 +213,7 @@ impl Server {
     ) -> Result<String, ErrorData> {
         let sort: PaperSort = sort.map(Into::into).unwrap_or_default();
         let desc = desc.unwrap_or_else(|| sort.default_desc());
-        // `list_paper_details` defaults latest_only=True.
+        // `true` = latest_only: newest version per root.
         let papers = self
             .with_conn(|conn| {
                 svc_paper::list_papers_sorted(
@@ -231,6 +222,7 @@ impl Server {
                     limit,
                     offset,
                     category.as_deref(),
+                    None,
                     sort,
                     desc,
                 )
@@ -265,7 +257,7 @@ impl Server {
             Ok(Ok(()))
         })
         .map_err(core_err)??;
-        json_ok(&serde_json::json!({ "deleted": paper_id }))
+        json_ok(&svc_paper::DeletedPaperReceipt { deleted: paper_id })
     }
 
     #[tool(description = "Get all stored versions of a paper.")]
@@ -284,8 +276,7 @@ impl Server {
         &self,
         Parameters(SearchFullTextParams { query, limit }): Parameters<SearchFullTextParams>,
     ) -> Result<String, ErrorData> {
-        // Python swallows FTS errors and returns []. It logs the error to STDOUT —
-        // a bug that corrupts JSON-RPC here; route the diagnostic to STDERR instead.
+        // Any read failure degrades to []; the log goes to STDERR (STDOUT is JSON-RPC).
         match self.with_conn(|conn| svc_paper::search_library(conn, &query, limit)) {
             Ok(results) => json_ok(&results),
             Err(exc) => {
@@ -311,8 +302,8 @@ impl Server {
         if paper.downloaded_source && !force {
             return json_ok(&svc_paper::FullTextReceipt::already_indexed(&paper));
         }
-        // Mirrors io_authors_misc.rs's map_core: BadRequest/Validation/PaperNotFound
-        // are user-facing refusals, not server faults.
+        // Like io_authors_misc's `map_core`, plus `PaperNotFound` (commit can
+        // race a delete): refusals, not server faults.
         let map_fetch_err = |e: CoreError| match e {
             CoreError::BadRequest(m) | CoreError::Validation(m) => invalid(m),
             e @ CoreError::PaperNotFound(_) => invalid(e.to_string()),
@@ -416,14 +407,14 @@ impl Server {
             tags,
         }): Parameters<RepairPaperParams>,
     ) -> Result<String, ErrorData> {
-        // Keyed by the stable paper root so the fix survives a source_id rename.
+        // Root fk keys the update; `paper_id` also becomes the new source_id.
         let updated = self
             .with_conn(|conn| {
                 let source_fk = match svc_paper::resolve_source_fk(conn, &paper_id) {
                     Ok(fk) => fk,
                     Err(e) => return Ok(Err(crate::util::guard_err(e))),
                 };
-                // Python `existing.version if existing else 1`.
+                // Keep the existing paper's version; default to 1 when absent.
                 let version = svc_paper::get(conn, &paper_key(&paper_id))?
                     .map(|p| p.version)
                     .unwrap_or(1);
@@ -437,7 +428,7 @@ impl Server {
                     url,
                     tags,
                 };
-                // Date validated after the existence check, matching Python ordering.
+                // Date validated after the existence check.
                 let meta = match fields.into_metadata(paper_id.clone(), version, None) {
                     Ok(m) => m,
                     Err(e) => return Ok(Err(invalid(e.to_string()))),
@@ -507,10 +498,10 @@ impl Server {
             .map_err(core_err)?
             .ok_or_else(|| crate::util::guard_err(CoreError::PaperNotFound(paper_id.clone())))?;
         // One envelope across route/CLI/MCP; the caller already knows the id.
-        json_ok(&serde_json::json!({
-            "ok": true,
-            "removed_from_projects": removed,
-        }))
+        json_ok(&svc_project::RemovedFromProjects {
+            ok: true,
+            removed_from_projects: removed,
+        })
     }
 }
 
@@ -523,9 +514,7 @@ mod tests {
 
     use super::*;
 
-    /// Mirrors `route/papers.rs`'s `state()`: an in-memory DB, no router merge
-    /// since these tests call tool methods directly rather than dispatching
-    /// through `tool_router`.
+    /// In-memory DB; tool methods called directly, not dispatched through `tool_router`.
     fn server() -> Server {
         let conn = storage::open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
@@ -592,8 +581,8 @@ mod tests {
         );
     }
 
-    /// The backlog is every stored arXiv paper with a `/pdf/` url and no TeX
-    /// yet; `limit` trims the returned ids without changing `pending`.
+    /// The backlog is every active arXiv paper with a `/pdf/` url and no TeX
+    /// yet; `limit` trims the returned ids, not `pending`.
     #[tokio::test]
     async fn full_text_pending_reports_the_backlog() {
         let srv = server();

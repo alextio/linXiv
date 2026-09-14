@@ -18,9 +18,7 @@ export default function TagPage() {
   return <TagIndexView />;
 }
 
-// ---------------------------------------------------------------------------
-// Tag index: all tags
-// ---------------------------------------------------------------------------
+// Tag index: all tags.
 
 type TagSortKey = "label" | "paper_count";
 
@@ -137,9 +135,7 @@ function TagIndexView() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Tag detail: papers + projects with this tag
-// ---------------------------------------------------------------------------
+// Tag detail: papers + projects with this tag.
 
 interface TagDetailViewProps {
   label: string;
@@ -180,7 +176,6 @@ function TagDetailView({ label }: TagDetailViewProps) {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
-      {/* Header */}
       <div className="flex items-start gap-4">
         <Button
           variant="ghost"
@@ -209,7 +204,6 @@ function TagDetailView({ label }: TagDetailViewProps) {
         </span>
       </div>
 
-      {/* Papers section */}
       <section className="space-y-3">
         <h2 className="text-base font-semibold text-text">
           Papers{papers.length > 0 ? ` (${papers.length})` : ""}
@@ -223,7 +217,6 @@ function TagDetailView({ label }: TagDetailViewProps) {
         )}
       </section>
 
-      {/* Projects section */}
       {projects.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-base font-semibold text-text">

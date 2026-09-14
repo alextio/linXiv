@@ -27,9 +27,9 @@ WHERE COALESCE(v.full_text, '') != ''
       WHERE x.source_id = v.source_id AND COALESCE(x.full_text, '') != ''
   );
 
--- fts5 has no UPDATE, hence DELETE then INSERT. The INSERT selects from the
--- view, so it writes nothing when the paper no longer belongs in the index
--- (text cleared, or the root soft-deleted while its FULL_TEXT is still stored).
+-- DELETE then INSERT, not UPDATE: the INSERT selects from the view, so it
+-- writes nothing when the paper no longer belongs in the index (text cleared,
+-- or the root soft-deleted while its FULL_TEXT is still stored).
 --
 -- DROP-then-CREATE, like the view above, NOT `CREATE ... IF NOT EXISTS`: these
 -- ship in the views phase, which runs on every open, so dropping first is what

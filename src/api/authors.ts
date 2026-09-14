@@ -1,53 +1,52 @@
-import { apiFetch } from "./client";
-import type { Author, AuthorDetail, BasicAuthorDetails } from "../types/api";
+import { libraryFetch } from "../stores/backend.ts";
+import type {
+  Author,
+  AuthorDetail,
+  AuthorMergeBody,
+  AuthorMergeResponse,
+  AuthorsResponse,
+  AuthorUpdateBody,
+  MergeCandidates,
+  OkReceipt,
+} from "../types/api";
 
-export interface AuthorUpdateBody {
-  full_name?: string | null;
-  first_name?: string | null;
-  last_name?: string | null;
-  orcid?: string | null;
-}
+export type { AuthorUpdateBody };
 
 export async function listAuthors(excludeSingle = false): Promise<Author[]> {
   const query = excludeSingle ? "?exclude_single=true" : "";
-  const data = await apiFetch<{ authors: Author[] }>(`/api/authors${query}`);
+  const data = await libraryFetch<AuthorsResponse>(`/api/authors${query}`);
   return data.authors;
 }
 
 export async function getAuthor(authorId: number): Promise<AuthorDetail> {
-  return apiFetch<AuthorDetail>(`/api/authors/${authorId}`);
+  return libraryFetch<AuthorDetail>(`/api/authors/${authorId}`);
 }
 
 export async function updateAuthor(
   authorId: number,
   body: AuthorUpdateBody,
 ): Promise<AuthorDetail> {
-  return apiFetch<AuthorDetail>(`/api/authors/${authorId}`, {
+  return libraryFetch<AuthorDetail>(`/api/authors/${authorId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
 
-export interface MergeCandidates {
-  /** Shares this author's ORCID — near-certain duplicate. */
-  candidates: BasicAuthorDetails[];
-  /** Shares only the exact full name — weak evidence, never overlaps `candidates`. */
-  name_candidates: BasicAuthorDetails[];
-}
+export type { MergeCandidates };
 
 export async function getMergeCandidates(authorId: number): Promise<MergeCandidates> {
-  return apiFetch<MergeCandidates>(`/api/authors/${authorId}/merge-candidates`);
+  return libraryFetch<MergeCandidates>(`/api/authors/${authorId}/merge-candidates`);
 }
 
 export async function linkAuthorToPaper(authorId: number, paperId: number): Promise<void> {
-  await apiFetch<{ ok: boolean }>(`/api/authors/${authorId}/papers/${paperId}`, {
+  await libraryFetch<OkReceipt>(`/api/authors/${authorId}/papers/${paperId}`, {
     method: "POST",
   });
 }
 
 export async function unlinkAuthorFromPaper(authorId: number, paperId: number): Promise<void> {
-  await apiFetch<{ ok: boolean }>(`/api/authors/${authorId}/papers/${paperId}`, {
+  await libraryFetch<OkReceipt>(`/api/authors/${authorId}/papers/${paperId}`, {
     method: "DELETE",
   });
 }
@@ -55,16 +54,17 @@ export async function unlinkAuthorFromPaper(authorId: number, paperId: number): 
 export async function mergeAuthors(
   canonicalId: number,
   duplicateIds: number[],
-): Promise<AuthorDetail> {
-  return apiFetch<AuthorDetail>(`/api/authors/${canonicalId}/merge`, {
+): Promise<AuthorMergeResponse> {
+  const body: AuthorMergeBody = { duplicate_ids: duplicateIds };
+  return libraryFetch<AuthorMergeResponse>(`/api/authors/${canonicalId}/merge`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ duplicate_ids: duplicateIds }),
+    body: JSON.stringify(body),
   });
 }
 
 export async function deleteAuthor(authorId: number): Promise<void> {
-  await apiFetch<{ ok: boolean }>(`/api/authors/${authorId}`, {
+  await libraryFetch<OkReceipt>(`/api/authors/${authorId}`, {
     method: "DELETE",
   });
 }

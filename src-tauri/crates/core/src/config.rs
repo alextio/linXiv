@@ -1,6 +1,5 @@
-//! Runtime paths + user settings. Rust port of `config.py`, `storage/paths.py`,
-//! and `user_settings.py`. Plan §5.8 + ADR-0014 (LINXIV_DATA_DIR is the single
-//! source of truth) + D24 (data-dir parity with Tauri).
+//! Runtime paths + user settings. ADR-0014 (all state resolves through
+//! `data_dir()`) + D24 (data-dir parity with Tauri).
 
 use std::env;
 use std::path::PathBuf;
@@ -11,25 +10,20 @@ use serde_json::{Map, Value};
 use crate::error::Result;
 
 const ENV_DATA_DIR: &str = "LINXIV_DATA_DIR";
-/// Must match `src-tauri/tauri.conf.json` "identifier" and `config.py` _APP_IDENTIFIER.
+/// Must match `src-tauri/tauri.conf.json` "identifier".
 const APP_IDENTIFIER: &str = "com.linxiv.app";
 const USER_SETTINGS_FILE: &str = "user_settings.json";
 
-/// Bundled defaults, embedded at compile time from the canonical source file so the
-/// Rust defaults can never drift from `formats/default_settings.json`.
+/// Bundled defaults, compiled in from the canonical `assets/default_settings.json`.
 const BUNDLED_DEFAULTS: &str = include_str!("../assets/default_settings.json");
 
 /// Runtime data dir (DB, PDFs, user settings, vaults). Resolved on every call so it tracks
-/// LINXIV_DATA_DIR dynamically; falls back to the OS app-data dir when unset. Never the repo.
-///
-/// The fallback is the OS per-user app-data dir for `com.linxiv.app`, byte-matching Tauri's
-/// `app_data_dir()` (which is `dirs::data_dir().join(identifier)`) on Linux/macOS/Windows.
+/// LINXIV_DATA_DIR; the fallback byte-matches Tauri's `app_data_dir()` for the identifier.
 //
-// `BaseDirs::data_dir()` is the `directories`-crate equivalent of `dirs::data_dir()`:
+// `BaseDirs::data_dir()` — the base the identifier is appended to:
 //   Linux   $XDG_DATA_HOME or ~/.local/share
 //   macOS   ~/Library/Application Support
 //   Windows %APPDATA% (Roaming)
-// then we append the identifier as a single path segment, exactly like Tauri.
 pub fn data_dir() -> PathBuf {
     match env::var_os(ENV_DATA_DIR) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -40,9 +34,8 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-/// Resolve, pin, and create the data dir. Call once at startup before any DB/PDF/vault access.
-/// Writes the resolved path back to LINXIV_DATA_DIR so the value is stable for the process and
-/// inherited by children (ADR-0014).
+/// Resolve, pin, and create the data dir; call once at startup before any DB/PDF/vault access.
+/// Writes the path back to LINXIV_DATA_DIR so it is stable and inherited by children (ADR-0014).
 pub fn init_data_dir() -> Result<PathBuf> {
     let path = data_dir();
     // edition-2021: env::set_var is safe (becomes `unsafe` only under edition-2024).
@@ -51,7 +44,7 @@ pub fn init_data_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
-// Path helpers — mirror storage/paths.py. Each resolves through data_dir() per call.
+// Path helpers — each resolves through data_dir() per call.
 pub fn db_path() -> PathBuf {
     data_dir().join("papers.db")
 }
@@ -75,14 +68,8 @@ pub fn crossref_mailto() -> String {
     mailto_setting("CROSSREF_MAILTO")
 }
 
-/// A polite-pool address; CR/LF are stripped downstream in
-/// `sources::http::polite_user_agent`.
-///
-/// The env var wins; a user-settings override is the fallback. Only the app sets the
-/// env var (`PATCH /api/env`), and it sets it on its own process — so without this
-/// fallback the CLI and MCP server, which run as separate processes, read the value
-/// as empty no matter what was configured, and `settings update <KEY>` wrote a key
-/// nothing ever read.
+/// Env var wins, user settings the fallback — the CLI and MCP server are separate
+/// processes, never seeing `PATCH /api/env`. `polite_user_agent` keeps printable ASCII.
 fn mailto_setting(key: &str) -> String {
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => v,
@@ -93,17 +80,15 @@ fn mailto_setting(key: &str) -> String {
     }
 }
 
-/// User settings: bundled defaults overlaid by the user's overrides (shallow merge), mirroring
-/// `user_settings.py`. Only the overrides are persisted, never the defaults.
+/// User settings: bundled defaults overlaid by the user's overrides (shallow merge).
+/// Only the overrides are persisted, never the defaults.
 pub struct UserSettings {
     defaults: &'static Map<String, Value>,
     overrides: Map<String, Value>,
 }
 
-/// The bundled defaults, parsed once per process. Callers hit this on every
-/// settings read (feed polls, uploads, the full-text worker), so re-parsing the
-/// embedded JSON each time was pure waste. The expect is safe: the JSON is
-/// compiled in, so a parse failure is a build defect, not a runtime condition.
+/// The bundled defaults, parsed once per process (settings reads are hot: feed polls,
+/// uploads, the full-text worker). Expect is safe: the JSON is compiled in.
 fn bundled_defaults() -> &'static Map<String, Value> {
     static DEFAULTS: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
     DEFAULTS.get_or_init(|| {
@@ -133,7 +118,7 @@ impl UserSettings {
         self.overrides.get(key).or_else(|| self.defaults.get(key))
     }
 
-    /// Shallow merge `{**defaults, **overrides}` — the effective settings.
+    /// The effective settings: defaults with overrides layered on top.
     pub fn all(&self) -> Map<String, Value> {
         let mut merged = (*self.defaults).clone();
         for (k, v) in &self.overrides {
@@ -142,25 +127,21 @@ impl UserSettings {
         merged
     }
 
-    /// Set an override and persist immediately — write-through, matching
-    /// `user_settings.py::set` (which calls `save()`). In-memory-only would
-    /// silently drop persistence in the ported `update_setting`/CLI/API paths.
+    /// Set an override and persist immediately (write-through).
     pub fn set(&mut self, key: impl Into<String>, value: Value) -> Result<()> {
         self.overrides.insert(key.into(), value);
         self.save()
     }
 
-    /// Set an override from a raw command-line/tool string: parsed as JSON when it
-    /// is valid JSON, else stored verbatim as a string. Returns what was stored so
-    /// the caller can echo it. The one home for the rule (`linxiv settings update`
-    /// and MCP `update_setting` each used to spell it out).
+    /// Set an override from a raw string: parsed as JSON when valid, else stored verbatim;
+    /// returns what was stored. Shared by `linxiv settings update` and MCP `update_setting`.
     pub fn set_from_str(&mut self, key: impl Into<String>, raw: String) -> Result<Value> {
         let parsed = serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw));
         self.set(key, parsed.clone())?;
         Ok(parsed)
     }
 
-    /// Persist only the overrides (pretty-printed, like the Python `json.dumps(indent=2)` writer).
+    /// Persist only the overrides (pretty-printed).
     pub fn save(&self) -> Result<()> {
         let path = data_dir().join(USER_SETTINGS_FILE);
         let body = serde_json::to_string_pretty(&self.overrides)?;
@@ -168,11 +149,9 @@ impl UserSettings {
         Ok(())
     }
 
-    /// `pdf_save_limit_mb`, converted to bytes — the TOTAL-storage cap across all managed
-    /// PDFs, enforced before every new PDF write by `service::paper_import::import_pdf` and
-    /// `service::files::download_pdf`. Falls back to the bundled default (1024 MB) if the
-    /// setting is missing or not a positive integer, so a hand-edited settings file can't
-    /// silently disable the cap (saturating_mul keeps an absurd value from overflowing it away).
+    /// `pdf_save_limit_mb` as bytes — the TOTAL cap across all managed PDFs, checked by
+    /// every new-PDF write path. Non-positive or non-integer falls back to 1024 MiB, so
+    /// a hand-edited settings file can't disable the cap.
     pub fn pdf_save_limit_bytes(&self) -> u64 {
         let mb = self
             .get("pdf_save_limit_mb")
@@ -182,13 +161,8 @@ impl UserSettings {
         mb.saturating_mul(1024 * 1024)
     }
 
-    /// `rss_cache_retention_days`: how many days `RSS_CACHE_ENTRY` rows are kept
-    /// before pruning. Also floors `rss::prune_dismissed`'s VER cutoff -- a
-    /// dismissal can't be forgotten before the cache entry it hides is gone.
-    /// Falls back to 30 if missing or not a positive integer.
-    ///
-    /// TODO: prune_dismissed's cutoffs are hardcoded, not settings -- surface
-    /// once there's a real need to tune them per-user.
+    /// Days `RSS_CACHE_ENTRY` rows are kept; also floors `rss::prune_dismissed`'s VER and
+    /// DOI cutoffs, so a dismissal outlives the entry it hides. Defaults to 30.
     pub fn rss_cache_retention_days(&self) -> i64 {
         self.get("rss_cache_retention_days")
             .and_then(Value::as_i64)
@@ -196,13 +170,8 @@ impl UserSettings {
             .unwrap_or(30)
     }
 
-    /// `pdf_import_verify_identity_enabled`: whether the PDF-metadata-first
-    /// import short-circuit (`sources::pdf_metadata::resolve_from_extracted`)
-    /// makes its one optional network lookup — fetching a text-scanned arXiv
-    /// id/DOI candidate to confirm it before adopting it as dedupe identity.
-    /// Off means PDF-only: no network call for identity, ever, even when a
-    /// candidate id is sitting right there in the text. Falls back to `true`
-    /// (verify) if missing or not a bool.
+    /// Whether `resolve_from_extracted` may make its one lookup to confirm a text-scanned
+    /// arXiv id/DOI as dedupe identity. Does not gate enrichment. Defaults true.
     pub fn pdf_import_verify_identity_enabled(&self) -> bool {
         self.get("pdf_import_verify_identity_enabled")
             .and_then(Value::as_bool)
@@ -228,7 +197,7 @@ mod tests {
             data_dir().file_name().unwrap().to_str().unwrap(),
             APP_IDENTIFIER
         );
-        // And equals the BaseDirs base + identifier (the exact Tauri form).
+        // And the whole path, not just the leaf.
         let expect = BaseDirs::new().unwrap().data_dir().join(APP_IDENTIFIER);
         assert_eq!(data_dir(), expect);
 
@@ -248,17 +217,17 @@ mod tests {
         assert_eq!(s.get("pdf_save_limit_mb").unwrap().as_i64().unwrap(), 1024);
         assert!(s.get("tex_rendering_enabled").unwrap().as_bool().unwrap());
         assert_eq!(s.rss_cache_retention_days(), 30);
-        assert!(s.pdf_import_verify_identity_enabled()); // defaults to true
+        assert!(s.pdf_import_verify_identity_enabled());
         assert!(s.get("nope").is_none());
 
         // Override + save persists ONLY the override, then reloads merged.
         let mut s = s;
-        s.set("pdf_save_limit_mb", Value::from(42)).unwrap(); // write-through persists
+        s.set("pdf_save_limit_mb", Value::from(42)).unwrap();
         let raw: Map<String, Value> = serde_json::from_str(
             &std::fs::read_to_string(scratch.join(USER_SETTINGS_FILE)).unwrap(),
         )
         .unwrap();
-        assert_eq!(raw.len(), 1); // only the override written, not the defaults
+        assert_eq!(raw.len(), 1);
         assert_eq!(raw["pdf_save_limit_mb"], Value::from(42));
 
         // Override flips it off; falls back to true if the stored value isn't a bool.
@@ -281,8 +250,7 @@ mod tests {
         // Untouched default still resolves through the merge.
         assert!(s.all()["tex_rendering_enabled"].as_bool().unwrap());
 
-        // openalex_mailto: unset env falls back to the settings override, so the CLI
-        // and MCP processes see what `settings update` wrote; a set env var wins.
+        // openalex_mailto precedence: unset env -> settings override; a set env wins.
         env::remove_var("OPENALEX_MAILTO");
         assert_eq!(openalex_mailto(), "");
         let mut s = s;

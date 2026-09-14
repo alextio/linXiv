@@ -5,9 +5,8 @@ import assert from "node:assert/strict";
 import { indexView, normTag } from "./model.ts";
 import { sampleView } from "./fixture.ts";
 
-// The exact rule `linxiv_core::graph::norm_tag` applies server-side. A row is
-// free text the user typed, so it has to be folded here; the values it is
-// compared against arrive already normalized.
+// A typed filter row is free text, so it is folded here with the same rule
+// `linxiv_core::graph::norm_tag` applies to what it is compared against.
 test("normTag trims then folds case", () => {
   assert.equal(normTag("ML"), "ml");
   assert.equal(normTag("  ml  "), "ml");
@@ -37,7 +36,7 @@ test("indexView walks the edges both ways", () => {
   ]);
   assert.deepEqual(index.papersByNode.get("author::7"), ["1", "2"]);
   assert.deepEqual(index.papersByNode.get("tag::ml"), ["1"]);
-  // A node with no edges is absent rather than empty — every caller defaults it.
+  // A non-paper id is absent rather than empty — every caller defaults it.
   assert.equal(index.neighboursByPaper.get("author::7"), undefined);
 });
 

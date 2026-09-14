@@ -17,9 +17,13 @@ import {
   PanelLeftOpen,
   Upload,
   AlertCircle,
+  Globe,
 } from "lucide-react";
 import { useUiStore, type SidebarPageKey } from "../../stores/ui";
+import { showContextMenu } from "../../lib/contextMenu";
 import { useImportJobsStore } from "../../stores/importJobs";
+import { useBackendStore } from "../../stores/backend";
+import { remoteIndicatorLabel } from "../../lib/remoteBackend";
 import { Spinner } from "../ui/spinner";
 
 interface NavItem {
@@ -42,16 +46,41 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/tags", label: "Tags", icon: <Tag size={16} />, pageKey: "tags" },
   { to: "/authors", label: "Authors", icon: <Users size={16} /> },
   // The editor takes the Notes slot: editor projects ARE frontmatter-flagged
-  // notes (see service/editor_project.py), so the tab is governed by the
-  // existing "notes" sidebar toggle (ADR 0004) and will evolve into the full
-  // Notes page once note handling lands. (The old /notes stub route stays
-  // reachable by URL but had no page behind it.)
+  // notes (service/editor_project.rs), so the tab rides the existing "notes"
+  // sidebar toggle (ADR 0004). /notes stays reachable by URL with no page
+  // behind it.
   { to: "/editor", label: "Editor", icon: <FileCode size={16} />, pageKey: "notes" },
   { to: "/settings", label: "Settings", icon: <Settings size={16} /> },
 ];
 
 const EXPANDED_W = 160;
 const COLLAPSED_W = 48;
+
+// Unmistakable "you're viewing a remote library" pill (remote mode is
+// online-only, opposite of local-first shares — surface which backend you're
+// on). Renders nothing on the local backend; clicking opens its settings.
+function RemoteModeBadge({ collapsed }: { collapsed: boolean }) {
+  const label = remoteIndicatorLabel(useBackendStore((s) => s.defaultBackend));
+  if (label === null) return null;
+  return (
+    <NavLink
+      to="/settings#backends"
+      title={`Viewing remote library “${label}”. Click to manage backends`}
+      className="mx-2 mb-2 rounded-md px-2 py-1.5 text-xs flex items-center justify-center gap-1.5"
+      style={{
+        backgroundColor:
+          "color-mix(in srgb, var(--color-accent) 14%, transparent)",
+        border: "1px solid var(--color-accent)",
+        color: "var(--color-accent)",
+        textDecoration: "none",
+        fontWeight: 600,
+      }}
+    >
+      <Globe size={12} className="shrink-0" />
+      {!collapsed && <span className="truncate">Remote: {label}</span>}
+    </NavLink>
+  );
+}
 
 function ImportProgress({ collapsed }: { collapsed: boolean }) {
   const jobs = useImportJobsStore((s) => s.jobs);
@@ -121,8 +150,22 @@ function ImportProgress({ collapsed }: { collapsed: boolean }) {
 }
 
 export function Sidebar() {
-  const { sidebarCollapsed, toggleSidebar, sidebarPages } = useUiStore();
+  const { sidebarCollapsed, toggleSidebar, sidebarPages, setSidebarPage } = useUiStore();
   const w = sidebarCollapsed ? COLLAPSED_W : EXPANDED_W;
+
+  // Right-click anywhere on the nav: the same show/hide-page toggles Settings
+  // has, as native check items — so a hidden page can be re-shown from here
+  // too (its own entry is gone from the nav, so per-item menus can't do it).
+  function handleNavContextMenu(e: React.MouseEvent) {
+    showContextMenu(
+      e,
+      NAV_ITEMS.filter((n) => n.pageKey).map((n) => ({
+        text: n.label,
+        checked: sidebarPages[n.pageKey!],
+        action: () => setSidebarPage(n.pageKey!, !sidebarPages[n.pageKey!]),
+      }))
+    );
+  }
 
   return (
     <aside
@@ -175,8 +218,10 @@ export function Sidebar() {
         </button>
       </div>
 
+      <RemoteModeBadge collapsed={sidebarCollapsed} />
+
       {/* Navigation */}
-      <nav className="flex-1 px-3 flex flex-col gap-1">
+      <nav className="flex-1 px-3 flex flex-col gap-1" onContextMenu={handleNavContextMenu}>
         {NAV_ITEMS.filter(({ pageKey }) => !pageKey || sidebarPages[pageKey]).map(({ to, label, icon, end }) => (
           <NavLink
             key={to}

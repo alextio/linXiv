@@ -109,7 +109,7 @@ export function SharingSection() {
               ? shareErrText(reconnectMutation.error)
               : reconnectMutation.isSuccess
                 ? "Reconnected."
-                : "Saves the settings above and rebinds the p2p node — no app restart needed."
+                : "Saves the settings above and rebinds the p2p node; no app restart needed."
           }
         >
           <Button

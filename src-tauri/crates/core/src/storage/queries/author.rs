@@ -1,9 +1,5 @@
-//! Author reads + writes. Rust port of `storage/authors.py` (+ the get-or-create
-//! `_author_fk_for_name` from `storage/db.py`). Plan §5.3.
-//!
-//! No transaction wrappers here: every write is a single statement (matching the
-//! Python, which relies on `with _connect()` autocommit). The get-or-create is a
-//! SELECT-then-conditional-INSERT — no partial-inconsistent state to roll back.
+//! Author reads + writes. Plan §5.3. Every write is a single statement except
+//! `merge_authors`, which wraps its four steps in one transaction.
 
 use std::collections::HashSet;
 
@@ -14,7 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::models::{AuthorPaperPreview, AuthorWithCount, BasicAuthorDetails};
 use crate::storage::db;
 
-// `AUTHOR.AUTHOR_*` columns are all nullable -> every field but the FK is Option.
+// The four name/ORCID columns are all nullable -> only the FK isn't Option.
 fn row_to_basic(row: &Row) -> rusqlite::Result<BasicAuthorDetails> {
     Ok(BasicAuthorDetails {
         author_id: row.get("AUTHOR_FK")?,
@@ -27,7 +23,7 @@ fn row_to_basic(row: &Row) -> rusqlite::Result<BasicAuthorDetails> {
 
 // ── reads ─────────────────────────────────────────────────────────────────
 
-/// `authors.py::get_author` — one author by FK, or None.
+/// One author by FK, or None.
 pub fn get_author(conn: &Connection, author_id: i64) -> Result<Option<BasicAuthorDetails>> {
     Ok(conn
         .query_row(
@@ -39,7 +35,7 @@ pub fn get_author(conn: &Connection, author_id: i64) -> Result<Option<BasicAutho
         .optional()?)
 }
 
-/// `authors.py::list_authors` (non-paper path). `name` Some -> exact match under
+/// `name` Some -> exact match under
 /// COLLATE NOCASE; None -> every author ordered by full name.
 pub fn get_many(conn: &Connection, name: Option<&str>) -> Result<Vec<BasicAuthorDetails>> {
     let (sql, p): (&str, Vec<Value>) = match name {
@@ -73,8 +69,7 @@ pub fn get_author_by_orcid(conn: &Connection, orcid: &str) -> Result<Option<Basi
         .optional()?)
 }
 
-/// `authors.py::list_authors(paper_id=...)` via `_LIST_AUTHORS_FROM_PAPER_SQL` —
-/// authors of one paper, ordered by their stored AUTHOR_INDEX.
+/// Authors of one paper, ordered by their stored AUTHOR_INDEX.
 pub fn get_paper_authors(conn: &Connection, paper_id: i64) -> Result<Vec<BasicAuthorDetails>> {
     let mut stmt = conn.prepare(
         "SELECT a.AUTHOR_FK, a.AUTHOR_ORCID, a.AUTHOR_FULL_NAME, a.AUTHOR_FIRST, a.AUTHOR_LAST \
@@ -87,11 +82,12 @@ pub fn get_paper_authors(conn: &Connection, paper_id: i64) -> Result<Vec<BasicAu
         .map_err(Into::into)
 }
 
-/// Each paper's author ORCIDs (AUTHOR_INDEX order, so index-aligned with the
-/// paper's authors list), keyed by PAPER_ID. The batched sibling of
-/// `get_paper_authors` for snapshot builders that would otherwise query once
-/// per paper. Papers with no author links are absent from the map. Chunked to
-/// stay under SQLite's bound-variable limit.
+/// Each paper's author ORCIDs, index-aligned with the authors list, keyed by
+/// PAPER_ID — the batched sibling of `get_paper_authors`. ORCIDs are placed
+/// at their stored AUTHOR_INDEX: a repeated author only keeps its first link
+/// row (the unique link index), so the repeat's position reads `None` — the
+/// first occurrence already carries that author's ORCID. Link-less papers
+/// are absent; chunked under SQLite's bound-variable limit.
 pub fn paper_author_orcids(
     conn: &Connection,
     paper_ids: &[i64],
@@ -101,25 +97,43 @@ pub fn paper_author_orcids(
     for chunk in paper_ids.chunks(900) {
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = format!(
-            "SELECT pta.PAPER_ID, a.AUTHOR_ORCID \
+            "SELECT pta.PAPER_ID, pta.AUTHOR_INDEX, a.AUTHOR_ORCID \
              FROM AUTHOR a \
              JOIN PAPER_TO_AUTHOR pta ON pta.AUTHOR_FK = a.AUTHOR_FK \
              WHERE pta.PAPER_ID IN ({placeholders}) \
-             ORDER BY pta.PAPER_ID, pta.AUTHOR_INDEX"
+             ORDER BY pta.PAPER_ID, (pta.AUTHOR_INDEX IS NULL), pta.AUTHOR_INDEX"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })?;
         for row in rows {
-            let (pid, orcid) = row?;
-            by_paper.entry(pid).or_default().push(orcid);
+            let (pid, idx, orcid) = row?;
+            let v = by_paper.entry(pid).or_default();
+            match idx {
+                // Placement by stored index keeps alignment when a repeated
+                // author's later link row was dropped at insert.
+                Some(i) if i >= 0 => {
+                    let i = i as usize;
+                    if v.len() <= i {
+                        v.resize(i + 1, None);
+                    }
+                    v[i] = orcid;
+                }
+                // NULL-index rows (manual links) sort last, so they append
+                // past the indexed range instead of colliding with slot 0..m.
+                _ => v.push(orcid),
+            }
         }
     }
     Ok(by_paper)
 }
 
-/// `authors.py::list_authors_with_paper_count` — authors with their distinct
+/// Authors with their distinct
 /// active-paper count (from the `author_paper_counts` view), `>= min_papers`,
 /// ordered last-then-first with NULLs last.
 pub fn list_with_paper_count(conn: &Connection, min_papers: i64) -> Result<Vec<AuthorWithCount>> {
@@ -142,7 +156,7 @@ pub fn list_with_paper_count(conn: &Connection, min_papers: i64) -> Result<Vec<A
         .map_err(Into::into)
 }
 
-/// `authors.py::get_author_paper_previews` — latest-version active papers linked
+/// Latest-version active papers linked
 /// to an author, resolved via PAPER_ROOTS so a stale PAPER_TO_AUTHOR version does
 /// not hide a newer version. Ordered by title with NULLs last.
 pub fn get_paper_previews(conn: &Connection, author_id: i64) -> Result<Vec<AuthorPaperPreview>> {
@@ -169,8 +183,7 @@ pub fn get_paper_previews(conn: &Connection, author_id: i64) -> Result<Vec<Autho
         .map_err(Into::into)
 }
 
-/// `authors.py::count_author_paper_links` — distinct paper roots linked to this
-/// author, regardless of paper status.
+/// Distinct paper roots linked to this author, regardless of paper status.
 pub fn count_paper_links(conn: &Connection, author_id: i64) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(DISTINCT p.SOURCE_FK) \
@@ -241,6 +254,8 @@ pub fn orcid_backfill_candidates(conn: &Connection, limit: i64) -> Result<Vec<Or
     Ok(out)
 }
 
+// ── writes ────────────────────────────────────────────────────────────────
+
 /// Set `AUTHOR_ORCID` only if it's currently NULL — never overwrites a
 /// manually-set or already-harvested value. Returns whether a row changed.
 pub fn fill_orcid_if_null(conn: &Connection, author_id: i64, orcid: &str) -> Result<bool> {
@@ -251,10 +266,8 @@ pub fn fill_orcid_if_null(conn: &Connection, author_id: i64, orcid: &str) -> Res
     Ok(changed > 0)
 }
 
-// ── writes ────────────────────────────────────────────────────────────────
-
-/// `authors.py::create_author` — plain INSERT (no dedup; the full-name index is
-/// non-unique by design). Returns the new AUTHOR_FK.
+/// Plain INSERT (no dedup; the full-name index is non-unique by design).
+/// Returns the new AUTHOR_FK.
 pub fn create_author(
     conn: &Connection,
     full_name: &str,
@@ -270,9 +283,8 @@ pub fn create_author(
     Ok(conn.last_insert_rowid())
 }
 
-/// `authors.py::update_author` — set only the provided fields. Python uses a
-/// truthy check (`if full_name:`), so an empty string is treated as "not given"
-/// and skipped; no provided field -> no-op.
+/// Set only the provided fields; an empty string is treated as "not given" and
+/// skipped. No provided field -> no-op.
 pub fn update_author(
     conn: &Connection,
     author_id: i64,
@@ -310,17 +322,15 @@ pub fn update_author(
     Ok(())
 }
 
-/// `authors.py::delete_author` — delete the AUTHOR row by FK. Fails on the FK
-/// constraint if the author is still linked via PAPER_TO_AUTHOR; callers must
-/// unlink first (see `unlink_author_from_paper`), so a merge can't silently
-/// drop paper links it didn't mean to touch.
+/// Delete the AUTHOR row by FK. Fails on the FK constraint while the author is
+/// still linked via PAPER_TO_AUTHOR, so callers unlink (or merge) first.
 pub fn delete_author(conn: &Connection, author_id: i64) -> Result<()> {
     conn.execute("DELETE FROM AUTHOR WHERE AUTHOR_FK = ?", params![author_id])?;
     Ok(())
 }
 
-/// `authors.py::link_author_to_paper` — INSERT OR IGNORE the PAPER_TO_AUTHOR row
-/// with an optional author_index (ordering within the paper's author list).
+/// Link row + optional author_index (order within the paper). Idempotent:
+/// the (PAPER_ID, AUTHOR_FK) unique index makes a re-link a silent no-op.
 pub fn link_author_to_paper(
     conn: &Connection,
     author_fk: i64,
@@ -335,7 +345,7 @@ pub fn link_author_to_paper(
     Ok(())
 }
 
-/// `authors.py::unlink_author_from_paper` — delete the author's link rows for
+/// Delete the author's link rows for
 /// every stored version of the paper's root (link rows are per-version, the
 /// caller addresses any one version's id). Returns `false` when `paper_id`
 /// doesn't resolve to an active paper, so the route can 404.
@@ -358,12 +368,10 @@ pub fn unlink_author_from_paper(conn: &Connection, author_fk: i64, paper_id: i64
     Ok(true)
 }
 
-/// Merge `dup_ids` into `canonical_id`: resync PAPER_META.AUTHORS on every paper
-/// touched by a duplicate, re-point every PAPER_TO_AUTHOR row off a duplicate onto
-/// the canonical author, collapse the resulting double-links (no UNIQUE index
-/// enforces one link per paper), then delete the duplicate AUTHOR rows that still
-/// exist. All in one transaction. `canonical_id` itself is skipped if listed.
-/// Returns the subset of `dup_ids` that actually existed and were merged.
+/// Merge `dup_ids` into `canonical_id` in one transaction: resync
+/// PAPER_META.AUTHORS, collapse would-be double-links, re-point
+/// PAPER_TO_AUTHOR rows, then delete the duplicates.
+/// `canonical_id` is skipped if listed; returns the dup_ids actually merged.
 pub fn merge_authors(
     conn: &mut Connection,
     canonical_id: i64,
@@ -442,18 +450,30 @@ pub fn merge_authors(
             }
             update_meta.execute(params![db::list_to_sql(&merged), pid])?;
         }
+        // Collapse double-links BEFORE re-pointing: the unique
+        // (PAPER_ID, AUTHOR_FK) index rejects an UPDATE that would land two
+        // rows on the same pair, so keep the lowest PTA_FK per paper across
+        // canonical + dups and drop the rest first.
+        let all_placeholders = vec!["?"; dups.len() + 1].join(", ");
+        tx.execute(
+            &format!(
+                "DELETE FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK IN ({all_placeholders}) \
+                 AND PTA_FK NOT IN (\
+                     SELECT MIN(PTA_FK) FROM PAPER_TO_AUTHOR \
+                      WHERE AUTHOR_FK IN ({all_placeholders}) GROUP BY PAPER_ID)"
+            ),
+            params_from_iter(
+                std::iter::once(canonical_id)
+                    .chain(dups.iter().copied())
+                    .chain(std::iter::once(canonical_id))
+                    .chain(dups.iter().copied()),
+            ),
+        )?;
         tx.execute(
             &format!(
                 "UPDATE PAPER_TO_AUTHOR SET AUTHOR_FK = ? WHERE AUTHOR_FK IN ({placeholders})"
             ),
             params_from_iter(std::iter::once(canonical_id).chain(dups.iter().copied())),
-        )?;
-        // Drop rows that now double-link a paper to the canonical author, keeping
-        // the lowest PTA_FK per paper.
-        tx.execute(
-            "DELETE FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK = ? AND PTA_FK NOT IN (\
-                 SELECT MIN(PTA_FK) FROM PAPER_TO_AUTHOR WHERE AUTHOR_FK = ? GROUP BY PAPER_ID)",
-            params![canonical_id, canonical_id],
         )?;
         let existing_dups: Vec<i64> = {
             let mut stmt = tx.prepare(&format!(
@@ -561,14 +581,26 @@ mod tests {
         assert_eq!(pa[0].full_name.as_deref(), Some("Bob Stone"));
         assert_eq!(pa[1].full_name.as_deref(), Some("Alice Cole"));
 
-        // paper_author_orcids: same AUTHOR_INDEX order, keyed by paper; a paper
-        // with no author links is absent, an unknown id is ignored.
+        // paper_author_orcids: same AUTHOR_INDEX order, keyed by paper; an id
+        // with no link rows is absent.
         let orcids = paper_author_orcids(&conn, &[pid, 9_999]).unwrap();
         assert_eq!(orcids.len(), 1);
         assert_eq!(orcids[&pid], vec![None, Some("0000-1".to_string())]);
         assert!(paper_author_orcids(&conn, &[]).unwrap().is_empty());
 
-        // previews: each author sees the one active latest paper.
+        // A repeated author keeps only its first link row (unique index),
+        // leaving a gap in AUTHOR_INDEX; placement by stored index keeps the
+        // later author aligned with the 3-entry authors list.
+        conn.execute(
+            "UPDATE PAPER_TO_AUTHOR SET AUTHOR_INDEX = 2 \
+             WHERE PAPER_ID = ? AND AUTHOR_INDEX = 1",
+            params![pid],
+        )
+        .unwrap();
+        let dup = paper_author_orcids(&conn, &[pid]).unwrap();
+        assert_eq!(dup[&pid], vec![None, None, Some("0000-1".to_string())]);
+
+        // previews: the one active latest paper.
         let prev = get_paper_previews(&conn, a1).unwrap();
         assert_eq!(prev.len(), 1);
         assert_eq!(prev[0].source_id, "arxiv:1");
@@ -588,6 +620,26 @@ mod tests {
         assert!(list_with_paper_count(&conn, 2).unwrap().is_empty());
 
         let _ = a2;
+    }
+
+    #[test]
+    fn list_with_paper_count_zero_count_authors_only_at_min_zero() {
+        let conn = open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let (_pid, a1, a2) = seed(&conn);
+        // Trash the only paper: both authors keep their links but count 0.
+        conn.execute("UPDATE PAPER_ROOTS SET STATUS = 'deleted'", [])
+            .unwrap();
+        // Link-less orphan, the shape hard delete leaves behind (ADR-0009).
+        let ghost = create_author(&conn, "Ghost Author", None, None, None).unwrap();
+
+        // min_papers=1 (the UI default) hides all of them...
+        assert!(list_with_paper_count(&conn, 1).unwrap().is_empty());
+        // ...min_papers=0 (CLI) still surfaces every author, count 0.
+        let all = list_with_paper_count(&conn, 0).unwrap();
+        let ids: HashSet<i64> = all.iter().map(|a| a.base.author_id).collect();
+        assert_eq!(ids, HashSet::from([a1, a2, ghost]));
+        assert!(all.iter().all(|a| a.paper_count == 0));
     }
 
     #[test]

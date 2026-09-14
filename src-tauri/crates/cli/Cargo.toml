@@ -1,7 +1,8 @@
 [package]
 name = "linxiv-cli"
-version = "0.4.2"
+version = "0.5.1"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "linxiv-cli"
@@ -14,7 +15,7 @@ clap = { version = "4.6", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-# preserve_order: json! object literals emit keys in insertion order (Python json.dump parity).
+# preserve_order: json! object literals emit keys in insertion order.
 serde_json = { version = "1", features = ["preserve_order"] }
 # Ctx.conn is rusqlite::Connection; 0.40 matches core so the type unifies (bundled
 # feature comes from core via Cargo feature unification).

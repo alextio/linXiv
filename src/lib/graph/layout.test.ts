@@ -55,10 +55,9 @@ test("a surviving node keeps the position the settled layout left it at", () => 
   assert.deepEqual(kept, { id: "1", x: 120, y: -40 });
 });
 
-// The cold-load answer — a random point in an 800x800 box at the origin — is the
-// wrong one for a node arriving into a settled layout: the force layout spreads
-// the graph far wider than that box, so a paper imported elsewhere in the app
-// would appear nowhere near the authors and tags it is joined to.
+// The cold-load box seed is wrong for a node arriving into a settled layout: the
+// layout spreads far wider than SEED_SPREAD, so an imported paper would start
+// nowhere near the authors and tags it is joined to.
 test("a new node is seeded at the centroid of its placed neighbours", () => {
   const previous = new Map([
     ["author::7", { x: 100, y: 0 }],
@@ -82,9 +81,8 @@ test("the jitter keeps co-seeded nodes off the exact same point", () => {
   assert.deepEqual(fresh, { id: "9", x: SEED_JITTER / 2, y: SEED_JITTER / 2 });
 });
 
-// Two passes is what an imported paper needs: the first puts the PAPER beside
-// the authors and tags it shares with the library, the second puts its brand-new
-// author nodes beside the paper.
+// Pass one puts the paper beside the authors and tags it shares with the
+// library; pass two puts its brand-new authors beside the paper.
 test("a second pass reaches a new node that only touches another new one", () => {
   const previous = new Map([["tag::ml", { x: 60, y: 60 }]]);
   const edges = [
@@ -96,8 +94,7 @@ test("a second pass reaches a new node that only touches another new one", () =>
   assert.deepEqual(nodes.find((n) => n.id === "author::99"), { id: "author::99", x: 60, y: 60 });
 });
 
-// A node placed in this pass must not seed another one in the same pass, or the
-// result would depend on the order the payload happened to list nodes in.
+// Placing within a pass would make the result depend on payload order.
 test("seeding within one pass does not cascade", () => {
   const previous = new Map([["a", { x: 0, y: 0 }]]);
   // b touches a (pass 1); c touches only b, so it must wait for pass 2.

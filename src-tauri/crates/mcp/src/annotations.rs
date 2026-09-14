@@ -1,6 +1,5 @@
-//! PDF annotation tools cluster. Mirrors `notes_pdf_trash.rs`: an annotation is a
-//! highlight (opaque ANCHOR JSON) plus an optional written comment, attached to a
-//! paper by source id and optionally scoped to a project.
+//! PDF annotation tools cluster: an annotation is a highlight (opaque ANCHOR JSON)
+//! plus an optional comment, attached to a paper and optionally scoped to a project.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router, ErrorData};
@@ -87,7 +86,7 @@ impl Server {
             })?;
             match svc_ann::get(conn, id).map_err(core_err)? {
                 Some(a) => json_ok(&a),
-                None => json_ok(&json!({ "id": id })),
+                None => json_ok(&svc_ann::CreatedAnnotation { id }),
             }
         })
     }

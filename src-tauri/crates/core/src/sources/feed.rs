@@ -1,12 +1,10 @@
-//! feed — generic RSS 2.0 / Atom parser for the user-configurable home feed.
-//! One quick-xml pass handles both dialects (RSS `<item>` / Atom `<entry>`),
-//! following the event-loop shape of `sources::arxiv::parse_atom`. Entries whose
-//! link points at arxiv.org carry an extracted `arxiv_id` so the UI can deep-link
-//! into the existing arXiv save flow.
-//!
-//! The fetch takes an arbitrary user URL, so it is guarded: http(s) schemes only
-//! (re-checked on every redirect hop), a total timeout, and a streamed body cap.
+//! feed — generic RSS 2.0 / Atom parser for the user-configurable home feed; one
+//! quick-xml pass handles both dialects. arxiv.org links carry an extracted
+//! `arxiv_id` for the save-flow deep link. The fetch takes an arbitrary user URL,
+//! so it is guarded: http(s) only, hosts must resolve to public addresses
+//! (re-checked per redirect hop), a total timeout, and a streamed body cap.
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -44,10 +42,8 @@ pub struct Feed {
     pub entries: Vec<FeedEntry>,
 }
 
-/// Extract a bare arXiv id + version from an abs/pdf link on an arxiv.org host.
-/// `https://arxiv.org/abs/2401.12345v2` → `("2401.12345", 2)`;
-/// old-style `http://arxiv.org/abs/math-ph/0309136` → `("math-ph/0309136", 1)`
-/// (no explicit `vN` suffix means version 1 -- a fresh submission's first appearance).
+/// Extract a bare arXiv id + version from an abs/pdf link on an arxiv.org host:
+/// `.../abs/2401.12345v2` → `("2401.12345", 2)`; no `vN` suffix means version 1.
 fn parse_arxiv_link(link: &str) -> Option<(String, i64)> {
     let url = Url::parse(link).ok()?;
     let host = url.host_str()?;
@@ -70,7 +66,7 @@ fn parse_arxiv_link(link: &str) -> Option<(String, i64)> {
     if base.is_empty() {
         return None;
     }
-    // Validate against arXiv's two real id shapes: new (YYYY.XXXXX) or old (archive/NNNNNNN).
+    // Validate the two real arXiv id shapes: new (YYMM.NNNNN) or old (archive/NNNNNNN).
     if let Some((archive, digits)) = base.split_once('/') {
         // Old-style: archive/7digits
         if digits.len() != 7 || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -92,16 +88,13 @@ fn parse_arxiv_link(link: &str) -> Option<(String, i64)> {
     Some((base.to_string(), version))
 }
 
-/// Extract a bare arXiv id from an abs/pdf link on an arxiv.org host.
-/// `https://arxiv.org/abs/2401.12345v2` → `2401.12345`;
-/// old-style `http://arxiv.org/abs/math-ph/0309136` → `math-ph/0309136`.
+/// Extract a bare arXiv id from an abs/pdf link on an arxiv.org host (version dropped).
 pub fn arxiv_id_from_link(link: &str) -> Option<String> {
     parse_arxiv_link(link).map(|(id, _)| id)
 }
 
-/// arXiv's RSS `<description>` is prefixed with its own announce-type boilerplate
-/// (`arXiv:2401.12345v1 Announce Type: new\nAbstract: ...`) that the Atom API used
-/// by search/save doesn't emit. Strip it, keeping just the actual abstract.
+/// Strip arXiv RSS's announce-type boilerplate prefix
+/// (`arXiv:...v1 Announce Type: new\nAbstract: ...`), keeping just the abstract.
 fn strip_announce_prefix(summary: &str) -> &str {
     let Some(rest) = summary.strip_prefix("arXiv:") else {
         return summary;
@@ -115,9 +108,8 @@ fn strip_announce_prefix(summary: &str) -> &str {
     rest[idx + "Abstract:".len()..].trim_start()
 }
 
-/// The base letter following a LaTeX accent command at `at`: `{X}` (braced) or,
-/// when `allow_bare` is set, a bare `X`. Returns the letter and how many chars
-/// (starting at `at`) it consumed.
+/// The base letter following a LaTeX accent command at `at`: `{X}` or, when
+/// `allow_bare`, a bare `X`. Returns the letter and how many chars it consumed.
 fn accented_base(chars: &[char], at: usize, allow_bare: bool) -> Option<(char, usize)> {
     if chars.get(at) == Some(&'{') {
         let close = chars[at + 1..].iter().position(|&c| c == '}')?;
@@ -135,23 +127,6 @@ fn accented_base(chars: &[char], at: usize, allow_bare: bool) -> Option<(char, u
     base.is_ascii_alphabetic().then_some((base, 1))
 }
 
-/// Decode the common LaTeX accent/ligature macros (`\'e` -> é, `\"o` -> ö, `\o` -> ø, ...)
-/// that arXiv's RSS feed occasionally leaks raw into author names -- unlike the Atom API
-/// used by search/save, which is clean UTF-8. Accent macros map to their Unicode combining
-/// mark and fold onto the base letter via NFC normalization, so any base letter works
-/// without a per-letter lookup table.
-///
-/// Only safe to run on plain-text fields with no real TeX in them (author names) --
-/// NOT on titles/abstracts, which legitimately carry math macros for MathJax (`\cos`,
-/// `\rho`, `\vec{v}`, ...). A LaTeX accent command is a *control word* when letter-named
-/// (`c`,`v`,`u`,`r`,`H`,`k`) -- terminated by braces, a single swallowed space, or a
-/// non-letter/EOF, so a bare adjacent letter with none of those belongs to a longer
-/// macro name and is left untouched. It's a *control symbol* when punctuation-named
-/// (`'`,`` ` ``,`^`,`"`,`~`,`=`,`.`) -- exactly one char, unambiguously followed by its
-/// base with no separator needed.
-/// ponytail: covers accent marks + the handful of single-letter ligatures seen in real
-/// arXiv author names; multi-letter ligatures (`\ss`, `\ae`, `\oe` + capitals) and nested
-/// macros are out of scope -- extend the tables below if one shows up.
 /// The single-letter ligature a no-argument LaTeX control word collapses to
 /// (`\o` -> `ø`), or `None` if `cmd` isn't one of the four ligature commands.
 fn compute_ligature(cmd: char) -> Option<char> {
@@ -164,6 +139,13 @@ fn compute_ligature(cmd: char) -> Option<char> {
     }
 }
 
+/// Decode common LaTeX accent/ligature macros (`\'e` -> é, `\o` -> ø) that arXiv's
+/// RSS leaks into author names; accents map to combining marks folded via NFC.
+/// Only safe on plain-text fields (author names) — NOT titles/abstracts, which carry
+/// real math macros: a bare letter adjacent to a letter-named command is treated as
+/// part of a longer macro name and left untouched.
+/// ponytail: accents + four single-letter ligatures only; multi-letter ligatures
+/// (`\ss`, `\ae`, `\oe`) and nested macros are out of scope -- extend if one shows up.
 fn decode_latex_accents(s: &str) -> String {
     if !s.contains('\\') {
         return s.to_string();
@@ -256,8 +238,7 @@ fn finalize(mut e: FeedEntry) -> FeedEntry {
 }
 
 /// Mutable state threaded through the feed parse loop — one entry in progress,
-/// the accumulated text of the current leaf element, and per-entry link/guid/
-/// author bookkeeping.
+/// accumulated leaf text, and per-entry link/guid/author bookkeeping.
 #[derive(Default)]
 struct ParseState {
     feed_title: String,
@@ -272,9 +253,8 @@ struct ParseState {
 }
 
 impl ParseState {
-    /// `Event::Start`/`Event::Empty` handling: opens a new entry on `<item>`/`<entry>`,
-    /// otherwise updates the in-progress entry's link/guid/author state, or clears
-    /// `text` ahead of the top-level `<title>` when no entry is open.
+    /// Opens a new entry on `<item>`/`<entry>`, else records the link/guid/author
+    /// state for it and clears `text` ahead of every leaf parsed on End.
     fn handle_start_event(&mut self, e: &BytesStart<'_>) {
         let name = e.name();
         let l = local(name.as_ref());
@@ -321,14 +301,13 @@ impl ParseState {
     }
 }
 
-/// `Event::GeneralRef` handling: quick-xml emits entities (`&amp;`, `&#38;`) as
-/// their own events. Resolves a numeric char ref directly; a named entity checks
-/// XML predefined, then common HTML entities.
+/// quick-xml emits entities as their own events: resolve a numeric char ref
+/// directly; a named entity checks XML predefined, then common HTML entities.
 fn handle_general_ref_event(e: &BytesRef<'_>, text: &mut String) {
     match e.resolve_char_ref() {
         Ok(Some(c)) => text.push(c),
         Ok(None) => {
-            // Named entity: check XML predefined, then common HTML entities.
+            // Named entity.
             if let Ok(name) = e.decode() {
                 if let Some(s) = quick_xml::escape::resolve_predefined_entity(&name) {
                     text.push_str(s);
@@ -358,9 +337,8 @@ fn handle_general_ref_event(e: &BytesRef<'_>, text: &mut String) {
 }
 
 impl ParseState {
-    /// `Event::End` handling: closes and finalizes the in-progress entry on
-    /// `</item>`/`</entry>`, otherwise assigns the just-closed leaf element's
-    /// trimmed text into the entry (or the top-level feed title when none is open).
+    /// Closes and finalizes the entry on `</item>`/`</entry>`, else assigns the
+    /// just-closed leaf's trimmed text into it (or the feed title when none is open).
     fn handle_end_event(&mut self, e: &BytesEnd<'_>) {
         let name = e.name();
         let l = local(name.as_ref());
@@ -435,7 +413,7 @@ pub fn parse_feed(xml: &[u8]) -> Result<Feed> {
             Ok(event) => event,
             Err(_e) => {
                 // Malformed fragment: drop the in-progress entry and keep parsing
-                // (mirror arxiv::parse_atom's skip); bail if the reader stalls.
+                // (arxiv::parse_atom aborts); bail if the reader stalls.
                 let pos = reader.buffer_position();
                 if last_err_pos == Some(pos) {
                     break;
@@ -460,7 +438,6 @@ pub fn parse_feed(xml: &[u8]) -> Result<Feed> {
             Event::CData(e) => {
                 st.text.push_str(&String::from_utf8_lossy(e.as_ref()));
             }
-            // quick-xml emits entities (`&amp;`, `&#38;`) as their own events.
             Event::GeneralRef(e) => {
                 handle_general_ref_event(&e, &mut st.text);
             }
@@ -488,9 +465,54 @@ fn assert_scheme_http(url: &str) -> Result<()> {
     }
 }
 
-/// Fetch and parse a feed URL under `FETCH_TIMEOUT`. `data_dir` carries the
-/// shared `.arxiv_ratelimit` file so arXiv-hosted feeds coordinate with every
-/// other arXiv-bound call (search, version check, downloads).
+/// SSRF guard for user-supplied feed URLs: http(s) only, host must resolve to
+/// public addresses per `download::is_public_addr`; `get_checked` re-runs this
+/// on every redirect hop. Lookup via `tokio::net::lookup_host` stays
+/// preemptible by the caller's `FETCH_TIMEOUT`.
+/// ponytail: first-cut — resolution here and reqwest's connect are separate
+/// lookups, so DNS-rebinding can slip through; pinning needs a custom resolver.
+async fn assert_feed_url(url: &str) -> Result<()> {
+    assert_scheme_http(url)?;
+    // Tests fetch from a loopback wiremock — this crate's own under cfg(test),
+    // downstream crates' via the allow-private-feeds dev-only feature. The
+    // reject step stays covered by `non_public_addrs_rejected`.
+    if cfg!(any(test, feature = "allow-private-feeds")) {
+        return Ok(());
+    }
+    let parsed = Url::parse(url).expect("checked by assert_scheme_http");
+    let host = parsed.host_str().expect("http(s) URLs always carry a host");
+    // host_str keeps brackets on IPv6 literals ("[::1]"); strip them before
+    // parsing. IP-literal hosts are judged directly, no DNS.
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs: Vec<IpAddr> = if let Ok(ip) = bare.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        tokio::net::lookup_host((bare, port))
+            .await
+            .map_err(|e| CoreError::Upstream(format!("resolve feed host for {url:?}: {e}")))?
+            .map(|a| a.ip())
+            .collect()
+    };
+    reject_non_public(&addrs)
+}
+
+/// The reject step of the guard, split from the resolve step so it stays testable
+/// under the test escapes above. Unresolved (empty) counts as unsafe.
+fn reject_non_public(addrs: &[IpAddr]) -> Result<()> {
+    if addrs.is_empty() || addrs.iter().any(|ip| !super::download::is_public_addr(*ip)) {
+        return Err(CoreError::BadRequest(
+            "feed URL resolves to a private address".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch and parse a feed URL under `FETCH_TIMEOUT`. `data_dir` carries the shared
+/// `.arxiv_ratelimit` file so arXiv-hosted feeds coordinate with every other arXiv call.
 pub async fn fetch_feed(url: &str, data_dir: &Path) -> Result<Feed> {
     let body = tokio::time::timeout(FETCH_TIMEOUT, fetch_body(url, data_dir))
         .await
@@ -500,11 +522,16 @@ pub async fn fetch_feed(url: &str, data_dir: &Path) -> Result<Feed> {
     parse_feed(&body)
 }
 
-/// GET via the shared redirect-follow helper (scheme guard re-checked on every
-/// hop; arXiv-host hops honour the shared cool-down + spacing), then stream the
-/// body under a cap (Content-Length may be absent or lying).
+/// GET via the shared redirect-follow helper (guards re-checked per hop; arXiv hops
+/// honour cool-down + spacing), then stream the body under a cap (Content-Length may lie).
 async fn fetch_body(url: &str, data_dir: &Path) -> Result<Vec<u8>> {
-    let mut resp = http::get_checked(url, &[], assert_scheme_http, Some(data_dir)).await?;
+    let mut resp = http::get_checked(
+        url,
+        &[],
+        |u| async move { assert_feed_url(&u).await },
+        Some(data_dir),
+    )
+    .await?;
     if !resp.status().is_success() {
         return Err(CoreError::Upstream(format!(
             "feed GET {:?} returned {}",
@@ -687,6 +714,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn non_public_addrs_rejected() {
+        // Classification breadth lives with the shared classifier
+        // (`download::is_public_addr_classifies_ssrf_vectors`); this covers
+        // the feed guard's reject wiring.
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(reject_non_public(&[ip("93.184.216.34"), ip("2606:2800::1")]).is_ok());
+        // One private address among publics is enough to reject.
+        let err = reject_non_public(&[ip("93.184.216.34"), ip("127.0.0.1")]).unwrap_err();
+        assert!(matches!(err, CoreError::BadRequest(_)), "got {err:?}");
+        assert!(err.to_string().contains("private address"));
+        // CGNAT comes from the shared classifier, not the old local one.
+        assert!(reject_non_public(&[ip("100.64.0.5")]).is_err());
+        // Unresolved == unsafe.
+        assert!(reject_non_public(&[]).is_err());
+    }
+
     #[tokio::test]
     async fn fetch_follows_redirect_and_parses() {
         let server = MockServer::start().await;
@@ -741,37 +785,33 @@ mod tests {
 
     #[test]
     fn parses_title_with_nested_markup() {
-        // Title containing inline nested markup should accumulate text from before and after the nested tag.
         const RSS_WITH_MARKUP: &str = include_str!("testdata/feed/rss_with_markup.xml");
 
         let feed = parse_feed(RSS_WITH_MARKUP.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // Nested markup should be ignored; only text content accumulates.
+        // Nested tags ignored; text before and after them accumulates.
         assert_eq!(feed.entries[0].title, "Foo Bar Baz");
     }
 
     #[test]
     fn parses_feed_with_invalid_char_ref() {
-        // Feed containing an invalid numeric character reference (e.g., &#0;) should parse successfully,
-        // dropping just that reference instead of aborting the entire parse.
+        // An invalid numeric char ref must not abort the parse.
         const RSS_WITH_BAD_REF: &str = include_str!("testdata/feed/rss_with_bad_ref.xml");
 
         let feed = parse_feed(RSS_WITH_BAD_REF.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // Invalid ref &#0; should be dropped; adjacent text glues without space.
+        // Invalid ref &#0; is dropped; the spaces around it stay.
         assert_eq!(feed.entries[0].summary, "Before  after");
     }
 
     #[test]
     fn feed_title_not_corrupted_by_preceding_sibling_elements() {
-        // Real Atom feeds (e.g., GitHub's commits.atom) may have <id>, <link>, etc. before <title>.
-        // The text buffer must be cleared when we encounter the top-level title element
-        // to prevent accumulated text from preceding siblings from leaking into the feed title.
+        // Real Atom feeds (e.g. GitHub's commits.atom) put <id>/<link> before
+        // <title>; their text must not leak into the feed title.
         const ATOM_WITH_ID_BEFORE_TITLE: &str =
             include_str!("testdata/feed/atom_with_id_before_title.xml");
 
         let feed = parse_feed(ATOM_WITH_ID_BEFORE_TITLE.as_bytes()).unwrap();
-        // Feed title must be exactly "My Feed", not corrupted with the preceding id/link text.
         assert_eq!(feed.title, "My Feed");
         assert_eq!(feed.entries.len(), 1);
         assert_eq!(feed.entries[0].title, "Entry One");
@@ -797,7 +837,6 @@ mod tests {
 
         let feed = parse_feed(RSS_GUID_BEFORE_LINK.as_bytes()).unwrap();
         assert_eq!(feed.entries.len(), 1);
-        // The explicit <link> should win, not the <guid>.
         assert_eq!(feed.entries[0].link, "https://example.com/real-link");
     }
 }

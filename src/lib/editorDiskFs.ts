@@ -1,14 +1,12 @@
 // DiskFsResponder + HostFsRouter — the embed's "Open Folder" persistence path.
 //
-// When the guest editor asks the host to pick a directory (texbrain:pick:folder),
-// the picked folder is opened IN PLACE: every subsequent FsOp resolves against it
-// through Tauri's fs plugin rather than the note vault (see the bridge comment in
-// editorBridgeTypes.ts and ADR 0018 in linxiv-comprehensive-documentation — the
-// import-into-vault alternative is deferred).
+// On texbrain:pick:folder the picked folder is opened IN PLACE: every later FsOp
+// resolves against it through Tauri's fs plugin rather than the note vault (see
+// editorBridgeTypes.ts and ADR 0020 — import-into-vault is deferred).
 //
-// Scope: the fs plugin only allows paths inside its scope; the dialog plugin
-// extends that scope at runtime with whatever the user picks, so no static
-// directory grants are needed in capabilities/default.json — just the fs
+// Scope: the fs plugin only allows paths inside its scope; texbrain's
+// pick_folder extends that scope at runtime to the picked folder, so
+// capabilities/default.json needs no static directory grants — just the fs
 // operation permissions.
 //
 // HostFsRouter is what actually gets handed to EditorBridgeClient: it forwards

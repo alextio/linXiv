@@ -20,11 +20,25 @@ node -e '
 npm version "$ver" --no-git-tag-version --allow-same-version
 
 # linxiv-p2p is a separate vendored submodule; its version is independent.
+# Only the FIRST `version = ` line (always [package]'s): a dotted dependency
+# table also puts `version = ` at column 0, and stamping that rewrites a dep
+# requirement to the release version (broke release #25 on futures-util).
 for file in src-tauri/Cargo.toml src-tauri/crates/*/Cargo.toml; do
   [[ "$file" == "src-tauri/crates/p2p/Cargo.toml" ]] && continue
-  sed -i.bak "s/^version = \".*\"/version = \"$ver\"/" "$file"
+  sed -i.bak "0,/^version = \".*\"/s//version = \"$ver\"/" "$file"
   rm -f "$file.bak"
 done
+
+# Sync the lock's workspace-crate versions, or CI's `cargo fetch --locked`
+# rejects a committed bump (npm version already does this for
+# package-lock.json). Only when a toolchain is usable: release jobs run this
+# before rustup has a default (the shim exists but errors), stamp
+# ephemerally, and never gate on --locked — their builds resync the lock.
+if cargo --version >/dev/null 2>&1; then
+  cargo update --workspace --manifest-path src-tauri/Cargo.toml
+else
+  echo "warning: no usable cargo; skipping Cargo.lock sync" >&2
+fi
 
 # PKGBUILD reserves hyphens as separators between pkgver, pkgrel and arch.
 arch_ver="${ver//-/_}"

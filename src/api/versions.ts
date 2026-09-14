@@ -1,32 +1,35 @@
-import { apiFetch } from "./client";
-import type { NewVersion } from "../types/api";
+import { libraryFetch } from "../stores/backend.ts";
+import type {
+  NewVersion,
+  NewVersionsResponse,
+  OkReceipt,
+  VersionCheckResponse,
+  VersionsAckBody,
+  VersionsCheckBody,
+} from "../types/api";
 
 /** A newly discovered arXiv version, captured into the library by a poll pass. */
 export type { NewVersion };
 
-// Envelope assembled inline by route/versions.rs — no core struct to generate.
-export interface VersionCheckResult {
-  checked: number;
-  new_versions: NewVersion[];
-}
-
 /** Run one on-demand poll pass over the stalest `limit` saved arXiv papers. */
-export async function checkNewVersions(limit?: number): Promise<VersionCheckResult> {
-  return apiFetch<VersionCheckResult>("/api/versions/check", {
+export async function checkNewVersions(limit?: number): Promise<VersionCheckResponse> {
+  const body: VersionsCheckBody = limit !== undefined ? { limit } : {};
+  return libraryFetch<VersionCheckResponse>("/api/versions/check", {
     method: "POST",
-    body: JSON.stringify(limit !== undefined ? { limit } : {}),
+    body: JSON.stringify(body),
   });
 }
 
 /** Papers with an un-acknowledged newly found version. */
-export async function listNewVersions(): Promise<{ new_versions: NewVersion[] }> {
-  return apiFetch<{ new_versions: NewVersion[] }>("/api/versions/new");
+export async function listNewVersions(): Promise<NewVersionsResponse> {
+  return libraryFetch<NewVersionsResponse>("/api/versions/new");
 }
 
 /** Dismiss the new-version flag for one paper. */
-export async function ackNewVersion(sourceFk: number): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>("/api/versions/ack", {
+export async function ackNewVersion(sourceFk: number): Promise<OkReceipt> {
+  const body: VersionsAckBody = { source_fk: sourceFk };
+  return libraryFetch<OkReceipt>("/api/versions/ack", {
     method: "POST",
-    body: JSON.stringify({ source_fk: sourceFk }),
+    body: JSON.stringify(body),
   });
 }

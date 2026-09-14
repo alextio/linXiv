@@ -1,7 +1,8 @@
 import { isTauri } from "./client";
+import { isHttpUrl } from "../lib/papers";
 
-// linXiv ships its releases on GitHub, so "check for updates" compares the
-// installed version against the latest published GitHub Release. 
+// Releases ship on GitHub, so "check for updates" compares the installed
+// version against the latest published GitHub Release.
 const REPO = "linxiv-dev/linXiv";
 const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 export const RELEASES_PAGE = `https://github.com/${REPO}/releases`;
@@ -22,9 +23,8 @@ export interface UpdateResult {
 }
 
 /**
- * The installed app version. Only the packaged desktop build knows this (it
- * comes from tauri.conf.json via the app plugin); the browser dev server has no
- * such notion, so it returns null and the UI degrades to "can't compare".
+ * The installed app version, from tauri.conf.json via `@tauri-apps/api/app`; the
+ * browser dev build has no such notion, so null and the UI says "can't compare".
  */
 export async function getCurrentVersion(): Promise<string | null> {
   if (!isTauri) return null;
@@ -41,17 +41,15 @@ function stripLeadingV(version: string): string {
 }
 
 /**
- * Compare two semver-ish strings. Returns 1 if `a` is newer than `b`, -1 if
- * older, 0 if equal or unparseable. Only the numeric `major.minor.patch` core
- * drives the result; a build with a pre-release tag (e.g. 1.2.0-rc1) ranks
- * below the same core without one. An unparseable component yields 0 so a
- * malformed tag can never masquerade as an available update.
+ * Compare two semver-ish strings: 1 if `a` is newer than `b`, -1 if older, 0 if
+ * equal or unparseable. Only the numeric `major.minor.patch` core ranks; a
+ * pre-release tag (1.2.0-rc1) ranks below the same core without one, and an
+ * unparseable component yields 0 so a malformed tag never reads as an update.
  */
 export function compareVersions(a: string, b: string): number {
   const parse = (v: string) => {
-    // Split on the FIRST hyphen only — keep the whole pre-release tag intact.
-    // (String.split with a limit truncates trailing segments instead of packing
-    // them, so "1.2.0-beta-2" would otherwise lose its "-2".)
+    // Split on the FIRST hyphen only: split("-", 2) truncates instead of packing
+    // the rest, so "1.2.0-beta-2" would lose its "-2".
     const s = stripLeadingV(v);
     const dash = s.indexOf("-");
     const core = dash < 0 ? s : s.slice(0, dash);
@@ -70,19 +68,17 @@ export function compareVersions(a: string, b: string): number {
   }
   if (pa.pre && !pb.pre) return -1;
   if (!pa.pre && pb.pre) return 1;
-  // Two pre-releases sharing a core: don't attempt to order them. Lexical
-  // comparison is wrong (it puts rc10 below rc9), and full semver pre-release
-  // ordering would be dead code here — GitHub's "latest release" excludes
-  // pre-releases, so `latest` is always a stable build. Reporting equal is the
-  // safe direction: it can never surface a spurious update.
+  // Two pre-releases sharing a core: don't order them. Lexical comparison is
+  // wrong (rc10 below rc9), and real semver ordering would be dead code —
+  // GitHub's "latest release" excludes pre-releases. Equal is the safe answer:
+  // it can never surface a spurious update.
   return 0;
 }
 
 /**
- * Query GitHub for the latest release and decide whether it's newer than the
- * installed build. Never throws: every failure mode (offline, rate-limited, no
- * releases yet, unknown local version) maps to a populated `UpdateResult` the
- * caller can render directly.
+ * Query GitHub for the latest release and decide whether it beats the installed
+ * build. Never throws: every failure (offline, rate-limited, no releases yet,
+ * unknown local version) maps to an `UpdateResult` the caller can render.
  */
 export async function checkForUpdates(): Promise<UpdateResult> {
   const current = await getCurrentVersion();
@@ -127,8 +123,14 @@ export async function checkForUpdates(): Promise<UpdateResult> {
   return { current, latest, hasUpdate, releaseUrl };
 }
 
-/** Open a release URL in the user's default browser (system browser, not the app webview). */
-export async function openReleaseUrl(url: string): Promise<void> {
+/** Open a URL in the user's default browser (system browser, not the app webview).
+ *  http(s) only: callers pass free-text urls (imports, metadata edits), and the
+ *  opener plugin would hand any scheme — file:, custom URIs — to the OS. */
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!isHttpUrl(url)) {
+    console.error("refusing to open non-http(s) url:", url);
+    return;
+  }
   if (isTauri) {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(url);
@@ -141,8 +143,8 @@ export type LinuxPackageKind = "deb" | "rpm" | "pacman";
 
 /**
  * Which package manager (if any) owns this install. Native packages route
- * through the privileged package updater; null routes through the Tauri
- * updater (AppImage/macOS/Windows) or the browser fallback outside Tauri.
+ * through the privileged package updater; null through the Tauri updater
+ * (AppImage/macOS/Windows), or the browser fallback outside Tauri.
  */
 export async function getLinuxPackageKind(): Promise<LinuxPackageKind | null> {
   if (!isTauri) return null;
@@ -156,13 +158,12 @@ export async function getLinuxPackageKind(): Promise<LinuxPackageKind | null> {
 }
 
 /**
- * Install the update and relaunch. Never called outside Tauri (the browser
- * build only ever offers the "Download" fallback).
+ * Install the update and relaunch. Never called outside Tauri (the browser build
+ * only offers the "Download" fallback).
  *
- * For native packages, `apply_linux_package_update` resolves the asset itself from
- * the pinned repo's latest release — it never takes a URL from here, since
- * that would let webview JS point a root-privileged install at an arbitrary
- * GitHub-hosted asset.
+ * For native packages, `apply_linux_package_update` resolves the asset itself —
+ * taking a URL from here would let webview JS point a root-privileged install at
+ * an arbitrary GitHub-hosted asset.
  */
 export async function installUpdate(packageKind: LinuxPackageKind | null): Promise<void> {
   if (!isTauri) throw new Error("Not running in Tauri");

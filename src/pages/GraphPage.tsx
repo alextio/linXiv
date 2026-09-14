@@ -18,7 +18,8 @@ import type { GraphFilterState } from "../lib/graph/filter";
 import { EMPTY_FILTER, joinTypes, matchGraph, noMatchCause } from "../lib/graph/filter";
 import type { ForceSettings } from "../lib/graph/layout";
 import { DEFAULT_FORCES } from "../lib/graph/layout";
-import type { GraphCanvasHandle } from "../components/graph/GraphCanvas";
+import type { GraphCanvasHandle, GraphNodeContext } from "../components/graph/GraphCanvas";
+import { copyItem, showContextMenu } from "../lib/contextMenu";
 import GraphPanels from "../components/graph/GraphPanels";
 import { Spinner } from "../components/ui/spinner";
 import { Button } from "../components/ui/button";
@@ -27,44 +28,23 @@ import { Dialog } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { EmptyState } from "../components/ui/empty-state";
 
-// Root query keys whose invalidation may change graph-relevant data.
-//
-// This is the SECOND of the two ways this page hears about stale data, and the
-// weaker one: react-query emits an `invalidate` cache event only for queries
-// that are actually in the cache, so a key listed here is heard only while some
-// page happens to hold a query under it. It stays because it is the only thing
-// that covers the call sites which invalidate directly instead of going through
-// the registry in src/lib/paperMutations.ts (StorageSection's blanket
-// invalidate, the ORCID backfill). The registry's own `onGraphDirtying` signal
-// below is what makes the operations it owns reliable.
 // cytoscape and d3-force are ~400kB of the bundle and are needed by exactly one
 // screen. AppShell imports this page eagerly (it is keep-alive, so it must exist
 // from boot), so a lazy PAGE would not help — the canvas is the boundary that
-// does: it is not rendered until the first visit to /graph, which is the same
-// point the old iframe used to be mounted at. Every user used to pay for those
-// two libraries only on opening the graph, and this is what keeps that true.
+// does: it is not rendered until the first visit to /graph.
 const GraphCanvas = lazy(() => import("../components/graph/GraphCanvas"));
 
+// Root query keys whose invalidation may change graph-relevant data. The weaker
+// of this page's two staleness signals: react-query emits an `invalidate` cache
+// event only for queries actually in the cache, so a key here is heard only
+// while some page holds one under it. It stays because it covers the call sites
+// that invalidate directly instead of going through src/lib/paperMutations.ts
+// (StorageSection's blanket invalidate, the ORCID backfill); `onGraphDirtying`
+// below covers the operations that registry owns.
 const GRAPH_DIRTYING_KEYS = new Set([
   "stats", "papers", "paper", "projects", "project", "tags", "tag", "authors", "author",
 ]);
 
-/**
- * The Knowledge Graph.
- *
- * This page used to be a thin host around an `<iframe>` running a 2,400-line
- * unbundled browser script, and most of what it did was work around that frame:
- * a postMessage protocol in both directions, a `graph_loaded` reply carrying the
- * load state because the guest owned the canvas and the host owned the spinner,
- * an eight-second fallback for a reply that never came, a theme push on every
- * palette change, a `?api=` parameter naming which backend the guest should talk
- * to, and a hand-back channel for keyboard shortcuts — key events do not cross a
- * frame boundary, so every app-wide shortcut was dead on /graph alone.
- *
- * None of that survives the port. The canvas is a component, the load state is
- * react-query's, the theme is read from the store, and the shortcuts are the
- * window's own.
- */
 export default function GraphPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -89,13 +69,11 @@ export default function GraphPage() {
   const [newProjectName, setNewProjectName] = useState("");
   const [dirty, setDirty] = useState(false);
 
-  // AppShell's keep-alive renders this page from app BOOT and hides it with
-  // `display: none`. A hidden container lays out 0x0, and cytoscape's fit bails
-  // silently on a zero-sized viewport — so a graph built there would keep the
-  // default zoom 1 with its layout spread off-screen. Every user would also pay
-  // the graph fetch plus the force layout at startup without ever opening this
-  // page. Mount on the first visit instead; it then stays mounted, so leaving
-  // and coming back still keeps the settled layout.
+  // AppShell's keep-alive renders this page from app BOOT under `display:
+  // none`, where the container lays out 0x0 and cytoscape's fit bails silently —
+  // the layout would settle off-screen at zoom 1, and every user would pay the
+  // fetch plus the force layout at startup. Mount on the first visit instead; it
+  // then stays mounted, so leaving and coming back keeps the settled layout.
   const onGraphRoute = useLocation().pathname === "/graph";
   const [visited, setVisited] = useState(false);
   useEffect(() => {
@@ -113,25 +91,18 @@ export default function GraphPage() {
     queryKey: ["graph", hideSingleAuthors],
     queryFn: () => getGraphView(hideSingleAuthors),
     enabled: visited,
-    // "Hide single-paper authors" is applied by the BACKEND, so toggling it is a
-    // different query key — one with nothing cached under it. Without this,
-    // `data` would drop to undefined for the length of that fetch, unmounting
-    // the canvas and the panels: the settled positions and the last viewport
-    // live in refs inside GraphCanvas and die with it, so the payload that came
-    // back would be seeded as a COLD load and reframed, and the panels would
-    // re-collapse. A checkbox next to Refresh would silently throw away an
-    // arrangement the user built. Holding the previous payload keeps both
-    // mounted, so the new one arrives as the in-place reload it is meant to be:
-    // surviving nodes keep their positions and the viewport is held.
+    // "Hide single-paper authors" is applied by the BACKEND, so toggling it
+    // switches to a query key with nothing cached under it. Without this, `data`
+    // drops to undefined for that fetch and unmounts the canvas and panels — the
+    // settled positions and last viewport live in refs inside GraphCanvas and
+    // die with it, so the payload would land as a COLD load and be reframed.
     placeholderData: keepPreviousData,
-    // This query fetches when it is ASKED to and at no other time. A new payload
-    // rebuilds the simulation, which re-anneals the layout from alpha 1 — so any
-    // fetch the user did not ask for drifts an arrangement they may have spent a
-    // while making, and can yank a grabbed node out from under a drag. The three
-    // settings below are the three ways react-query would otherwise start one on
-    // its own; the invalidation side is held by `refetchType: "none"` in
-    // src/lib/paperMutations.ts. Refresh calls `refetch()`, which ignores all of
-    // this and is the point.
+    // Fetch when ASKED to and at no other time: a new payload rebuilds the
+    // simulation and re-anneals from alpha 1, drifting an arrangement the user
+    // built and yanking a grabbed node out from under a drag. These settings
+    // close react-query's automatic refetches; the invalidation side is held by
+    // `refetchType: "none"` in src/lib/paperMutations.ts. Refresh calls
+    // `refetch()`, which ignores all of this and is the point.
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
@@ -139,10 +110,9 @@ export default function GraphPage() {
 
   const index = useMemo(() => (view ? indexView(view) : null), [view]);
 
-  // Typing in a filter box re-matches every paper. Deferring it lets React keep
-  // the keystroke responsive and drop superseded passes on its own — the fixed
-  // 280ms debounce this replaces was a guess that was always either laggy or
-  // wasteful, depending on the library.
+  // Typing in a filter box re-matches every paper. Deferring keeps the keystroke
+  // responsive and drops superseded passes on its own, without the guessed
+  // debounce interval it replaces.
   const deferredFilter = useDeferredValue(filter);
   const match = useMemo(
     () => (view && index ? matchGraph(view, index, deferredFilter) : null),
@@ -172,11 +142,8 @@ export default function GraphPage() {
 
   const projectPickerUi = {
     setError: setProjectPickerError,
-    // The shared partial-failure contract (src/lib/paperMutations.ts) re-selects
-    // exactly the papers that could not be added, so a retry can't re-add the
-    // ones that made it in. It speaks `source_id`, which the canvas does not —
-    // map back through the payload. (Across the iframe this needed a round trip
-    // and could leave the two copies of the selection disagreeing.)
+    // The shared partial-failure contract (src/lib/paperMutations.ts) speaks
+    // `source_id`, which the canvas does not — map back through the index.
     selectFailures: (sourceIds: string[]) => {
       if (!index) return;
       const wanted = new Set(sourceIds);
@@ -208,9 +175,8 @@ export default function GraphPage() {
 
   // Flag the Refresh button when a query holding graph-relevant data is
   // invalidated elsewhere (this page is keep-alive, so it sees those events).
-  // Bumped on every dirtying signal; `handleRefresh` snapshots it so a change
-  // that lands WHILE a refresh is in flight is not cleared by that refresh's
-  // success — the payload it fetched predates the change.
+  // Bumped on every dirtying signal; the `isFetching` effect below snapshots it
+  // so a change landing mid-refresh survives that refresh's success.
   const dirtyEpoch = useRef(0);
   const markDirty = useCallback(() => {
     dirtyEpoch.current++;
@@ -227,21 +193,14 @@ export default function GraphPage() {
 
   // The primary signal: the invalidation registry announcing an operation that
   // changes what `/api/graph` would return. Unlike the cache subscription above
-  // it does not depend on another page holding a matching query — an author
-  // merge from /authors or a project retag from /projects reaches the graph even
-  // when nothing has ["authors"] or ["projects"] cached.
+  // it does not depend on another page holding a matching query.
   useEffect(() => onGraphDirtying(markDirty), [markDirty]);
 
-  // The dot means "the graph on screen is older than the library", so what
-  // clears it is DATA ARRIVING — not which control asked for it. Hanging that
-  // off the Refresh button alone got it wrong in both directions: clearing up
-  // front told the user they were current when the refresh then failed, and
-  // clearing only there left the dot lit after a "Hide single-paper authors"
-  // toggle had already re-fetched and redrawn from a payload that included the
-  // change. `dataUpdatedAt` moves only on a SUCCESSFUL fetch, so a failure
-  // leaves the dot alone by construction, and the epoch guard keeps a change
-  // that landed while the fetch was in flight from being cleared by it — that
-  // payload predates the change.
+  // The dot means "the graph on screen is older than the library", so DATA
+  // ARRIVING clears it, not the control that asked for it — a "Hide single-paper
+  // authors" toggle re-fetches and redraws too. `dataUpdatedAt` moves only on a
+  // SUCCESSFUL fetch, so a failure leaves the dot lit, and the epoch guard
+  // spares a change that landed while that fetch was in flight.
   const fetchEpoch = useRef(0);
   useEffect(() => {
     if (isFetching) fetchEpoch.current = dirtyEpoch.current;
@@ -256,15 +215,13 @@ export default function GraphPage() {
   }, [refetch]);
 
   // The panel column is `position: absolute` over the canvas's right edge, so a
-  // plain fit would push the rightmost nodes — and their right-hand labels,
-  // which stick out further still — underneath the panels. Measure what it
-  // covers and let the canvas frame into the strip that is left.
+  // plain fit would push the rightmost nodes and their labels underneath it.
+  // Measure what it covers and let the canvas frame into the strip that is left.
   const panelsRef = useRef<HTMLDivElement>(null);
   const [gutter, setGutter] = useState(0);
-  // Read live by the canvas's fit, which cannot wait for this state to commit —
-  // see GraphCanvas's `measureGutter`. The state above still drives what RENDERS
-  // (the no-match notice's centring, the hover inspector's flip point), where a
-  // re-render is exactly what is wanted.
+  // Read live by the canvas's fit, which cannot wait for this state to commit.
+  // The state above still drives what RENDERS (the no-match notice's centring,
+  // the hover inspector's flip point), where a re-render is what is wanted.
   const measureGutter = useCallback(
     () => panelsRef.current?.getBoundingClientRect().width ?? 0,
     []
@@ -289,9 +246,8 @@ export default function GraphPage() {
         });
         return;
       }
-      // A click that leaves the graph drops the selection: this page stays
-      // mounted across the route change, so a selection left behind comes back
-      // highlighted with an action bar for papers the user has moved on from.
+      // This page stays mounted across the route change, so a selection left
+      // behind comes back highlighted with an action bar for stale papers.
       setSelectedIds(new Set());
       navigate(`/library/${id}`);
     },
@@ -314,6 +270,27 @@ export default function GraphPage() {
       navigate(`/tags/${encodeURIComponent(label)}`);
     },
     [navigate]
+  );
+
+  // Open goes wherever a plain tap on the node would have.
+  const handleNodeContextMenu = useCallback(
+    (e: MouseEvent, node: GraphNodeContext) => {
+      showContextMenu(e, [
+        {
+          text: "Open",
+          action: () => {
+            if (node.type === "paper") handlePaperTap(node.id, false);
+            else if (node.type === "author" && node.authorId != null)
+              handleAuthorTap(node.authorId);
+            else if (node.type === "tag") handleTagTap(node.label);
+          },
+        },
+        "separator",
+        copyItem("Copy Label", node.label),
+        ...(node.sourceId ? [copyItem("Copy ID", node.sourceId)] : []),
+      ]);
+    },
+    [handlePaperTap, handleAuthorTap, handleTagTap]
   );
 
   const handleSelectAllVisible = useCallback(() => {
@@ -339,9 +316,8 @@ export default function GraphPage() {
             : "Click a node to open · Ctrl/Cmd+click to select"}
         </span>
         <div className="ml-auto flex items-center gap-4">
-          {/* A refetch that failed with a graph still drawn underneath says so
-              here instead of covering that graph with the error card — the view
-              the user panned and zoomed to is still valid. */}
+          {/* A refetch that failed over a still-drawn graph says so here rather
+              than covering it with the error card — that view is still valid. */}
           {error && view && (
             <span
               role="status"
@@ -404,15 +380,14 @@ export default function GraphPage() {
                 onAuthorTap={handleAuthorTap}
                 onTagTap={handleTagTap}
                 onBackgroundTap={clearSelection}
+                onNodeContextMenu={handleNodeContextMenu}
               />
             </Suspense>
-            {/* The canvas is the one surface in the app with no "no results"
-                state: a filter matching nothing leaves either a blank rectangle
-                (under isolate) or a field of 8% ghosts, and neither is
-                distinguishable from a graph that failed to load. It cannot be a
-                full-bleed overlay either — that would bury the very panels the
-                user needs to undo the filter — so it sits in the strip the panel
-                column leaves uncovered. */}
+            {/* A filter matching nothing leaves either a blank rectangle (under
+                isolate) or a field of 8% ghosts, neither distinguishable from a
+                graph that failed to load. Not a full-bleed overlay either — that
+                would bury the panels that undo the filter — so it sits in the
+                strip the panel column leaves uncovered. */}
             <NoMatchNotice
               match={match}
               gutter={gutter}
@@ -459,7 +434,7 @@ export default function GraphPage() {
               <EmptyState
                 icon={<Network size={28} strokeWidth={1.5} />}
                 title="Nothing to graph yet"
-                description="The knowledge graph is drawn from your library — import a few papers and they'll appear here, linked by their authors and tags."
+                description="The knowledge graph is drawn from your library. Import a few papers and they'll appear here, linked by their authors and tags."
                 actionLabel="Go to Library"
                 onAction={() => navigate("/library")}
               />
@@ -581,12 +556,10 @@ export default function GraphPage() {
 }
 
 /**
- * The Filters > Author box matches `GraphPaper.author_keys`, and "Hide
- * single-paper authors" is applied by the BACKEND — it drops those authors from
- * that index too. So with the option on, typing a name that is certainly in the
- * library empties the canvas under "No papers match the active filters": true,
- * but not why. The checkbox lives in the page header, out of the canvas's way,
- * so this is the only place that can say so.
+ * The Filters > Author box matches `GraphPaper.author_keys`, and the BACKEND
+ * drops single-paper authors from that index too. So with the option on, a name
+ * that is certainly in the library empties the canvas under "No papers match the
+ * active filters": true, but not why.
  */
 const AUTHOR_HIDDEN_HINT =
   "Authors with a single paper are hidden, so the Author filter cannot match them.";
@@ -607,14 +580,12 @@ function NoMatchNotice({
   onShowSingleAuthors: () => void;
 }) {
   if (match.drawnCount > 0) return null;
-  // Three Visibility checkboxes off is a different mistake from a filter that
-  // excludes everything, and "Clear all filters" fixes both, so one notice with
-  // two bodies covers it.
+  // Visibility all off is a different mistake from a filter that excludes
+  // everything, but "Clear all filters" fixes both: one notice, two bodies.
   const cause = noMatchCause(match);
   const hiddenByVisibility = cause.kind === "visibility";
-  // Nothing here can tell whether a hidden author is the actual cause — the
-  // names never arrived — so it is offered as a second possibility, and only
-  // when both halves of it are in force.
+  // Nothing here can tell whether a hidden author is the cause — the names
+  // never arrived — so offer it as a possibility only when both halves hold.
   const authorsMayBeHidden = !hiddenByVisibility && !!authorFilter && excludeSingleAuthors;
   return (
     <div

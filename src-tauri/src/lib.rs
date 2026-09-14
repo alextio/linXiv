@@ -1,12 +1,11 @@
-//! Shared in-process backend for the linXiv desktop app: the HTTP-shaped router
-//! over `linxiv-core` plus app state, the `linxiv://` protocol handler, and the
-//! CLI/MCP-integration commands. Consumed by two binaries — the Tauri app
-//! (`src/main.rs`) and the dev-only HTTP shim (`src/bin/dev_server.rs`, D32).
+//! Tauri shell of the linXiv desktop app: the invoke-command layer over
+//! `linxiv-server`, the `linxiv://` protocol handler, and the CLI/MCP-integration commands.
 
-pub mod full_text_worker;
+pub mod commands;
 pub mod integrations;
-pub mod p2p_config;
 pub mod protocol;
-pub mod route;
-pub mod share_sync;
-pub mod state;
+pub mod remote_backend;
+
+// The shared backend, re-exported so app modules (and tests) keep their
+// `crate::route`-style paths.
+pub use linxiv_server::{full_text_worker, p2p_config, remote_query, route, share_sync, state};

@@ -10,9 +10,8 @@ const STORAGE_KEY = "linxiv-theme";
 // Set by EditorPage on mount/iframe-load (cleared on unmount) so the store can
 // push resolved theme colors to the embedded TeXbrain editor whenever the theme
 // changes — covers programmatic applyTheme callers outside React's render cycle.
-// No-op when no editor is mounted. The import graph stays acyclic: editorConfig
-// imports only ../api/client + ../lib/editorBridge, neither of which imports this
-// store.
+// No-op when no editor is mounted. Acyclic: editorConfig imports nothing, and
+// ../lib/editorBridge imports ../lib/theme, not this store.
 let editorFrame: Window | null = null;
 export function registerEditorFrame(frame: Window | null): void {
   editorFrame = frame;

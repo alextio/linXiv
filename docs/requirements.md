@@ -7,7 +7,6 @@ of this applies.
 
 - [Toolchains](#toolchains)
 - [System libraries](#system-libraries)
-  - [Arch Linux](#arch-linux)
   - [Fedora / RHEL](#fedora--rhel)
   - [Debian / Ubuntu](#debian--ubuntu)
   - [macOS](#macos)
@@ -61,8 +60,7 @@ sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libglib2.0-dev \
   libssl-dev patchelf build-essential file
 ```
 
-This mirrors what `.github/workflows/ci.yml` installs, so it is the set that is
-continuously exercised.
+`.github/workflows/ci.yml` installs a subset; the runner preinstalls the rest.
 
 ### macOS
 

@@ -1,0 +1,524 @@
+//! `/api/projects` routes: a `handle` owning the subtree — path-param extraction,
+//! body deserialization, and the exact JSON envelopes / status codes.
+
+use std::path::Path;
+
+use rusqlite::Connection;
+use serde::Deserialize;
+use serde_json::Value;
+
+use linxiv_core::error::CoreError;
+use linxiv_core::formats;
+use linxiv_core::models::{
+    CreatedProject, CreatedProjectRef, OkReceipt, PaperDetails, ProjectDetails, ProjectIn,
+    ProjectOut, ProjectUpdateIn, ProjectsResponse, Status,
+};
+use linxiv_core::service::export_import;
+use linxiv_core::service::project::{self, BulkAddReceipt, Project, Projects};
+
+use crate::route::{path_i64, ApiError, ReqCtx};
+use crate::state::AppState;
+
+pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
+    match (ctx.method, ctx.segs) {
+        ("GET", ["api", "projects"]) => Some(list(state, ctx)),
+        ("POST", ["api", "projects"]) => Some(create(state, ctx)),
+        ("GET", ["api", "projects", id]) => Some(get_one(state, id)),
+        ("PATCH", ["api", "projects", id]) => Some(patch(state, id, ctx)),
+        ("DELETE", ["api", "projects", id]) => Some(delete(state, id)),
+        ("POST", ["api", "projects", id, "papers"]) => Some(add_paper(state, id, ctx)),
+        ("POST", ["api", "projects", id, "papers", "bulk"]) => {
+            Some(add_papers_bulk(state, id, ctx))
+        }
+        ("DELETE", ["api", "projects", id, "papers", sid]) => Some(remove_paper(state, id, sid)),
+        ("POST", ["api", "projects", id, "export"]) => Some(export(state, id, ctx)),
+        ("GET", ["api", "projects", id, "export", "bibtex"]) => {
+            Some(export_text(state, id, ctx, formats::bibtex_export))
+        }
+        ("GET", ["api", "projects", id, "export", "obsidian"]) => {
+            Some(export_text(state, id, ctx, formats::obsidian_export))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
+pub struct ProjectExportBody {
+    pub dest_path: Option<String>,
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub include_pdfs: bool,
+}
+
+/// `POST /api/projects/{id}/export` — writes the `.lxproj` archive to `dest_path`,
+/// returns `{ok}`. No streaming branch: the Tauri frontend always sends a path.
+fn export(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let project_fk = path_i64(id)?;
+    let b: ProjectExportBody = ctx.parse_body()?;
+    let Some(dest) = b.dest_path.filter(|s| !s.is_empty()) else {
+        return Err(ApiError::new(
+            400,
+            "dest_path is required for in-process export",
+        ));
+    };
+    let pdf_dir = state.pdf_dir.clone();
+    state.with_conn(|conn| -> Result<(), ApiError> {
+        // export_project's own get_required words the miss (typed 404 via `?`).
+        export_import::export_project(
+            conn,
+            project_fk,
+            Path::new(&dest),
+            b.include_pdfs,
+            &pdf_dir,
+        )?;
+        Ok(())
+    })?;
+    crate::route::to_value(&OkReceipt { ok: true })
+}
+
+/// `GET /api/projects/{id}/export/{bibtex,obsidian}?dest_path=` — the dest_path
+/// branch of the text exporters. Writes the formatted project to disk, `{ok}`.
+fn export_text(
+    state: &AppState,
+    id: &str,
+    ctx: &ReqCtx<'_>,
+    fmt: fn(&[PaperDetails]) -> String,
+) -> Result<Value, ApiError> {
+    let project_fk = path_i64(id)?;
+    let Some(dest) = ctx.q("dest_path").filter(|s| !s.is_empty()) else {
+        return Err(ApiError::new(
+            400,
+            "dest_path is required for in-process export",
+        ));
+    };
+    let content = state.with_conn(|conn| -> Result<String, ApiError> {
+        let proj = project::get_required(conn, project_fk)?;
+        Ok(fmt(&project::export_papers(conn, &proj.source_fks)?))
+    })?;
+    std::fs::write(dest, content).map_err(|e| ApiError::new(500, e.to_string()))?;
+    crate::route::to_value(&OkReceipt { ok: true })
+}
+
+/// Canonical project wire shape — `service::project::to_out` (SERIALIZER 3;
+/// identical bytes on route, CLI and MCP).
+pub(crate) fn project_out(conn: &Connection, p: ProjectDetails) -> Result<Value, ApiError> {
+    serde_json::to_value(project::to_out(conn, p)?).map_err(|e| ApiError::new(500, e.to_string()))
+}
+
+/// `GET /api/projects?status=` — default "active"; "all" => no filter.
+fn list(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let status = ctx.q("status").unwrap_or("active").to_string();
+    let projects = state.with_conn(|conn| -> Result<Vec<ProjectOut>, ApiError> {
+        let filter = match status.as_str() {
+            "all" => Projects::default(),
+            // An unparseable status filter matches nothing; it is not a 400.
+            s => match s.parse::<Status>() {
+                Ok(st) => Projects {
+                    status: Some(st),
+                    ..Default::default()
+                },
+                Err(_) => return Ok(Vec::new()),
+            },
+        };
+        let mut projects = project::get_many(conn, &filter)?;
+        // Drop null-id rows (data-integrity guard).
+        projects.retain(|p| p.id.is_some());
+        Ok(project::to_out_many(conn, projects)?)
+    })?;
+    crate::route::to_value(&ProjectsResponse { projects })
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
+pub struct ProjectCreateBody {
+    pub name: String,
+    #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
+    pub description: String,
+    pub color_hex: Option<String>,
+    #[serde(default)]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub project_tags: Vec<String>,
+}
+
+/// `POST /api/projects`.
+fn create(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let b: ProjectCreateBody = ctx.parse_body()?;
+    let name = b.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::new(400, "name cannot be blank"));
+    }
+    let color = parse_color(b.color_hex.as_deref())?;
+    let pin = ProjectIn {
+        name: name.clone(),
+        description: b.description.trim().to_string(),
+        color,
+        tags: b.project_tags,
+        source_fks: Vec::new(), // papers are linked via POST /projects/{id}/papers
+    };
+    let fk = state.with_conn(|conn| project::create(conn, &pin))?;
+    crate::route::to_value(&CreatedProject {
+        project: CreatedProjectRef { id: fk, name },
+    })
+}
+
+/// Empty/absent hex → None; a bad value is a 400 "Invalid color_hex".
+fn parse_color(hex: Option<&str>) -> Result<Option<i32>, ApiError> {
+    match hex.filter(|s| !s.is_empty()) {
+        Some(h) => project::color_from_hex(h)
+            .map(Some)
+            .map_err(|_| ApiError::new(400, "Invalid color_hex")),
+        None => Ok(None),
+    }
+}
+
+/// `GET /api/projects/{id}` — not-found wording comes from
+/// `CoreError::ProjectNotFound` (the shared contract), mapped to 404 here.
+fn get_one(state: &AppState, id: &str) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    state.with_conn(|conn| {
+        let p = project::get_required(conn, pid)?;
+        project_out(conn, p)
+    })
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
+pub struct ProjectUpdateBody {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub color_hex: Option<String>,
+    pub status: Option<String>,
+    pub project_tags: Option<Vec<String>>,
+}
+
+/// `PATCH /api/projects/{id}` — partial update; color cleared only when the
+/// `color_hex` key is present in the body.
+fn patch(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    let b: ProjectUpdateBody = ctx.parse_body()?;
+
+    // Core owns the parse and the message; the 400 is kept so the frontend's
+    // handling of this response is unchanged (Validation would otherwise be 422).
+    let status = match b.status.as_deref() {
+        Some(s) => Some(
+            s.parse::<Status>()
+                .map_err(|e| ApiError::new(400, e.to_string()))?,
+        ),
+        None => None,
+    };
+    // color: only touched when the key was explicitly sent.
+    // Sent + non-empty => set; sent + null/"" => clear (Some(None)); absent => unchanged.
+    let color_sent = ctx
+        .body
+        .and_then(Value::as_object)
+        .is_some_and(|m| m.contains_key("color_hex"));
+    let color = if color_sent {
+        Some(parse_color(b.color_hex.as_deref())?)
+    } else {
+        None
+    };
+    let name = b.name.map(|n| n.trim().to_string());
+    if name.as_deref() == Some("") {
+        return Err(ApiError::new(400, "name cannot be blank"));
+    }
+    let upd = ProjectUpdateIn {
+        project_fk: pid,
+        name,
+        description: b.description.map(|d| d.trim().to_string()),
+        color,
+        project_tags: b.project_tags,
+        status,
+    };
+    state
+        .with_conn(|conn| project::update(conn, &upd))
+        .map_err(|e| match e {
+            CoreError::ProjectDeleted(m) | CoreError::Validation(m) => ApiError::new(400, m),
+            other => other.into(),
+        })?;
+    crate::route::to_value(&OkReceipt { ok: true })
+}
+
+/// `DELETE /api/projects/{id}` — 404 if absent, then soft-delete.
+fn delete(state: &AppState, id: &str) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    let proj = Project {
+        project_fk: Some(pid),
+    };
+    state.with_conn(|conn| -> Result<(), ApiError> {
+        project::require(conn, pid)?;
+        project::delete(conn, &proj)?;
+        Ok(())
+    })?;
+    crate::route::to_value(&OkReceipt { ok: true })
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct ProjectAddPaperBody {
+    pub source_id: String,
+}
+
+/// `POST /api/projects/{id}/papers` — core's shared receipt; `?` maps
+/// PaperNotFound/ProjectNotFound → 404, ProjectDeleted → 400.
+fn add_paper(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    let b: ProjectAddPaperBody = ctx.parse_body()?;
+    let receipt = state.with_conn(|conn| project::add_paper(conn, pid, &b.source_id))?;
+    crate::route::to_value(&receipt)
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct ProjectAddPapersBulkBody {
+    pub source_ids: Vec<String>,
+}
+
+/// `POST /api/projects/{id}/papers/bulk` — partial success.
+fn add_papers_bulk(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    let b: ProjectAddPapersBulkBody = ctx.parse_body()?;
+    let failed = state.with_conn(|conn| project::add_papers(conn, pid, &b.source_ids))?;
+    crate::route::to_value(&BulkAddReceipt {
+        ok: failed.is_empty(),
+        failed,
+    })
+}
+
+/// `DELETE /api/projects/{id}/papers/{sid}` — `sid` arrives already
+/// percent-decoded in `ctx.segs`.
+fn remove_paper(state: &AppState, id: &str, sid: &str) -> Result<Value, ApiError> {
+    let pid = path_i64(id)?;
+    let receipt = state.with_conn(|conn| project::remove_paper(conn, pid, sid))?;
+    crate::route::to_value(&receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::route::{route, ApiRequest};
+    use linxiv_core::storage;
+    use serde_json::json;
+
+    fn state() -> AppState {
+        let conn = storage::open_in_memory().unwrap();
+        storage::init_db(&conn).unwrap();
+        AppState::from_parts(conn, std::env::temp_dir(), std::env::temp_dir())
+    }
+
+    async fn req(
+        st: &AppState,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, ApiError> {
+        route(
+            st,
+            ApiRequest {
+                method: method.into(),
+                path: path.into(),
+                body,
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn list_on_empty_db_wraps_empty_array() {
+        assert_eq!(
+            req(&state(), "GET", "/api/projects", None).await.unwrap(),
+            json!({ "projects": [] })
+        );
+    }
+
+    #[tokio::test]
+    async fn get_missing_project_is_404() {
+        let err = req(&state(), "GET", "/api/projects/999", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Project 999 not found");
+    }
+
+    #[tokio::test]
+    async fn non_integer_id_is_422() {
+        let err = req(&state(), "GET", "/api/projects/abc", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 422);
+    }
+
+    #[tokio::test]
+    async fn create_blank_name_is_400() {
+        let err = req(
+            &state(),
+            "POST",
+            "/api/projects",
+            Some(json!({ "name": "   " })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.detail, "name cannot be blank");
+    }
+
+    #[tokio::test]
+    async fn create_bad_color_is_400() {
+        let err = req(
+            &state(),
+            "POST",
+            "/api/projects",
+            Some(json!({ "name": "P", "color_hex": "zzz" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.detail, "Invalid color_hex");
+    }
+
+    /// Canonical wire keys of `ProjectOut` (SERIALIZER 3), in order.
+    const WIRE_KEYS: [&str; 12] = [
+        "id",
+        "name",
+        "description",
+        "color_hex",
+        "project_tags",
+        "source_ids",
+        "paper_count",
+        "status",
+        "created_at",
+        "updated_at",
+        "archived_at",
+        "share_id",
+    ];
+
+    fn assert_wire_shape(v: &Value, pid: i64) {
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, WIRE_KEYS);
+        assert_eq!(v["id"], json!(pid));
+        assert_eq!(v["name"], json!("RL"));
+        assert_eq!(v["description"], json!(""));
+        assert_eq!(v["color_hex"], json!("#00ff00"));
+        assert_eq!(v["project_tags"], json!([]));
+        assert_eq!(v["source_ids"], json!([]));
+        assert_eq!(v["paper_count"], json!(0));
+        assert_eq!(v["status"], json!("active"));
+        assert_eq!(v["archived_at"], Value::Null);
+        assert_eq!(v["share_id"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn create_then_get_and_list_emit_canonical_wire_shape() {
+        let st = state();
+        let created = req(
+            &st,
+            "POST",
+            "/api/projects",
+            Some(json!({ "name": "RL", "color_hex": "#00ff00" })),
+        )
+        .await
+        .unwrap();
+        let pid = created["project"]["id"].as_i64().unwrap();
+        assert_eq!(created, json!({ "project": { "id": pid, "name": "RL" } }));
+
+        // get and list emit the same canonical shape (paper_count included on both).
+        let got = req(&st, "GET", &format!("/api/projects/{pid}"), None)
+            .await
+            .unwrap();
+        assert_wire_shape(&got, pid);
+
+        let listed = req(&st, "GET", "/api/projects", None).await.unwrap();
+        assert_wire_shape(&listed["projects"][0], pid);
+    }
+
+    #[tokio::test]
+    async fn patch_invalid_status_is_400() {
+        let err = req(
+            &state(),
+            "PATCH",
+            "/api/projects/1",
+            Some(json!({ "status": "nope" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        // Single-sourced from `Status: FromStr` — route, CLI and MCP word it alike.
+        assert_eq!(
+            err.detail,
+            "Invalid status 'nope'. Use 'active', 'archived', or 'deleted'."
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_missing_project_is_404() {
+        let err = req(
+            &state(),
+            "PATCH",
+            "/api/projects/999",
+            Some(json!({ "name": "x" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Project 999 not found");
+    }
+
+    #[tokio::test]
+    async fn delete_missing_project_is_404() {
+        let err = req(&state(), "DELETE", "/api/projects/999", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Project 999 not found");
+    }
+
+    #[tokio::test]
+    async fn add_paper_missing_project_is_404() {
+        let err = req(
+            &state(),
+            "POST",
+            "/api/projects/999/papers",
+            Some(json!({ "source_id": "arxiv:1" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Project 999 not found");
+    }
+
+    #[tokio::test]
+    async fn add_unknown_paper_to_real_project_is_404() {
+        let st = state();
+        let created = req(&st, "POST", "/api/projects", Some(json!({ "name": "P" })))
+            .await
+            .unwrap();
+        let pid = created["project"]["id"].as_i64().unwrap();
+        let err = req(
+            &st,
+            "POST",
+            &format!("/api/projects/{pid}/papers"),
+            Some(json!({ "source_id": "ghost" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Paper ghost not found");
+    }
+
+    #[tokio::test]
+    async fn bulk_add_reports_failed_verbatim() {
+        let st = state();
+        let created = req(&st, "POST", "/api/projects", Some(json!({ "name": "P" })))
+            .await
+            .unwrap();
+        let pid = created["project"]["id"].as_i64().unwrap();
+        let out = req(
+            &st,
+            "POST",
+            &format!("/api/projects/{pid}/papers/bulk"),
+            Some(json!({ "source_ids": ["ghost"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, json!({ "ok": false, "failed": ["ghost"] }));
+    }
+}

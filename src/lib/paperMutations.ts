@@ -3,34 +3,24 @@ import { addPapers, createProjectWithPapers } from "../api/projects.ts";
 import type { AddPapersVars, CreateProjectWithPapersVars } from "../api/projects.ts";
 import { errText } from "./errText.ts";
 
-// ---------------------------------------------------------------------------
-// Invalidation registry: one owner per operation for "which cached keys go
-// stale". Key sets are the UNION of what the call sites used to invalidate for
-// the same operation, so every page performing it refreshes the same views.
-// All keys are prefixes — react-query matches ["papers","list",sort] under
-// ["papers"].
-// ---------------------------------------------------------------------------
+// Invalidation registry: one owner per operation, so every page doing it
+// refreshes the same views. Keys are prefixes — ["papers"] matches
+// ["papers","list",sort].
 
-/** Keys affected by a tag edit. Tags are only ever edited through project
- *  saves and imports, so this set is folded into those operations' sets. */
+/** Keys affected by a tag edit. Folded into the sets whose operations can edit
+ *  tags (paper saves, project saves, imports). */
 export const TAG_QUERY_KEYS: readonly string[] = ["tags", "tag"];
 
-/**
- * "This operation changes what `GET /api/graph` would return."
+/** "This operation changes what `GET /api/graph` would return."
  *
- * Marked stale but deliberately NOT refetched — see `invalidateAll`. The graph
- * is the one view in the app that must never reload on its own: a reload
- * rebuilds the force layout, and the user may have spent a while arranging it.
- * The dot on GraphPage's Refresh button (driven by `onGraphDirtying` below) is
- * how they are told there is newer data; loading it is their call.
- *
- * The claim must be per-operation: a note or annotation edit is invisible to
- * the graph, while anything that adds, removes, retitles, retags, reprojects
- * or re-authors a paper is not.
- */
+ *  Marked stale but NOT refetched (see `invalidateAll`): a reload rebuilds the
+ *  force layout the user may have spent a while arranging, so GraphPage's
+ *  Refresh dot (fed by `onGraphDirtying` below) leaves reloading to them.
+ *  Note/annotation edits are invisible to the graph; anything that adds,
+ *  removes, retitles, retags, reprojects or re-authors a paper is not. */
 export const GRAPH_QUERY_KEY = "graph";
 
-/** Every cached key whose contents depend on which papers exist. */
+/** Cached keys whose contents depend on which papers exist. */
 export const PAPER_QUERY_KEYS: readonly string[] = [
   "papers",
   "paper",
@@ -43,22 +33,19 @@ export const PAPER_QUERY_KEYS: readonly string[] = [
   GRAPH_QUERY_KEY,
   "stats",
   "trash",
-  // Reading-status rows cascade with papers/memberships and move on merge
-  // (api/readingStatus.ts).
+  // Reading-status rows cascade with papers/memberships and move on merge.
   "reading-status",
 ];
 
-/** Keys affected by a paper mutation short of deletion: save from
- *  search/DOI/feed, import, new-version fetch, full-text index, PDF
- *  attach/detach. */
+/** Keys affected by a paper mutation short of deletion: save from search/DOI/
+ *  feed, import, new-version fetch, full-text index, PDF attach/detach. */
 export const PAPER_MUTATION_QUERY_KEYS: readonly string[] = [
   "papers",
   "paper",
   "stats",
   ...TAG_QUERY_KEYS,
   "saved-pdfs",
-  // A saved paper is a new node; a new version or a tag edit changes the one
-  // that is already drawn.
+  // A saved paper is a new node; a new version or tag edit changes a drawn one.
   GRAPH_QUERY_KEY,
 ];
 
@@ -69,9 +56,8 @@ export const PROJECT_MUTATION_QUERY_KEYS: readonly string[] = [
   "project",
   ...TAG_QUERY_KEYS,
   "trash",
-  // `GET /api/graph` sends each active project's name, colour and tags, and the
-  // graph's Projects / Project Tags filter rows resolve their free text through
-  // exactly that list.
+  // `/api/graph` carries each active project's name, colour and tags — what the
+  // Projects / Project Tags filter rows resolve against.
   GRAPH_QUERY_KEY,
   // Trashing/restoring a reading list hides/reveals its status rows.
   "reading-status",
@@ -82,21 +68,17 @@ export const PROJECT_MEMBERSHIP_QUERY_KEYS: readonly string[] = [
   "projects",
   "project",
   "papers",
-  // Every paper node carries the ids of the active projects it belongs to
-  // (crates/core/src/graph.rs sets `project_ids`), which is what the graph's
-  // Projects filter matches on — so a membership change is graph data.
+  // Each paper node carries its active projects (`project_ids`), what the
+  // graph's Projects filter matches on.
   GRAPH_QUERY_KEY,
   // Removing a paper from a reading list cascades its status row away.
   "reading-status",
 ];
 
 /** Keys affected by an author rename, delete, merge, or a paper↔author
- *  link/unlink (reassign is unlink+link) — the one paper-shaped
- *  operation class that had no owner here, so each call site spelled out its
- *  own key list. Author nodes and the paper->author edges the graph's Author
- *  filter matches through come from AUTHOR / PAPER_TO_AUTHOR, so a merge or a
- *  rename redraws the canvas. No graph-visible key here is one another page is
- *  guaranteed to have cached, which is why the marker matters. */
+ *  link/unlink (reassign is unlink+link). The graph draws author nodes and
+ *  paper->author edges; no page need hold an ["authors"] query, so only the
+ *  GRAPH_QUERY_KEY marker reliably tells the graph to redraw. */
 export const AUTHOR_MUTATION_QUERY_KEYS: readonly string[] = [
   "authors",
   "author",
@@ -111,18 +93,11 @@ export const NOTE_QUERY_KEYS: readonly string[] = ["notes", "note"];
 export const ANNOTATION_QUERY_KEYS: readonly string[] = ["annotations"];
 
 // --- Graph staleness -------------------------------------------------------
-// GraphPage flags its Refresh button by watching the query cache for
-// `invalidate` events, but react-query only emits one per query that is
-// ACTUALLY IN THE CACHE: `invalidateQueries({queryKey: ["authors"]})` from a
-// page that never mounted an ["authors"] query notifies nobody, and the graph
-// silently keeps drawing the old data. That page therefore keeps a ["stats"]
-// query alive on purpose — but "stats" is not in every set above, so the
-// guarantee only ever covered some of the operations.
-//
-// The registry already knows which operations touch the graph; this is it
-// saying so directly, independent of what any other page happens to have
-// cached. GraphPage still keeps the cache subscription as well, for the sites
-// that invalidate without coming through here.
+// GraphPage also watches the query cache for `invalidate` events, but
+// react-query emits one only per query ACTUALLY IN THE CACHE: invalidating
+// ["authors"] from a page that never mounted such a query notifies nobody. The
+// registry already knows which operations touch the graph, so it says so
+// directly; the cache subscription stays for sites that bypass this file.
 type GraphDirtyListener = () => void;
 const graphDirtyListeners = new Set<GraphDirtyListener>();
 
@@ -136,26 +111,21 @@ export function onGraphDirtying(listener: GraphDirtyListener): () => void {
 }
 
 function invalidateAll(qc: QueryClient, keys: readonly string[]): Promise<void> {
-  // Announced before the awaits: the flag is about data that has already
-  // changed on the backend, not about the refetches finishing.
+  // Announced before the awaits: the flag is about backend data that already
+  // changed, not about the refetches finishing.
   if (keys.includes(GRAPH_QUERY_KEY)) {
     for (const listener of [...graphDirtyListeners]) listener();
   }
   return Promise.all(
     keys.map((k) =>
-      // `refetchType: "none"` for the graph alone: mark it stale, do not fetch.
-      //
-      // Everything else here SHOULD refresh on its own, and does. The graph must
-      // not, and the default would: keys match by prefix, so ["graph"] matches
-      // the ["graph", excludeSingleAuthors] entry GraphPage holds, and
-      // invalidateQueries defaults to refetchType "active" — which refetches a
-      // mounted, enabled query at once, whatever its staleTime. GraphPage is
-      // mounted for the rest of the session once /graph has been visited (the
-      // app shell keeps it alive behind `display: none`), so retitling a paper
-      // from the Library would silently re-fetch the payload, and a new payload
-      // rebuilds the simulation — re-annealing from alpha 1 and drifting the
-      // arrangement the user made, with no action of theirs to explain it. Mid
-      // drag it would also destroy the grabbed node under the gesture.
+      // `refetchType: "none"` for the graph alone: mark stale, do not fetch.
+      // Everything else refreshes on its own, and should. The default would
+      // refresh the graph too — ["graph"] matches GraphPage's ["graph",
+      // hideSingleAuthors] by prefix, and refetchType "active" refetches a
+      // mounted query at once whatever its staleTime. AppShell keeps GraphPage
+      // mounted behind `display: none`, so a retitle from the Library would
+      // silently re-fetch, re-anneal from alpha 1 and drift the user's layout —
+      // or destroy the node under a mid-drag gesture.
       qc.invalidateQueries(
         k === GRAPH_QUERY_KEY ? { queryKey: [k], refetchType: "none" } : { queryKey: [k] }
       )
@@ -164,8 +134,7 @@ function invalidateAll(qc: QueryClient, keys: readonly string[]): Promise<void> 
 }
 
 /** Fan-out for a paper appearing, disappearing, or changing: soft delete,
- *  restore, hard delete, metadata save. Every such call site routes through
- *  here. */
+ *  restore, hard delete, metadata save. */
 export function invalidatePaperQueries(qc: QueryClient): Promise<void> {
   return invalidateAll(qc, PAPER_QUERY_KEYS);
 }
@@ -194,7 +163,7 @@ export function invalidateAnnotationQueries(qc: QueryClient): Promise<void> {
   return invalidateAll(qc, ANNOTATION_QUERY_KEYS);
 }
 
-/** Shared wording for the partial-failure contract: some papers added, some not. */
+/** Shared wording for the partial-failure contract. */
 export function partialFailureMessage(failedCount: number, totalCount: number): string {
   const plural = totalCount !== 1 ? "s" : "";
   return `${failedCount} of ${totalCount} paper${plural} could not be added`;
@@ -211,11 +180,9 @@ export interface ProjectPickerActions {
   clearName: () => void;
 }
 
-/** Add-selection-to-project, shared by Library and Graph.
- *
- *  Partial-failure contract (chosen for both pages): never throw — resolve
- *  with the failed ids, re-select exactly those, and report the count, so a
- *  retry can't re-add the papers that already made it in. */
+/** Add-selection-to-project, shared by Library and Graph. Partial-failure
+ *  contract: never throw — resolve with the failed ids, re-select exactly
+ *  those and report the count, so a retry can't re-add what already landed. */
 export function addToProjectMutationOptions(
   qc: QueryClient,
   ui: ProjectPickerActions
@@ -251,14 +218,13 @@ export function createProjectMutationOptions(
 ): UseMutationOptions<string[], Error, CreateProjectWithPapersVars> {
   return {
     mutationFn: createProjectWithPapers,
-    // Invalidate in onSettled, not onSuccess: the project may have been
-    // created even when the mutation rejects (e.g. a paper-add request fails).
+    // onSettled, not onSuccess: only a failed createProject rejects here, and
+    // that path has nothing to refresh anyway.
     onSettled: () => {
       invalidateProjectMembershipQueries(qc);
     },
     onSuccess: (failedIds) => {
-      // The project exists either way — clear the name so a retry can't
-      // create a duplicate.
+      // The project exists either way; clear the name so a retry can't dupe it.
       ui.clearName();
       if (failedIds.length > 0) {
         ui.selectFailures(failedIds);

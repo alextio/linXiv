@@ -1,36 +1,34 @@
-# Workspace root is src-tauri (NOT the repo root): upstream's integrations.rs
-# resolves sidecar binaries relative to current_exe(), so the cargo target/
-# directory must stay at src-tauri/target (ADR 0016 / drift report 2026-06-05).
+# Workspace root is src-tauri (NOT the repo root): release sidecars resolve
+# beside current_exe(), so the cargo target/ dir must stay at src-tauri/target.
 [workspace]
-members = [".", "crates/core", "crates/cli", "crates/mcp", "crates/migrate", "crates/share", "crates/p2p"]
+members = [".", "crates/core", "crates/cli", "crates/mcp", "crates/migrate", "crates/share", "crates/p2p", "crates/server"]
 
 [package]
 name = "linxiv-app"
-version = "0.4.2"
+version = "0.5.1"
 description = "linXiv desktop app"
 authors = ["jakeuribe"]
 edition = "2021"
-# `tauri dev` runs a bare `cargo run`; pick the app over the dev-server bin.
-default-run = "linxiv-app"
+license = "GPL-3.0-or-later"
 
 [lib]
 name = "linxiv_app"
 path = "src/lib.rs"
 
+# Keep src/bin/ empty in THIS package: the Tauri CLI treats every file stem
+# under src/bin as a bundle binary (no .rs filter) and ships it in the
+# installers. The headless/dev-server bins live in crates/server instead.
 [[bin]]
 name = "linxiv-app"
 path = "src/main.rs"
-
-# Dev-only HTTP shim (D32): serves /api/* over HTTP for the browser dev loop.
-[[bin]]
-name = "linxiv-dev-server"
-path = "src/bin/dev_server.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["unstable"] }
+# protocol-asset: tauri.conf.json enables assetProtocol (remote_pdf_cache
+# scope); without the matching feature the tauri build script hard-fails.
+tauri = { version = "2", features = ["unstable", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
@@ -44,35 +42,17 @@ serde = { version = "1", features = ["derive"] }
 # client config files and must not re-sort their keys.
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
-# Dev-only HTTP shim server (used by the linxiv-dev-server bin; not in the app).
-axum = "0.8"
+# The shared backend (router, state, share sync, remote-query node half) — the
+# Tauri-free half of what used to live in this crate.
+linxiv-server = { path = "crates/server" }
 # In-process backend: the app calls linxiv-core directly via the `api` dispatch
-# command (replacing the HTTP hop to the Python sidecar). rusqlite is pinned to
-# core's version so the Connection type unifies to one crate instance.
+# command — no HTTP hop.
 linxiv-core = { path = "crates/core" }
-# Phase-0 quarantined CRDT "shared projects" store, reached via the `share_api`
-# command. Reads canonical via linxiv-core; its own docs live under the share dir.
+# remote_backend.rs holds a ShareNode Arc per cached outbound connection.
 linxiv-share = { path = "crates/share", features = ["auth-keyhive", "sync-beelay"] }
-rusqlite = "0.40"
-anyhow = "1"
-# Date parse/format parity with core's NaiveDate fields in router arms.
-chrono = "0.4"
-# File-upload routes carry bytes as base64 in the JSON `api` body (the webview
-# can't put a multipart body through `invoke`).
-base64 = "0.22"
-# p2p key-store DEK (write-enforcement spec §8): OS keychain storage. The
-# secret-service backend is the pure-Rust zbus one so no C dbus lib is needed.
-keyring = { version = "3", features = [
-    "apple-native",
-    "windows-native",
-    "async-secret-service",
-    "crypto-rust",
-    "tokio",
-] }
-# Headless DEK derivation from LINXIV_P2P_PASSPHRASE (Argon2id).
-argon2 = "0.5"
-# Random DEK bytes on first run (same major as the lockfile's transitive copy).
-getrandom = "0.3"
+# Remote Query Mode client half (src/remote_backend.rs): dials linxiv-api/1
+# over the share endpoint.
+linxiv-p2p = { path = "crates/p2p" }
 # Native-package self-update (apply_linux_package_update): downloads the release asset
 # directly, since the Tauri updater plugin only ever swaps AppImage/app.tar.gz/
 # NSIS-MSI in place. 0.12.x already pulled transitively (linxiv-core/tex-brain);
@@ -97,14 +77,16 @@ url = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-# Share-dispatcher test injects a tempdir share dir (never the real data dir).
-wiremock = "0.6"
-# Mints the empty placeholder doc an offline join leaves behind; same version
-# linxiv-share builds against.
-automerge = "0.10.0"
+# remote_backend tests bind in-process endpoint pairs, like the p2p crate's
+# own tests/api.rs.
+iroh = "1.0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same 0.18 line tao/wry use; menu_popup_offset needs the gtk widget APIs.
+gtk = "0.18"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -113,10 +95,9 @@ tauri-plugin-single-instance = "2"
 codegen-units = 1
 lto = true
 opt-level = "s"
-# D30: unwind so the PDF-extraction catch_unwind (sources/pdf_metadata.rs) can
-# degrade a libpdfium-binding Rust panic to "no metadata" instead of aborting the
-# whole app. The catch is inside the Rust→pdfium-render call, so nothing unwinds
-# across a C frame. (Native libpdfium *segfaults* are contained by the subprocess
-# boundary in pdf_metadata.rs::extract_pdf_metadata_isolated.)
+# D30: unwind so the catch_unwind in sources/pdf_metadata/extract.rs can degrade a
+# libpdfium-binding Rust panic to "no metadata" instead of aborting the whole app.
+# The catch sits inside the Rust→pdfium-render call, so nothing unwinds across a C
+# frame. (Native segfaults are contained by pdf_metadata/worker.rs instead.)
 panic = "unwind"
 strip = true

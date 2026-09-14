@@ -1,59 +1,71 @@
+import { libraryFetch } from "../stores/backend.ts";
 import { apiFetch } from "./client.ts";
-import type { PaperMembershipReceipt, Project } from "../types/api";
+import type {
+  BulkAddReceipt,
+  CreatedProject,
+  OkReceipt,
+  PaperMembershipReceipt,
+  Project,
+  ProjectAddPaperBody,
+  ProjectAddPapersBulkBody,
+  ProjectCreateBody,
+  ProjectUpdateBody,
+  ProjectsResponse,
+} from "../types/api";
 
-export async function listProjects(
-  status = "active"
-): Promise<{ projects: Project[] }> {
-  return apiFetch<{ projects: Project[] }>(`/api/projects?status=${status}`);
+export type { ProjectCreateBody, ProjectUpdateBody };
+
+export async function listProjects(status = "active"): Promise<ProjectsResponse> {
+  return libraryFetch<ProjectsResponse>(`/api/projects?status=${status}`);
 }
 
 export async function getProject(id: number): Promise<Project> {
-  return apiFetch<Project>(`/api/projects/${id}`);
-}
-
-export interface ProjectCreateBody {
-  name: string;
-  description?: string;
-  color_hex?: string | null;
-  project_tags?: string[];
+  return libraryFetch<Project>(`/api/projects/${id}`);
 }
 
 export async function createProject(
   body: ProjectCreateBody
-): Promise<{ project: { id: number; name: string } }> {
+): Promise<CreatedProject> {
+  return libraryFetch("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Always-local variants for local-only flows (sharing publishes from the
+ *  local library): skip libraryFetch's default-backend routing. */
+export async function listProjectsLocal(status = "active"): Promise<ProjectsResponse> {
+  return apiFetch<ProjectsResponse>(`/api/projects?status=${status}`);
+}
+
+export async function createProjectLocal(
+  body: ProjectCreateBody
+): Promise<CreatedProject> {
   return apiFetch("/api/projects", {
     method: "POST",
     body: JSON.stringify(body),
   });
 }
 
-export interface ProjectUpdateBody {
-  name?: string;
-  description?: string;
-  color_hex?: string | null;
-  status?: string;
-  project_tags?: string[];
-}
-
 export async function updateProject(
   id: number,
   body: ProjectUpdateBody
-): Promise<{ ok: boolean }> {
-  return apiFetch(`/api/projects/${id}`, {
+): Promise<OkReceipt> {
+  return libraryFetch(`/api/projects/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
 }
 
-export async function deleteProject(id: number): Promise<{ ok: boolean }> {
-  return apiFetch(`/api/projects/${id}`, { method: "DELETE" });
+export async function deleteProject(id: number): Promise<OkReceipt> {
+  return libraryFetch(`/api/projects/${id}`, { method: "DELETE" });
 }
 
-export async function archiveProject(id: number): Promise<{ ok: boolean }> {
+export async function archiveProject(id: number): Promise<OkReceipt> {
   return updateProject(id, { status: "archived" });
 }
 
-export async function restoreProject(id: number): Promise<{ ok: boolean }> {
+export async function restoreProject(id: number): Promise<OkReceipt> {
   return updateProject(id, { status: "active" });
 }
 
@@ -64,13 +76,14 @@ export async function addPaperToProject(
   projectId: number,
   sourceId: string
 ): Promise<PaperMembershipReceipt> {
-  return apiFetch(`/api/projects/${projectId}/papers`, {
+  const body: ProjectAddPaperBody = { source_id: sourceId };
+  return libraryFetch(`/api/projects/${projectId}/papers`, {
     method: "POST",
-    body: JSON.stringify({ source_id: sourceId }),
+    body: JSON.stringify(body),
   });
 }
 
-// Server caps source_ids at 10k per request; stay well under it.
+// No server-side count cap; core chunks ids at 900 internally.
 const BULK_ADD_CHUNK = 5_000;
 
 /** Bulk-add papers to a project. Partial success: unknown source_ids come
@@ -79,15 +92,18 @@ const BULK_ADD_CHUNK = 5_000;
 export async function addPapersToProject(
   projectId: number,
   sourceIds: string[]
-): Promise<{ ok: boolean; failed: string[] }> {
+): Promise<BulkAddReceipt> {
   const ids = [...new Set(sourceIds)];
   const failed: string[] = [];
   for (let i = 0; i < ids.length; i += BULK_ADD_CHUNK) {
-    const res = await apiFetch<{ ok: boolean; failed: string[] }>(
+    const body: ProjectAddPapersBulkBody = {
+      source_ids: ids.slice(i, i + BULK_ADD_CHUNK),
+    };
+    const res = await libraryFetch<BulkAddReceipt>(
       `/api/projects/${projectId}/papers/bulk`,
       {
         method: "POST",
-        body: JSON.stringify({ source_ids: ids.slice(i, i + BULK_ADD_CHUNK) }),
+        body: JSON.stringify(body),
       }
     );
     failed.push(...res.failed);
@@ -99,7 +115,7 @@ export async function removePaperFromProject(
   projectId: number,
   sourceId: string
 ): Promise<PaperMembershipReceipt> {
-  return apiFetch(
+  return libraryFetch(
     `/api/projects/${projectId}/papers/${encodeURIComponent(sourceId)}`,
     { method: "DELETE" }
   );

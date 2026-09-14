@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/RfbuxuGt5"><img src="https://dcbadge.limes.pink/api/server/RfbuxuGt5" alt="" /></a>
+  <a href="https://discord.gg/SrueZGZxh"><img src="https://dcbadge.limes.pink/api/server/SrueZGZxh" alt="" /></a>
 </p>
 <p align="center">
   <picture>
@@ -22,7 +22,7 @@ A local-first desktop application for discovering, managing, and visualizing aca
 
 Upload your PDFs, create projects, manage notes, tags, and annotations to organize your library; all locally. linXiv aims to be a one-stop shop for researchers managing their literature, with the near-term goal of extending to research groups who want to share knowledge without going to the web.
 
-> **Development status:** Pre-1.0 (current version `0.3.3`). The database schema is still evolving, but migration structure is in-place.
+> **Development status:** Pre-1.0 (`0.5.x`). The schema is still evolving, but migration structure is in-place.
 
 > **Licensing:** linXiv is GPLv3. The vendored [`linxiv-p2p`](https://github.com/linxiv-dev/linxiv-p2p) submodule (`src-tauri/crates/p2p`) is licensed separately under Apache-2.0.
 
@@ -90,6 +90,7 @@ git submodule update --init --recursive
 - [Building the desktop app](#building-the-desktop-app)
 - [CLI](#cli)
 - [MCP server](#mcp-server)
+- [Headless server](#headless-server)
 - [Graph visualization](#graph-visualization)
 - [Data location](#data-location)
 - [Acknowledgements](#acknowledgements)
@@ -110,7 +111,7 @@ git submodule update --init --recursive
 
 ## Architecture
 
-linXiv is a Tauri v2 app. The frontend is React 18 + TypeScript (Vite); the backend is native Rust and runs **in-process** inside the app: the webview calls it through a single `api` Tauri command over IPC, and streams PDF bytes over a custom `linxiv://` scheme. SQLite (bundled, FTS5) and PDF extraction (native `libpdfium`) are compiled in; see [docs/architecture.md](docs/architecture.md) for the full workspace layout.
+linXiv is a Tauri v2 app. The frontend is React 19 + TypeScript (Vite); the backend is native Rust and runs **in-process** inside the app: the webview calls it through a single `api` Tauri command over IPC, and streams PDF bytes over a custom `linxiv://` scheme. SQLite (bundled, FTS5) and PDF extraction (native `libpdfium`) are compiled in; see [docs/architecture.md](docs/architecture.md) for the full workspace layout.
 
 ## Setup
 
@@ -156,16 +157,23 @@ npm run dev
 
 The `linxiv` (CLI) and `linxiv-mcp` (MCP server) binaries ship inside the app as Tauri sidecars.
 
-```bash
-npm run build:sidecar   # fetch libpdfium + build/stage the CLI & MCP sidecars into src-tauri/binaries/
-npm run tauri build     # build the app and bundle it
-```
-
-Or run both in one step:
+Fresh checkout, "just give me an installer":
 
 ```bash
-npm run build:all
+npm run build:all       # = build:sidecar + tauri build
 ```
+
+`build:all` is only a convenience wrapper. The steps under it are
+independently re-runnable, and most of them are one-time setup — a repeat
+build usually only needs `npm run tauri build`:
+
+| Command | What it does | When you need it |
+|---|---|---|
+| `bash scripts/fetch_pdfium.sh` | downloads the pinned native libpdfium into `src-tauri/vendor/pdfium/` | once per machine/OS; again only when the pin in the script changes |
+| `bash scripts/stage_rust_bins.sh` | builds `linxiv-cli` + `linxiv-mcp` and stages them into `src-tauri/binaries/` | after changing the CLI/MCP crates — otherwise the previously staged sidecars ship as-is |
+| `npm run build:sidecar` | both of the above | fresh checkout / new host |
+| `npm run tauri build` | builds and bundles the app | always — this is the actual build |
+| `npm run build:arch` | builds an Arch Linux pacman package | only when packaging for Arch |
 
 The installer/bundle is written to `src-tauri/target/release/bundle/`.
 
@@ -195,7 +203,7 @@ Covers papers, tags, projects, notes, PDF annotations, PDFs, DOI resolution, aut
 
 ## MCP server
 
-`linxiv-mcp` is a stdio MCP server exposing ~60 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly.
+`linxiv-mcp` is a stdio MCP server exposing ~75 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly.
 
 The simplest path is to install the desktop app and use **Settings → Integrations**, which registers the bundled server with a detected client.
 
@@ -220,6 +228,17 @@ Or add it to a client's MCP config (e.g. `claude_desktop_config.json`):
 In a checkout you can run it straight from source with `cargo run -p linxiv-mcp` (from `src-tauri/`).
 
 <img src="assets/claude_demo.gif" width="800" />
+
+## Headless server
+
+`linxiv-headless` runs the full backend — the complete `/api/*` surface,
+the iroh share peer, and background sync — with no window, for a
+self-hosted or containerized always-on node. Run it from source
+(`cargo run -p linxiv-server --bin linxiv-headless` from `src-tauri/`) or
+build the repo's `Dockerfile`; a bearer token gates the API when it
+binds beyond loopback, and `GET /admin` serves a small management page.
+Setup steps, a ready-made compose file, the environment reference, and
+relay configuration: [docs/headless](docs/headless/README.md).
 
 ## Graph visualization
 

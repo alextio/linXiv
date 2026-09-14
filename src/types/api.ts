@@ -1,10 +1,9 @@
 // The wire types the frontend consumes.
 //
-// Everything backed by a canonical serializer in linxiv-core is GENERATED into
+// Anything with a canonical serializer in linxiv-core is GENERATED into
 // ./generated.ts (CONTEXT.md § Serializer Convention); this file only aliases
-// those to the frontend's vocabulary and hand-writes the shapes that have no
-// single Rust struct to generate from. Each hand-written one says why — if the
-// reason goes away, delete it here and add a `#[derive(TS)]` there.
+// those to the UI's vocabulary and hand-writes the shapes with no single Rust
+// struct. Each hand-written one says why; when the reason goes, generate it.
 import type { ThemeColors, ColorAlphas } from "../lib/theme";
 import type {
   PaperDetails,
@@ -15,6 +14,8 @@ import type {
   AuthorWithCount,
   AuthorWithPapers,
   FilterRule,
+  SyncSkipped,
+  SyncedReceipt,
 } from "./generated";
 
 export type {
@@ -23,6 +24,11 @@ export type {
   NoteDetails,
   AnnotationDetails,
   SearchResultOut,
+  ArxivSearchResponse,
+  ArxivFetchResponse,
+  OpenAlexSearchResponse,
+  SavedPdf,
+  MergeCandidates,
   BasicAuthorDetails,
   AuthorWithCount,
   AuthorWithPapers,
@@ -40,15 +46,130 @@ export type {
   NewVersion,
   OrcidCandidate,
   ImportPreview,
+  ImportPreviewResponse,
+  ImportedProject,
+  PaperImportResult,
+  PapersListing,
+  PaperVersionMeta,
+  PaperVersionsResponse,
+  DoiCandidates,
+  FullTextPending,
+  SavedSourceIds,
+  DeletedPaperReceipt,
+  RemovedFromProjects,
+  OkReceipt,
+  SavedPdfListing,
+  DeletedPdf,
   BackupInfo,
   DeletedPaperDetails,
   TrashedProjectRow,
   RestoredPaper,
   EditorProjectSummary,
+  ProjectsResponse,
+  CreatedProject,
+  BulkAddReceipt,
+  TagsResponse,
+  TagDetail,
+  AuthorsResponse,
+  AuthorMergeResponse,
+  PaperMetadata,
+  OpenAlexSaveResponse,
+  DoiResolveResponse,
+  DoiSaveResponse,
+  NoteListResponse,
+  NoteGetResponse,
+  DeletedNote,
+  AnnotationListResponse,
+  CreatedAnnotation,
+  ReadingStatusesResponse,
+  ReadingStatusReceipt,
+  EditorProjectsResponse,
+  SearchHistoryResponse,
+  VersionCheckResponse,
+  NewVersionsResponse,
+  FeedRulesResponse,
+  OrcidBackfillResponse,
+  HardDeletedPaper,
+  RestoredProject,
+  HardDeletedProject,
+  NoteCreateBody,
+  NoteUpdateBody,
+  AnnotationCreateBody,
+  AnnotationUpdateBody,
+  AuthorMergeBody,
+  AuthorUpdateBody,
+  CreateEditorProjectBody,
+  ProjectCreateBody,
+  ProjectUpdateBody,
+  ProjectAddPaperBody,
+  ProjectAddPapersBulkBody,
+  ProjectExportBody,
+  PaperSavedBody,
+  PaperMergeBody,
+  UploadPdfBody,
+  ImportPdfBody,
+  ImportBibtexBody,
+  ImportPreviewBody,
+  ImportCommitBody,
+  ArxivSearchBody,
+  ArxivFetchBody,
+  OpenAlexSearchBody,
+  OpenAlexSaveBody,
+  DoiResolveBody,
+  DoiSaveBody,
+  FeedDismissBody,
+  FeedRuleCreateBody,
+  StorageBackupBody,
+  StorageRestoreBody,
+  OrcidBackfillBody,
+  VersionsCheckBody,
+  VersionsAckBody,
+  ReadingStatusPutBody,
+  EnvPatchBody,
+  SummaryRow,
+  SharedProjectsListing,
+  ReceivedListing,
+  ImportedReceipt,
+  UnpublishedReceipt,
+  LeftReceipt,
+  UnlinkedReceipt,
+  PublishedReceipt,
+  TicketMinted,
+  MemberCode,
+  InviteMinted,
+  MembersListing,
+  MemberRow,
+  RoleChanged,
+  AdminTransferred,
+  RevokedReceipt,
+  RekeyedReceipt,
+  RemovedReceipt,
+  SharedPdfSaved,
+  SyncDirection,
+  ShareSettings,
+  SyncRole,
+  SyncReason,
+  SyncSkipped,
+  SyncedReceipt,
 } from "./generated";
 
-// Frontend names for the generated serializers. The Rust name is the model,
-// the alias is what the UI has always called it.
+// `PUT /api/papers/sfk/{fk}` body; core names it RepairFields.
+export type { RepairFields as PaperRepairBody } from "./generated";
+
+// History (`/api/history`): change log, per-change diff, restore.
+export type {
+  DeviceActor,
+  ChangeRow,
+  Timeline,
+  PaperChange,
+  EntryChange,
+  FieldChange,
+  HistoryDiff,
+  RestoredToChange,
+  RestoreBody,
+} from "./generated";
+
+// Frontend names for the generated serializers.
 export type Paper = PaperDetails;
 export type Project = ProjectOut;
 export type Note = NoteDetails;
@@ -58,13 +179,16 @@ export type Author = AuthorWithCount;
 export type AuthorDetail = AuthorWithPapers;
 export type FeedFilterRule = FilterRule;
 
+// `POST /api/share/{id}/sync` returns one of two generated shapes
+// (share_sync.rs); the union has no Rust struct of its own.
+export type SyncReceipt = SyncSkipped | SyncedReceipt;
+
 // --- Not generated ---------------------------------------------------------
 
 // `GET /api/settings` returns `UserSettings::all()` — a free-form JSON object
-// seeded from crates/core/assets/default_settings.json, plus the mailto env
-// keys overlaid by route/settings.rs. There is no Rust struct, so the index
-// signature is the honest type, not an escape hatch: the keys below are the
-// ones the app actually reads.
+// seeded from crates/core/assets/default_settings.json, with the mailto env
+// keys overlaid by route/settings.rs. No Rust struct, so the index signature
+// is honest, not an escape hatch; the keys below are the ones the app reads.
 export interface Settings {
   pdf_save_limit_mb: number;
   theme_overrides: Partial<ThemeColors>;
@@ -76,29 +200,27 @@ export interface Settings {
   home_feed_url?: string;
   rss_cache_retention_days?: number;
   update_check_frequency?: string;
-  /** Overlaid from the process env by route/settings.rs, never persisted here. */
+  /** Overlaid from the process env; set via `PATCH /api/env`. */
   CROSSREF_MAILTO?: string;
   OPENALEX_MAILTO?: string;
-  /** Self-hosted iroh relay override; empty keeps n0's public relays. Read once at app launch. */
+  /** Self-hosted iroh relay override; empty keeps n0's public relays. */
   p2p_relay_url?: string;
   p2p_relay_auth_token?: string;
-  /** If true, refuse to bind the p2p node at all rather than falling back to n0's public relay. */
+  /** If set, refuse to bind the p2p node rather than use n0's relays. */
   p2p_relay_only?: boolean;
+  /** History attribution: actor hex (lowercase) → display name, overriding a
+   *  remote node's host-assigned display_name. */
+  actor_names?: Record<string, string>;
   [key: string]: unknown;
 }
 
-// The Knowledge Graph's wire shapes used to be hand-written here, because
-// `GET /api/graph` assembled its payload as an inline `serde_json::Value`
-// with no Rust struct to `#[derive(TS)]` from — so nothing but a test could
-// hold them to it, and they had already drifted: a paper node's `id` was
-// declared `string` where the payload emitted a bare integer, and eight of
-// its fields were missing altogether. `linxiv_core::graph` is typed now, so
-// they are GENERATED (`GraphView` and friends in ./generated.ts) and the
-// drift check is `npm run types:check` rather than a bespoke assets test.
+// The graph's wire shapes are GENERATED from `linxiv_core::graph` (`GraphView`
+// and friends in ./generated.ts); `npm run types:check` catches drift.
 
-// sources/feed.rs::FeedEntry has a matching Rust struct, but the response is
-// assembled inline in route/feed.rs (`title` + entries + saved ids), so only
-// half of this pair could be generated.
+// Core's `service::feed::FeedResponse` types `entries` as `Vec<Value>` (cached
+// entries round-trip through the DB as stored JSON), so generating it would
+// give `JsonValue` where the app relies on this shape. Hand-written until core
+// types those entries.
 export interface FeedEntry {
   title: string;
   link: string;
@@ -113,21 +235,6 @@ export interface FeedResponse {
   title: string;
   entries: FeedEntry[];
   saved_arxiv_ids: string[];
-}
-
-// `GET /api/papers/sfk/{fk}/versions` projects PaperDetailsAll into an inline
-// `json!` in route/papers.rs — an ADR-0010 reach-past, not a serializer.
-export interface PaperVersionSummary {
-  version: number;
-  published: string | null;
-  updated: string | null;
-  has_pdf: boolean;
-}
-
-export interface PaperVersionsResponse {
-  source_id: string;
-  latest_version: number;
-  versions: PaperVersionSummary[];
 }
 
 // Request-side only: the search form's clause rows. route/search.rs takes them

@@ -1,7 +1,6 @@
 // PDF highlight anchors. An annotation's `anchor` column is the JSON of an
 // `Anchor`. Rects are normalized 0..1 to the page box so they survive the
-// reader's fit-to-width resizing (the rendered page width changes with the
-// container).
+// reader's fit-to-width resizing.
 
 export interface AnchorRect {
   x: number;
@@ -93,11 +92,10 @@ export interface RawRect {
 
 // pdf.js renders each word/run of the text layer as its own <span>, so a
 // selection's getClientRects() comes back one tight rect PER WORD with nothing
-// for the inter-word spaces — painting them directly gives a patchy highlight
-// with white gaps. Group rects that share a visual line (a rect joins a line
-// when its vertical midpoint falls inside that line's band, tolerant of the
-// sub-pixel top/height jitter between adjacent spans) and merge each group into
-// one span from min-left to max-right. Pure so it's unit-testable without a DOM.
+// for the inter-word spaces — painting them directly leaves white gaps. Merge
+// rects whose vertical midpoint falls inside the current line's band (tolerant
+// of sub-pixel jitter between adjacent spans) into one span, min-left to
+// max-right. Pure, so it is unit-testable without a DOM.
 export function coalesceRectsIntoLines(rects: RawRect[]): RawRect[] {
   const sorted = [...rects].sort((a, b) => a.top - b.top || a.left - b.left);
   const lines: RawRect[] = [];
@@ -117,8 +115,8 @@ export function coalesceRectsIntoLines(rects: RawRect[]): RawRect[] {
 }
 
 // Build an anchor from the current text selection, measured against the
-// `.react-pdf__Page` element the selection starts in. Returns null when there is
-// no usable selection (collapsed, empty, or not inside a rendered page).
+// `.react-pdf__Page` element it starts in. Null when there is no usable
+// selection (collapsed, empty, or not inside a rendered page).
 export function selectionToAnchor(version: number, color: string): Anchor | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;

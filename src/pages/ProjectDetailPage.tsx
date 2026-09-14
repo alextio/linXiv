@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, useNavigationType, useLocation, Link } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, FolderOpen, GitFork, Upload } from "lucide-react";
+import { ArrowLeft, Download, FolderOpen, GitFork, History, Upload } from "lucide-react";
 import {
   getProject,
   createProject,
@@ -13,8 +13,10 @@ import {
 } from "../api/projects";
 import { listReceived, sharingAvailable } from "../api/share";
 import { receivedShareRole } from "../lib/shareRole";
-import { listPapers } from "../api/papers";
+import { listProjectPapers } from "../api/papers";
 import { ImportDialog } from "../components/import/ImportDialog";
+import { HistoryDialog } from "../components/history/HistoryDialog";
+import { useUrlDialog } from "../hooks/useUrlDialog";
 import type { Paper } from "../types/api";
 import { useSelectionStore } from "../stores/selection";
 import { ColorSwatch } from "../components/projects/ColorSwatch";
@@ -34,6 +36,9 @@ import {
 } from "../lib/paperMutations";
 import { errText } from "../lib/errText";
 import { useConfirmWithTimeout } from "../hooks/useConfirmWithTimeout";
+import { copyItem, showContextMenu } from "../lib/contextMenu";
+import { isArxivPaper, landingUrl } from "../lib/papers";
+import { openExternalUrl } from "../api/updates";
 
 // ---------------------------------------------------------------------------
 // Main page
@@ -55,6 +60,8 @@ export default function ProjectDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [addPapersOpen, setAddPapersOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const { open: historyOpen, show: openHistory, close: closeHistory } =
+    useUrlDialog("history");
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -114,19 +121,20 @@ export default function ProjectDetailPage() {
     enabled: !isNaN(projectId),
   });
 
+  // Server-filtered by membership, so projects past the old 200-paper default
+  // window render completely.
   const {
     data: papersData,
     isLoading: papersLoading,
   } = useQuery({
-    queryKey: ["papers"],
-    queryFn: () => listPapers(),
+    queryKey: ["papers", { project: projectId }],
+    queryFn: () => listProjectPapers(projectId),
     enabled: Boolean(project),
   });
 
-  // §7 viewer read-only: a project linked (share_id) to a received share where
-  // our capability is viewer renders with NO edit affordances (hidden, not
-  // disabled). Unknown role (offline / plain / hosted) → editable as today;
-  // the write boundary itself is enforced host+crypto side, this is UX.
+  // §7 viewer read-only: viewer capability on the share behind `share_id`
+  // hides every edit affordance (unmounted, not disabled). Unknown role →
+  // editable; receivedShareRole's doc covers why that's safe.
   const { data: receivedShares } = useQuery({
     queryKey: ["share", "received"],
     queryFn: listReceived,
@@ -147,8 +155,8 @@ export default function ProjectDetailPage() {
         color_hex: project.color_hex,
         project_tags: project.project_tags,
       });
-      // ponytail: copies project metadata + paper links; notes/annotations are
-      // library-global in linXiv, so they need no per-project copy.
+      // ponytail: copies project metadata + paper links; project-scoped
+      // notes/annotations stay with the original (NOTE/ANNOTATION.PROJECT_FK).
       // As in createProjectWithPapers: the project exists even when the add
       // rejects, so a reject counts as every id failing rather than escaping.
       let failed: string[] = [];
@@ -175,29 +183,33 @@ export default function ProjectDetailPage() {
     }
   }
 
-  const projectPapers: Paper[] = project && papersData
-    ? papersData.papers.filter((p) =>
-        project.source_ids.includes(p.source_id)
-      )
-    : [];
+  const projectPapers: Paper[] = (project && papersData?.papers) || [];
 
-  async function handleRemoveSelected() {
-    if (selectedIds.size === 0) return;
+  async function removePapers(idsArray: string[]) {
+    if (idsArray.length === 0 || removing) return;
     setRemoving(true);
     setRemoveError(null);
     try {
-      const idsArray = [...selectedIds];
       const results = await Promise.allSettled(
         idsArray.map((sid) => removePaperFromProject(projectId, sid))
       );
-      const failedCount = results.filter((r) => r.status === "rejected").length;
-      if (failedCount > 0) {
-        selectAll(idsArray.filter((_, i) => results[i].status === "rejected"));
-        setRemoveError(`Failed to remove ${failedCount} paper${failedCount !== 1 ? "s" : ""}`);
-      } else {
-        // Reading statuses need no client cleanup: PAPER_TO_READING's composite
-        // FK cascades away with the membership row.
-        clear();
+      const failedIds = idsArray.filter((_, i) => results[i].status === "rejected");
+      // Reading statuses need no client cleanup: PAPER_TO_READING's composite
+      // FK cascades away with the membership row. Drop the removed ids from
+      // the LIVE selection (not this render's snapshot, and never wholesale —
+      // a context-menu removal must not wipe an unrelated selection), keeping
+      // failed ids selected so a retry via the bar acts on them.
+      const live = useSelectionStore.getState().selectedIds;
+      selectAll([
+        ...new Set([
+          ...[...live].filter((sid) => !idsArray.includes(sid)),
+          ...failedIds,
+        ]),
+      ]);
+      if (failedIds.length > 0) {
+        setRemoveError(
+          `Failed to remove ${failedIds.length} paper${failedIds.length !== 1 ? "s" : ""}`
+        );
       }
       await invalidateProjectMembershipQueries(queryClient);
     } catch (err) {
@@ -205,6 +217,50 @@ export default function ProjectDetailPage() {
     } finally {
       setRemoving(false);
     }
+  }
+
+  function handleRemoveSelected() {
+    return removePapers([...selectedIds]);
+  }
+
+  // Right-click in a multi-selection acts on the whole selection; otherwise on
+  // the clicked row alone.
+  function handleRowContextMenu(e: React.MouseEvent, paper: Paper) {
+    const ids =
+      selectedIds.has(paper.source_id) && selectedIds.size > 1
+        ? [...selectedIds]
+        : [paper.source_id];
+    const url = landingUrl(paper);
+    showContextMenu(e, [
+      {
+        text: "Open",
+        action: () =>
+          navigate(`/library/${paper.source_fk}`, {
+            state: { fromProjectId: projectId },
+          }),
+      },
+      ...(url && !isArxivPaper(paper)
+        ? [
+            {
+              text: "Open Page",
+              action: () => void openExternalUrl(url).catch(console.error),
+            },
+          ]
+        : []),
+      "separator",
+      copyItem("Copy ID", paper.source_id),
+      ...(paper.doi ? [copyItem("Copy DOI", paper.doi)] : []),
+      ...(!readOnly
+        ? ([
+            "separator",
+            {
+              text: `Remove${ids.length > 1 ? ` ${ids.length} Papers` : ""} from Project`,
+              action: () => void removePapers(ids),
+              enabled: !removing,
+            },
+          ] as const)
+        : []),
+    ]);
   }
 
   async function handleArchive() {
@@ -333,6 +389,9 @@ export default function ProjectDetailPage() {
             )}
             <Button variant="muted" size="sm" onClick={() => setExportOpen(true)}>
               <Download size={13} className="mr-1" />Export
+            </Button>
+            <Button variant="muted" size="sm" onClick={openHistory}>
+              <History size={13} className="mr-1" />History
             </Button>
             {!readOnly && (
               <Button variant="muted" size="sm" onClick={() => setEditOpen(true)}>
@@ -506,23 +565,22 @@ export default function ProjectDetailPage() {
                 projectId={projectId}
                 project={project}
                 selectable={!readOnly}
+                onContextMenu={(e) => handleRowContextMenu(e, paper)}
               />
             ))
           )}
         </div>
       </div>
 
-      {/* TODO: project-level notes */}
-      {/* Notes are available on individual paper detail pages within this project. */}
-      {/* A project-level notes panel could be added here once the API supports */}
-      {/* querying notes by project_id without requiring a source_id. */}
+      {/* TODO: project-level notes panel — GET /api/notes 422s without a
+          source_id, so notes are reachable only per paper. */}
 
       {/* Dialogs (edit affordances unmounted entirely on viewer shares) */}
       {project && (
         <>
           {!readOnly && (
             <EditProjectDialog
-              key={projectId}
+              key={`edit-${projectId}`}
               open={editOpen}
               onClose={() => setEditOpen(false)}
               projectId={projectId}
@@ -534,7 +592,7 @@ export default function ProjectDetailPage() {
           )}
           {!readOnly && (
             <AddPapersDialog
-              key={projectId}
+              key={`add-${projectId}`}
               open={addPapersOpen}
               onClose={() => setAddPapersOpen(false)}
               projectId={projectId}
@@ -542,11 +600,17 @@ export default function ProjectDetailPage() {
             />
           )}
           <ExportDialog
-            key={projectId}
+            key={`export-${projectId}`}
             open={exportOpen}
             onClose={() => setExportOpen(false)}
             projectId={projectId}
             projectName={project.name}
+          />
+          <HistoryDialog
+            open={historyOpen}
+            onClose={closeHistory}
+            scope={{ kind: "project", id: projectId }}
+            title={`History: ${project.name}`}
           />
           {!readOnly && (
             <ImportDialog

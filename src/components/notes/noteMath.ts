@@ -1,17 +1,15 @@
 // Pure (JSX-free) math-placeholder extraction for the note markdown preview, split
-// out of NoteMarkdown.tsx so it can be unit-tested with `node --experimental-strip-types`
-// (which strips type annotations but cannot parse the JSX in the .tsx).
+// out of NoteMarkdown.tsx so `node --experimental-strip-types` can test it: it
+// strips type annotations but cannot parse the JSX in the .tsx.
 
 // Matches, in priority order: fenced code blocks, inline code spans, display
-// math $$...$$, inline math $...$. Code spans are passed through unchanged.
+// math $$...$$, inline math $...$. Backtick matches pass through unchanged.
 const MATH_OR_CODE_RE = /```[\s\S]*?```|`[^`\n]*`|\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]*?[^$\s]\$/g;
 
-// Private Use Area sentinels (U+E000 open, U+E001 close) bracket a math[] index so the
-// placeholder can't collide with ordinary digits in note text (e.g. a note that contains
-// "3 apples" or "section 2"). PUA codepoints don't occur in normal text, so the restore
-// regex only ever matches placeholders we inserted — a bare "\d+" token would clobber any
-// real digit. Built via fromCharCode/RegExp so the source stays ASCII (literal PUA chars
-// don't survive round-trips).
+// Private Use Area sentinels (U+E000 open, U+E001 close) bracket a math[] index.
+// PUA codepoints don't occur in normal note text, so the restore regex matches only
+// placeholders we inserted — a bare "\d+" token would clobber any real digit.
+// Built via fromCharCode so the source stays ASCII.
 const MATH_OPEN = String.fromCharCode(0xe000);
 const MATH_CLOSE = String.fromCharCode(0xe001);
 const MATH_TOKEN_RE = new RegExp(MATH_OPEN + "(\\d+)" + MATH_CLOSE, "g");

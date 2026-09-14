@@ -2,11 +2,15 @@ import { useState } from "react";
 import { Badge } from "../ui/badge";
 import { Spinner } from "../ui/spinner";
 import type { SearchResult } from "../../types/api";
-import { isArxivId } from "../../lib/papers";
+import { isArxivId, isHttpUrl } from "../../lib/papers";
+import { errText } from "../../lib/errText";
 import { MathText } from "../../lib/tex";
+import { copyItem, showContextMenu } from "../../lib/contextMenu";
+import { openExternalUrl } from "../../api/updates";
 
 interface ResultRowProps {
   result: SearchResult;
+  /** Library membership — the parent's saved-lookup query is the only source. */
   saved: boolean;
   onSave: (sourceId: string) => Promise<void>;
   onViewPdf: (result: SearchResult, isSaved: boolean) => void;
@@ -15,9 +19,7 @@ interface ResultRowProps {
 export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) {
   const [expanded, setExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [localSaved, setLocalSaved] = useState(false);
-  // Derive saved state from both the parent prop (updated by searches/appends) and local optimistic save.
-  const isSaved = saved || localSaved;
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const displayAuthors = result.authors.slice(0, 3);
   const moreAuthors = result.authors.length - 3;
@@ -26,16 +28,15 @@ export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) 
     ? result.published.slice(0, 10)
     : null;
 
-  async function handleCheck(e: React.ChangeEvent<HTMLInputElement>) {
-    if (!e.target.checked || isSaved) return;
+  async function handleSave() {
     setSaving(true);
+    setSaveError(null);
     try {
       await onSave(result.source_id);
-      setLocalSaved(true);
+      // `saved` flips via the parent's query before onSave resolves; nothing to
+      // track here.
     } catch (err) {
-      // No toast system available; log so devtools surfaces the failure.
-      // The checkbox reverts visually (localSaved stays false), which is correct UX.
-      console.error("Failed to save paper:", err);
+      setSaveError(errText(err, "Save failed"));
     } finally {
       setSaving(false);
     }
@@ -44,28 +45,66 @@ export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) 
   return (
     <div
       className="border-b border-[var(--color-border)] last:border-b-0"
+      onContextMenu={(e) =>
+        showContextMenu(e, [
+          {
+            text: saved ? "In Library" : "Save to Library",
+            action: () => void handleSave(),
+            enabled: !saved && !saving,
+          },
+          ...(result.paper_url && isArxivId(result.source_id)
+            ? [{ text: "View PDF", action: () => onViewPdf(result, saved) }]
+            : result.paper_url && isHttpUrl(result.paper_url)
+              ? [
+                  // Same landing URL as the expanded panel's "Open →" link.
+                  {
+                    text: "Open Page",
+                    action: () =>
+                      void openExternalUrl(result.paper_url).catch(console.error),
+                  },
+                ]
+              : []),
+          "separator",
+          copyItem("Copy ID", result.source_id),
+        ])
+      }
     >
       <div
         className="flex items-start gap-3 px-4 py-3 hover:bg-[var(--color-panel)] transition-colors cursor-pointer"
         onClick={() => setExpanded((v) => !v)}
       >
-        {/* Checkbox — stop propagation so clicking it doesn't expand */}
+        {/* Save action / saved indicator — stop propagation so clicking it doesn't expand */}
         <div
           className="flex items-center pt-0.5 shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
-          {saving ? (
+          {saved ? (
+            <span
+              className="w-4 h-4 flex items-center justify-center text-sm font-bold select-none"
+              style={{ color: "var(--color-success)" }}
+              title="In library"
+              aria-label="In library"
+              role="img"
+            >
+              ✓
+            </span>
+          ) : saving ? (
             <Spinner size={14} />
           ) : (
-            <input
-              type="checkbox"
-              className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer disabled:cursor-default"
-              checked={isSaved}
-              disabled={isSaved}
-              onChange={handleCheck}
-              title={isSaved ? "Already in library" : "Save paper"}
-              aria-label={isSaved ? "Already in library" : "Save paper"}
-            />
+            <button
+              type="button"
+              onClick={handleSave}
+              className="w-4 h-4 flex items-center justify-center rounded border text-xs font-bold leading-none cursor-pointer transition-opacity hover:opacity-80"
+              style={
+                saveError
+                  ? { borderColor: "var(--color-danger)", color: "var(--color-danger)" }
+                  : { borderColor: "var(--color-border)", color: "var(--color-muted)" }
+              }
+              title={saveError ? `Save failed: ${saveError}. Click to retry` : "Save to library"}
+              aria-label={saveError ? `Save failed: ${saveError}. Retry save.` : "Save to library"}
+            >
+              {saveError ? "!" : "+"}
+            </button>
           )}
         </div>
 
@@ -92,6 +131,13 @@ export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) 
               <Badge>{result.primary_category}</Badge>
             )}
           </div>
+
+          {/* Save failure — shown in place, never silently reverted */}
+          {saveError && !saved && (
+            <p className="text-xs mt-1" style={{ color: "var(--color-danger)" }}>
+              Save failed: {saveError}
+            </p>
+          )}
         </div>
 
         {/* Expand chevron */}
@@ -127,7 +173,7 @@ export function ResultRow({ result, saved, onSave, onViewPdf }: ResultRowProps) 
                 className="inline-block mt-2 text-xs text-[var(--color-accent)] hover:underline"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onViewPdf(result, isSaved);
+                  onViewPdf(result, saved);
                 }}
               >
                 PDF →

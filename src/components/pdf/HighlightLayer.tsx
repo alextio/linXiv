@@ -5,11 +5,9 @@ export interface PageHighlight {
   anchor: Anchor;
 }
 
-// Purely visual overlay drawn as a child of a react-pdf `<Page>` (which is
-// position:relative), so percentage coords map directly onto the page box. The
-// whole layer is pointer-events:none so text under a highlight stays selectable
-// and copyable; clicks to open a highlight are hit-tested geometrically in
-// PdfReader against the page coordinates instead.
+// Purely visual overlay inside a react-pdf `<Page>` (position:relative), so
+// percentage coords map onto the page box. pointer-events:none keeps the text
+// under a highlight selectable; PdfReader hit-tests clicks geometrically.
 export function HighlightLayer({ highlights }: { highlights: PageHighlight[] }) {
   if (highlights.length === 0) return null;
   return (

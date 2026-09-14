@@ -10,7 +10,7 @@ use crate::storage::db::{timestamp_from_sql, transaction};
 
 use super::fts::refresh_fts;
 
-/// `_ensure_paper_root_row` — INSERT OR IGNORE the root, then reactivate it if it
+/// INSERT OR IGNORE the root, then reactivate it if it
 /// was soft-deleted. Returns SOURCE_FK. Runs in the caller's tx.
 pub(super) fn ensure_paper_root_row(tx: &Transaction, source_id: &str) -> Result<i64> {
     tx.prepare_cached("INSERT OR IGNORE INTO PAPER_ROOTS (SOURCE_ID) VALUES (?)")?
@@ -34,13 +34,13 @@ pub(super) fn ensure_paper_root_row(tx: &Transaction, source_id: &str) -> Result
     Ok(fk)
 }
 
-/// `ensure_paper_root` — INSERT OR IGNORE the root (reactivating if deleted).
+/// INSERT OR IGNORE the root (reactivating if deleted).
 /// Returns its SOURCE_FK.
 pub fn ensure_paper_root(conn: &mut Connection, source_id: &str) -> Result<i64> {
     transaction(conn, |tx| ensure_paper_root_row(tx, source_id))
 }
 
-/// `get_source_id` — SOURCE_ID for a SOURCE_FK, or None.
+/// SOURCE_ID for a SOURCE_FK, or None.
 pub fn get_source_id(conn: &Connection, source_fk: i64) -> Result<Option<String>> {
     Ok(conn
         .query_row(
@@ -119,7 +119,31 @@ pub(super) fn opt_ts(s: Option<String>) -> Result<Option<NaiveDateTime>> {
     s.as_deref().map(timestamp_from_sql).transpose()
 }
 
-/// `get_paper_root` — the PAPER_ROOTS row for a source_id, or None.
+/// SOURCE_ID -> SOURCE_FK for many ids in one batched
+/// pass, omitting soft-deleted roots. Chunked under SQLite's parameter cap.
+pub fn active_source_fks(
+    conn: &Connection,
+    source_ids: &[String],
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in source_ids.chunks(900) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT SOURCE_ID, SOURCE_FK FROM PAPER_ROOTS \
+             WHERE DELETED_AT IS NULL AND SOURCE_ID IN ({placeholders})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (sid, fk) = row?;
+            out.insert(sid, fk);
+        }
+    }
+    Ok(out)
+}
+
+/// The PAPER_ROOTS row for a source_id, or None.
 pub fn get_paper_root(conn: &Connection, source_id: &str) -> Result<Option<PaperRoot>> {
     conn.query_row(
         "SELECT SOURCE_FK, SOURCE_ID, STATUS, DELETED_AT, CREATED_AT, UPDATED_AT \

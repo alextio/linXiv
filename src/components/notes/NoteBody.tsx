@@ -1,12 +1,10 @@
 import type { Note } from "../../types/api";
 import { NoteMarkdown } from "./NoteMarkdown";
 
-// Render a saved note's body the same way the editor's Preview tab does
-// (markdown + math via NoteMarkdown), so what you see after saving matches
-// what you saw while writing. forceInline (default, for the clamped card
-// preview) keeps display math inline so a display:block container isn't
-// promoted out of the line-clamp box; the full read page passes
-// forceInline={false} so display equations render as proper centered blocks.
+// A saved note's body, rendered through NoteMarkdown exactly as the editor's
+// Preview tab does. forceInline (default) keeps display math inline so a
+// display:block container can't escape the card's line-clamp box; the full read
+// page passes false so display equations render as centered blocks.
 export function NoteBody({
   content,
   className,

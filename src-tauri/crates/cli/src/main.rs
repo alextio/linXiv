@@ -1,8 +1,5 @@
-//! linXiv headless CLI — Rust port of `linxiv_cli.py`.
-//!
-//! Shared skeleton: the top-level clap tree + the group module contract. Command
-//! bodies live in `cmd::<group>::run`; this file only wires parsing → lazy `Ctx::open()`
-//! → dispatch. Output/error JSON parity helpers are in `output`, the DB/data-dir seam in `ctx`.
+//! linXiv headless CLI: parsing → lazy `Ctx::open()` → dispatch to `cmd::*`,
+//! plus the two DB-free arms (`Restore`, `pdf-meta`).
 
 mod cmd;
 mod ctx;
@@ -22,10 +19,8 @@ struct Cli {
     command: Commands,
 }
 
-/// All 19 top-level groups. `search`/`fetch`/`list` are flat commands routed into
-/// the `library` group; `stats`/`categories`/`settings`/`backup` route into `misc`.
-/// `restore` and `pdf-meta` are special-cased in `main` before `Ctx::open()` so they
-/// still work without requiring a valid DB; their dispatch arms exist for match exhaustiveness.
+/// All 19 top-level groups; flat commands route into `library`/`misc`. `Restore`
+/// and `PdfMeta` are special-cased in `main` before `Ctx::open()` (no valid DB needed).
 #[derive(Subcommand)]
 enum Commands {
     /// Search for papers
@@ -97,10 +92,8 @@ enum Commands {
     Backup { dest: std::path::PathBuf },
     /// Restore the database from a backup snapshot
     Restore { src: std::path::PathBuf },
-    /// Hidden pdfium worker: extraction runs in this child process so a native
-    /// libpdfium crash kills the child, not the app (core `pdf_metadata`). The
-    /// name comes from core's `PDF_META_SUBCOMMAND` — the exact string core's
-    /// worker spawn invokes — so a rename is a one-const change in core.
+    /// Hidden pdfium worker: extraction runs in this child so a native libpdfium
+    /// crash kills the child, not the app. Named by core's `PDF_META_SUBCOMMAND`.
     #[command(name = PDF_META_SUBCOMMAND, hide = true)]
     PdfMeta { path: std::path::PathBuf },
 }
@@ -124,8 +117,8 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Categories => cmd::misc::categories(ctx).await,
         Commands::Settings { cmd } => cmd::misc::settings(cmd, ctx).await,
         Commands::Backup { dest } => cmd::misc::backup(dest, ctx).await,
-        // `main` intercepts Restore and PdfMeta before Ctx::open()
-        // (see above); these arms exist only for match exhaustiveness.
+        // `main` intercepts both before `Ctx::open()`; these arms exist only
+        // so the match is exhaustive.
         Commands::Restore { .. } => unreachable!("restore is handled in main() before dispatch"),
         Commands::PdfMeta { .. } => unreachable!("pdf-meta is handled in main() before dispatch"),
     }
@@ -156,7 +149,7 @@ async fn main() {
             Err(e) => output::fail(e),
         },
         command => {
-            // Lazy: open the DB/data-dir once before dispatch (cheap, no network).
+            // Open the DB/data-dir once before dispatch; no network.
             let mut ctx = Ctx::open().unwrap_or_else(|e| output::fail(e));
             if let Err(e) = dispatch(command, &mut ctx).await {
                 output::fail(e);

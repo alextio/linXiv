@@ -1,19 +1,11 @@
-//! Paper service — Rust port of the non-import parts of `service/paper.py`.
-//! Plan §5.2. Thin orchestration over `storage::queries::paper` (+ `::project`
-//! for project_fks); no raw SQL, no duplicated storage logic.
-//!
-//! DI seam: every DB-touching fn takes `conn` first; FS-touching helpers
-//! (`pdf_on_disk_name`) take only the source_id/version and return a name —
-//! they never read config. `import_pdf` lives in `service::paper_import`.
+//! Paper service — thin orchestration over `storage::queries::paper`; no raw
+//! SQL. Every DB-touching fn takes `conn` first; `import_pdf` lives in
+//! `service::paper_import`.
 //!
 //! Two PDF filename formats stay DISTINCT (do not unify): the on-disk
-//! `{safe}v{version}.pdf` here vs. the `.lxproj` archive `{source_id}_v{version}.pdf`
-//! (export/import contract). PaperDetails (one version) / PaperDetailsAll (all
-//! versions) / SearchResultOut stay distinct serializers (D16).
-//!
-//! One Python `storage.db` read has no dedicated Rust storage fn yet
-//! (`get_paper_by_source_fk`); it is composed here from existing storage fns
-//! rather than adding raw SQL to the service.
+//! `{safe}v{version}.pdf` here vs. the `.lxproj` archive
+//! `{source_id}_v{version}.pdf` (export/import contract). D16: `PaperDetails`
+//! and `SearchResultOut` stay distinct serializers.
 
 use crate::error::{CoreError, Result};
 use crate::formats::pyrepr;
@@ -33,7 +25,7 @@ use std::path::Path;
 
 pub use store::DoiVersionCandidate;
 
-// ── lookup query objects (defined in service/paper.py, not models.py) ────────
+// ── lookup query objects ─────────────────────────────────────────────────────
 
 /// Identifies a single paper. Version pinning only exists for source_id
 /// lookups; `Id` and `SourceFk` carry no version by construction.
@@ -60,8 +52,7 @@ impl PaperRef {
     }
 }
 
-/// A soft-deleted paper enriched with its project memberships (Python
-/// `DeletedPaperDetails`). Wraps storage's `DeletedPaper` + `project_fks`.
+/// A soft-deleted paper enriched with its project memberships.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct DeletedPaperDetails {
     pub source_fk: i64,
@@ -89,23 +80,20 @@ pub fn pdf_filename_safe(source_id: &str) -> String {
 }
 
 /// On-disk name for a directly-imported PDF: `{safe}v{version}.pdf` (NO
-/// underscore before `v`). Distinct from the `.lxproj` archive format
-/// `{source_id}_v{version}.pdf`, which is owned by
-/// `service::export_import::ArchivePdfName` — the separate type keeps the two
-/// formats unmixable; do not unify.
+/// underscore before `v`). The archive format is a separate type,
+/// `service::export_import::ArchivePdfName`, so the two can't be mixed up.
 pub fn pdf_on_disk_name(source_id: &str, version: i64) -> String {
     format!("{}v{}.pdf", pdf_filename_safe(source_id), version)
 }
 
 // ── composed reads (no dedicated storage fn exists yet) ──────────────────────
 
-/// `db.get_paper_by_id` — exact PAPER version by PK.
+/// Exact PAPER version by PK.
 fn paper_by_id(conn: &Connection, paper_id: i64) -> Result<Option<PaperDetails>> {
     store::get_paper_by_id(conn, paper_id)
 }
 
-/// `db.get_paper_by_source_fk` — latest version for a root. Composed:
-/// SOURCE_FK → SOURCE_ID → latest paper.
+/// Latest version for a root, composed: SOURCE_FK → SOURCE_ID → latest paper.
 fn paper_by_source_fk(conn: &Connection, source_fk: i64) -> Result<Option<PaperDetails>> {
     match store::get_source_id(conn, source_fk)? {
         Some(sid) => store::get_paper(conn, &sid, None),
@@ -127,17 +115,15 @@ pub fn get(conn: &Connection, paper: &PaperRef) -> Result<Option<PaperDetails>> 
     }
 }
 
-/// `get` by source_id where absence is an error: the one place the paper not-found
-/// contract comes from (`CoreError::PaperNotFound` — route 404, CLI exit 1, MCP tool
-/// error all word it identically). Mirrors `project::get_required`.
+/// `get` by source_id where absence is `CoreError::PaperNotFound` — route 404,
+/// CLI exit 1, MCP tool error all word it identically.
 pub fn get_required(conn: &Connection, source_id: &str) -> Result<PaperDetails> {
     get(conn, &PaperRef::source(source_id.to_string()))?
         .ok_or_else(|| CoreError::PaperNotFound(source_id.to_string()))
 }
 
-/// Fetch every stored version, display fields from the latest. Key resolution
-/// shares [`resolve_source_id`] with delete/restore/hard-delete. (`get` stays
-/// PK-exact for `Id`: that key selects one version row.)
+/// All versions; display fields from the latest, `published` from the oldest.
+/// Keyed via [`resolve_source_id`]: `Id` is that row's root, not the row.
 pub fn get_all(conn: &Connection, paper: &PaperRef) -> Result<Option<PaperDetailsAll>> {
     let Some(source_id) = resolve_source_id(conn, paper)? else {
         return Ok(None);
@@ -168,10 +154,8 @@ pub fn get_all(conn: &Connection, paper: &PaperRef) -> Result<Option<PaperDetail
     }))
 }
 
-/// [`get_all`] minus the full-row hydration: the resolved source_id plus each
-/// stored version's listing scalars (version/published/updated/has_pdf),
-/// oldest-first. Same key resolution and `None` (unresolved or version-less
-/// root) semantics as `get_all`.
+/// [`get_all`] minus the full-row hydration: resolved source_id plus per-version
+/// listing scalars, oldest-first. Same key resolution and `None` semantics as `get_all`.
 pub fn list_version_meta(
     conn: &Connection,
     paper: &PaperRef,
@@ -187,15 +171,14 @@ pub fn list_version_meta(
 }
 
 /// Latest-version rows for the given paper roots (project export/share),
-/// filtered in SQL. Empty input → empty output — a project with no papers
-/// yields no papers.
+/// filtered in SQL. Empty input → empty output.
 pub fn get_by_source_fks(conn: &Connection, source_fks: &[i64]) -> Result<Vec<PaperDetails>> {
     store::get_papers_by_source_fks(conn, source_fks)
 }
 
 // ── writes ───────────────────────────────────────────────────────────────────
 
-/// Insert/update from the GUI `PaperIn` DTO. Returns (source_id, version).
+/// Insert/update from the `PaperIn` DTO. Returns (source_id, version).
 pub fn upsert(
     conn: &mut Connection,
     paper: &PaperIn,
@@ -203,7 +186,7 @@ pub fn upsert(
 ) -> Result<(String, i64)> {
     let meta = PaperMetadata {
         source_id: paper.source_id.clone().unwrap_or_default(),
-        // Python `paper.version or 1`: 0 is falsy → 1.
+        // version None or 0 → 1.
         version: paper.version.filter(|v| *v != 0).unwrap_or(1),
         title: paper.title.clone(),
         authors: paper.authors.clone().unwrap_or_default(),
@@ -267,17 +250,15 @@ fn not_found_as_paper<T>(r: Result<T>, source_id: &str) -> Result<T> {
     })
 }
 
-/// Re-write a paper's metadata in-place (migrating SOURCE_ID if it changed).
-/// Normalizes and validates first, so every Paper Repair front door (route, CLI,
-/// MCP) rejects the same input. Archive import bypasses this via
-/// [`repair_paper_unvalidated`].
+/// Re-write a paper's metadata in place (migrating SOURCE_ID if it changed).
+/// Normalizes/validates so route, CLI and MCP reject the same input; archive
+/// import bypasses via [`repair_paper_unvalidated`].
 pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata) -> Result<()> {
     store::repair_paper(conn, source_fk, &validate_repair(meta)?)
 }
 
 /// [`repair_paper`] minus normalization/validation — archive import replays
-/// already-stored metadata, which is not held to the Paper Repair input rules
-/// the front doors apply.
+/// already-stored metadata not held to the front-door input rules.
 pub fn repair_paper_unvalidated(
     conn: &mut Connection,
     source_fk: i64,
@@ -292,17 +273,18 @@ pub fn parse_published(s: &str) -> Result<NaiveDate> {
         .map_err(|_| CoreError::Validation(format!("Invalid date {}; use YYYY-MM-DD", pyrepr(s))))
 }
 
-/// The user-editable Paper Repair fields, shared by all three front doors:
-/// the route PUT body (mirrors `PaperRepairBody` in `src/api/papers.ts`),
-/// the CLI flags, and the MCP tool params. `published` stays a `String` so
-/// the date is parsed here by [`parse_published`], identically per surface.
-#[derive(Debug, Deserialize)]
+/// `PUT /api/papers/sfk/{fk}` (paper repair) body — the user-editable fields,
+/// shared by route body, CLI flags and MCP params. `published` stays a `String`,
+/// parsed by [`parse_published`] the same way on each.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
 pub struct RepairFields {
     pub title: String,
     pub authors: Vec<String>,
     /// Publication date (YYYY-MM-DD).
     pub published: String,
     #[serde(default)]
+    #[ts(as = "Option<String>", optional)]
     pub summary: String,
     #[serde(default)]
     pub category: Option<String>,
@@ -316,8 +298,7 @@ pub struct RepairFields {
 
 impl RepairFields {
     /// Assemble repair metadata around the identity each surface resolves
-    /// (source_id/version/source are not changeable here — ADR-0008). Fails
-    /// with `Validation` on a bad `published` date.
+    /// (source_id/version/source are not changeable here — ADR-0008); `Validation` on a bad date.
     pub fn into_metadata(
         self,
         source_id: String,
@@ -345,8 +326,8 @@ impl RepairFields {
     }
 }
 
-/// Trim title/summary, dedup non-blank authors/tags (empty tag list → None), and
-/// reject what Paper Repair must never persist: blank title, no authors, empty DOI.
+/// Trim title/summary, dedup non-blank authors/tags (empty tags → None), reject
+/// what Paper Repair must never persist: blank title, no authors, empty DOI.
 fn validate_repair(meta: &PaperMetadata) -> Result<PaperMetadata> {
     let title = meta.title.trim().to_string();
     if title.is_empty() {
@@ -389,8 +370,7 @@ fn dedup_nonblank(items: &[String]) -> Vec<String> {
 }
 
 /// Library search: FTS hits (TeX source + note index) merged with the LIKE scan
-/// over note text, deduped by source_id, FTS rows first then note-recency order —
-/// bm25 relevance is the stronger signal, so LIKE-only extras trail it.
+/// over note title/body, deduped by source_id, bm25 rows first then note-recency.
 pub fn search_library(conn: &Connection, query: &str, limit: i64) -> Result<Vec<PaperDetails>> {
     // A missing or corrupt FTS index yields no rows rather than failing the whole
     // search, so note hits still populate.
@@ -441,8 +421,8 @@ pub fn delete(conn: &mut Connection, paper: &PaperRef) -> Result<Option<String>>
     }
 }
 
-/// Restore a soft-deleted paper. Returns (pdf_path, project_fks). The root's
-/// SOURCE_FK is read before the restore write — it's an immutable PK, no TOCTOU.
+/// Restore a soft-deleted paper. Returns (pdf_path, project_fks). SOURCE_FK is
+/// read before the restore write; it's an immutable PK, so no TOCTOU.
 pub fn restore(conn: &mut Connection, paper: &PaperRef) -> Result<(Option<String>, Vec<i64>)> {
     let Some(source_id) = resolve_source_id(conn, paper)? else {
         return Ok((None, Vec::new()));
@@ -456,9 +436,8 @@ pub fn restore(conn: &mut Connection, paper: &PaperRef) -> Result<(Option<String
     Ok((pdf_path, project_fks))
 }
 
-/// Guard for trash-only operations (restore-from-trash, hard delete): the paper
-/// must be soft-deleted. `restore`/`hard_delete` stay unguarded — project import
-/// checks the root's status itself, and `paper hard-delete` deletes at any status.
+/// Guard for trash-only ops: the paper must be soft-deleted. `restore` and
+/// `hard_delete` don't self-guard — import checks status, hard-delete takes any.
 pub fn require_trashed(conn: &Connection, source_id: &str) -> Result<()> {
     if !store::is_paper_deleted(conn, source_id)? {
         return Err(CoreError::NotFound(format!(
@@ -515,8 +494,7 @@ pub fn deleted_source_ids(
 // ── multi-paper reads ────────────────────────────────────────────────────────
 
 /// Latest-version (default) paper rows, with optional exact-category filter and
-/// limit/offset. In Rust storage already returns `PaperDetails`, so this is the
-/// merge of Python's `list_papers` + `list_paper_details`.
+/// limit/offset.
 pub fn list_papers(
     conn: &Connection,
     latest_only: bool,
@@ -528,16 +506,27 @@ pub fn list_papers(
 }
 
 /// `list_papers` under a caller-chosen ordering (the Library page's sort).
+/// `project` narrows to that project's papers, filtered in SQL.
 pub fn list_papers_sorted(
     conn: &Connection,
     latest_only: bool,
     limit: Option<i64>,
     offset: i64,
     category: Option<&str>,
+    project: Option<i64>,
     sort: PaperSort,
     desc: bool,
 ) -> Result<Vec<PaperDetails>> {
-    store::list_papers_sorted(conn, latest_only, limit, offset, category, sort, desc)
+    store::list_papers_sorted(
+        conn,
+        latest_only,
+        limit,
+        offset,
+        category,
+        project,
+        sort,
+        desc,
+    )
 }
 
 /// Latest papers with a local PDF flag set, filtered in SQL (`GET /api/pdfs`).
@@ -545,14 +534,19 @@ pub fn list_pdf_papers(conn: &Connection) -> Result<Vec<PaperDetails>> {
     store::list_pdf_papers(conn)
 }
 
-/// Sorted distinct primary categories across latest papers (`db.get_categories`).
+/// Sorted distinct primary categories across latest papers.
 pub fn get_categories(conn: &Connection) -> Result<Vec<String>> {
     store::get_categories(conn)
 }
 
-/// Latest papers whose JSON tags include `label`, case-insensitively
-/// (`db.get_papers_by_json_tag`). Order: published DESC (undated last), then
-/// paper_id DESC so same-published-date papers are deterministic.
+/// `GET /api/categories` envelope; the CLI `categories` command emits the bare array.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CategoriesResponse {
+    pub categories: Vec<String>,
+}
+
+/// Latest papers whose JSON tags include `label`, case-insensitively. Order:
+/// published DESC (undated last), then paper_id DESC for determinism.
 pub fn get_papers_by_tag(conn: &Connection, label: &str) -> Result<Vec<PaperDetails>> {
     store::get_papers_by_json_tag(conn, label)
 }
@@ -564,9 +558,8 @@ pub fn ensure_paper_root(conn: &mut Connection, source_id: &str) -> Result<i64> 
     store::ensure_paper_root(conn, source_id)
 }
 
-/// The provider namespaces a user-typed bare id could belong to, tried in order.
-/// arXiv first: it is the overwhelmingly common case and the only one the CLI used
-/// to assume.
+/// Provider namespaces a user-typed bare id could belong to, tried in order;
+/// arXiv first as the overwhelmingly common case.
 const ID_PREFIXES: [&str; 4] = [
     crate::models::ARXIV_ID_PREFIX,
     crate::models::DOI_ID_PREFIX,
@@ -574,13 +567,8 @@ const ID_PREFIXES: [&str; 4] = [
     crate::models::LOCAL_ID_PREFIX,
 ];
 
-/// Map a user-supplied paper id onto the `source_id` actually stored.
-///
-/// A verbatim match always wins; only then is `raw` tried under each provider
-/// namespace, so `2204.12985` finds `arxiv:2204.12985` and `10.1000/alpha` finds
-/// either the bare row a pre-namespacing BibTeX import wrote or `doi:10.1000/alpha`.
-/// Unresolvable ids come back unchanged, so callers keep whatever not-found or
-/// empty-result behaviour they already had.
+/// Map a user-supplied paper id onto the `source_id` actually stored: a verbatim
+/// match wins, then each provider namespace; unresolvable ids come back unchanged.
 pub fn canonical_source_id(conn: &Connection, raw: &str) -> String {
     let raw = raw.trim();
     let mut candidates = vec![raw.to_string()];
@@ -588,7 +576,7 @@ pub fn canonical_source_id(conn: &Connection, raw: &str) -> String {
         candidates.extend(ID_PREFIXES.iter().map(|p| format!("{p}{raw}")));
     }
     let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
-    // Errors degrade to unresolved, matching the old per-candidate is_ok_and.
+    // A query error degrades to unresolved rather than propagating.
     let existing = store::source_fks_by_id(conn, &refs).unwrap_or_default();
     candidates
         .into_iter()
@@ -597,8 +585,7 @@ pub fn canonical_source_id(conn: &Connection, raw: &str) -> String {
 }
 
 /// SOURCE_FK for an existing paper root — the fail-if-absent counterpart to
-/// [`ensure_paper_root`]. `PaperNotFound` (404) when the paper is not in the
-/// library; the message is the variant's Display, same on every surface.
+/// [`ensure_paper_root`]. `PaperNotFound` (404) when absent, worded identically.
 pub fn resolve_source_fk(conn: &Connection, source_id: &str) -> Result<i64> {
     let sid = canonical_source_id(conn, source_id);
     store::get_paper_root(conn, &sid)?
@@ -612,11 +599,16 @@ pub fn get_paper_root(conn: &Connection, source_id: &str) -> Result<Option<store
     store::get_paper_root(conn, source_id)
 }
 
-/// Resolved (canonical source_id, concrete version, stored custom PDF_PATH) for
-/// one (source_id, version) — the three-scalar sibling of `get`'s `Source` arm
-/// (same key resolution, same version-0-means-latest fallthrough, None when the
-/// paper is absent/trashed), for PDF-locating callers that don't need the full
-/// row incl. FULL_TEXT.
+/// SOURCE_ID -> SOURCE_FK for many ids in one pass; soft-deleted roots absent.
+pub fn active_source_fks(
+    conn: &Connection,
+    source_ids: &[String],
+) -> Result<std::collections::HashMap<String, i64>> {
+    store::active_source_fks(conn, source_ids)
+}
+
+/// (canonical source_id, concrete version, stored custom PDF_PATH) for one
+/// (source_id, version) — key resolution and `None` as in `get`'s `Source` arm.
 pub fn pdf_ref(
     conn: &Connection,
     source_id: &str,
@@ -676,13 +668,9 @@ pub fn set_pdf_path(
     store::set_pdf_path(conn, source_id, path, version)
 }
 
-/// Delete every stored version's local PDF for `source_id`, clearing
-/// HAS_PDF/PDF_PATH per version as it goes, keeping the paper record. Returns
-/// `Ok(false)` when a version's file resolves outside the managed dir
-/// (deletion stops there; earlier versions' flags stay cleared) so each
-/// surface can word its own conflict envelope. `source_id` is used verbatim
-/// for path/flag lookups, exactly as the surfaces did. Backs
-/// `DELETE /api/pdfs/{id}`, CLI `pdf delete`, and MCP `delete_pdf`.
+/// Delete every version's local PDF, clearing HAS_PDF/PDF_PATH as it goes;
+/// `Ok(false)` stops at the first file outside the managed dir, earlier flags
+/// cleared. Backs `DELETE /api/pdfs/{id}`, CLI `pdf delete`, MCP `delete_pdf`.
 pub fn delete_saved_pdfs(conn: &Connection, pdf_dir: &Path, source_id: &str) -> Result<bool> {
     let all = get_all(conn, &PaperRef::source(source_id.to_string()))?
         .ok_or_else(|| CoreError::PaperNotFound(source_id.to_string()))?;
@@ -713,8 +701,7 @@ pub fn mark_pdf_saved(
 }
 
 /// Store extracted full text + refresh the FTS index for one version.
-/// Errors with `PaperNotFound` if the version no longer resolves (deleted or
-/// pruned between resolving the paper and the network fetch completing).
+/// `PaperNotFound` if the version no longer resolves (deleted mid-fetch).
 pub fn set_full_text(
     conn: &mut Connection,
     source_id: &str,
@@ -727,17 +714,10 @@ pub fn set_full_text(
     store::set_full_text(conn, source_id, version, Some(full_text))
 }
 
-/// The arXiv PDF URL a TeX-source fetch is derived from (`/pdf/` -> `/src/`), or
-/// an error naming why this paper has no fetchable source. Pure, so the three
-/// entry points that ingest full text (CLI, MCP, route) share one set of rules
-/// without any of them holding a connection across the network await.
-///
-/// Only arXiv publishes source tarballs — OpenAlex/CrossRef/DOI and locally
-/// imported PDFs are metadata-only, so they are refused here rather than each
-/// caller re-deriving that.
-///
-/// The arXiv test is the `source_id` namespace, not `PAPER_META.PROVIDER`: the
-/// provider column records provenance and arrives blank on some import paths.
+/// The arXiv PDF URL a TeX-source fetch derives from (`/pdf/` -> `/src/`), or an
+/// error naming why there is no fetchable source. Pure. Only arXiv publishes
+/// source tarballs, and arxiv-ness is judged by the `source_id` namespace, not
+/// `PAPER_META.PROVIDER` (blank on some import paths).
 pub fn source_fetch_url(paper: &PaperDetails) -> Result<&str> {
     if !is_arxiv_source_id(&paper.source_id) {
         return Err(CoreError::BadRequest(format!(
@@ -784,10 +764,8 @@ impl FullTextReceipt {
     }
 }
 
-/// Phase 1 of a full-text ingest — everything that must NOT hold the DB lock:
-/// resolve the source URL, download the tarball, extract the TeX. Hand the
-/// result to [`FetchedFullText::commit`] under the caller's lock (two-phase so
-/// no surface holds its connection mutex across the network await).
+/// Phase 1 of a full-text ingest — must NOT hold the DB lock: resolve the URL,
+/// download, extract TeX. Hand the result to [`FetchedFullText::commit`] under the caller's lock.
 pub async fn fetch_full_text(
     paper: &PaperDetails,
     data_dir: &std::path::Path,
@@ -810,15 +788,9 @@ pub struct FetchedFullText {
 }
 
 impl FetchedFullText {
-    /// Phase 2, under the caller's DB lock: store + index the body, or refuse to
-    /// clobber an already-indexed one with an empty re-fetch. `extract_source`
-    /// yields `""` for a corrupt, truncated, or PDF-only tarball, which is
-    /// indistinguishable from "this paper genuinely has no TeX" — storing it is
-    /// right the first time (it marks DOWNLOADED_SOURCE so the backfill stops
-    /// retrying; `force` re-opens it), but overwriting a body that already
-    /// indexes would silently drop the paper out of search results. The guard
-    /// reads one stored column here, under the lock, so it sees the freshest
-    /// state without ever hauling the body.
+    /// Phase 2, under the caller's DB lock: store + index the body. A first empty
+    /// extract is stored (marks DOWNLOADED_SOURCE so backfill stops retrying) but
+    /// never clobbers an indexed body, which would drop the paper from search.
     pub fn commit(self, conn: &mut Connection) -> Result<FullTextReceipt> {
         if self.text.is_empty() && store::has_full_text(conn, &self.source_id, self.version)? {
             return Ok(FullTextReceipt {
@@ -840,10 +812,8 @@ impl FetchedFullText {
     }
 }
 
-/// SOURCE_IDs of stored arXiv papers with no TeX source yet, oldest-published
-/// first — the backfill work list. Ids only; the caller loads each paper as it
-/// goes. The query matches on the same `arxiv:` / `/pdf/` constants
-/// `source_fetch_url` does, so a listed paper is one it accepts.
+/// Backfill work list: SOURCE_IDs of arXiv papers with no TeX source yet,
+/// oldest-published first. Same `arxiv:` / `/pdf/` rules `source_fetch_url` uses.
 pub fn full_text_backfill_candidates(conn: &Connection) -> Result<Vec<String>> {
     store::full_text_backfill_candidates(conn)
 }
@@ -851,6 +821,55 @@ pub fn full_text_backfill_candidates(conn: &Connection) -> Result<Vec<String>> {
 /// Length of `full_text_backfill_candidates` without building the ids.
 pub fn full_text_backfill_count(conn: &Connection) -> Result<i64> {
     store::full_text_backfill_count(conn)
+}
+
+// ── route envelopes ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct PapersListing {
+    pub papers: Vec<PaperDetails>,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct PaperVersionsResponse {
+    pub source_id: String,
+    pub latest_version: i64,
+    pub versions: Vec<store::PaperVersionMeta>,
+}
+
+/// [`list_version_meta`] assembled into [`PaperVersionsResponse`]; same `None` semantics.
+pub fn version_listing(
+    conn: &Connection,
+    paper: &PaperRef,
+) -> Result<Option<PaperVersionsResponse>> {
+    Ok(
+        list_version_meta(conn, paper)?.map(|(source_id, versions)| PaperVersionsResponse {
+            source_id,
+            latest_version: versions.last().expect("non-empty").version,
+            versions,
+        }),
+    )
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct DoiCandidates {
+    pub candidates: Vec<store::DoiVersionCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct FullTextPending {
+    pub pending: i64,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct SavedSourceIds {
+    pub saved_source_ids: Vec<String>,
+}
+
+/// Delete-paper receipt — `DELETE /api/papers/{id}` and MCP `delete_paper`.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct DeletedPaperReceipt {
+    pub deleted: String,
 }
 
 #[cfg(test)]
@@ -879,8 +898,8 @@ mod tests {
         }
     }
 
-    /// The fail-if-absent half of the pair every Note/Annotation consumer shares:
-    /// resolving an unknown paper errors instead of creating a root.
+    /// The fail-if-absent half of the pair: an unknown paper errors out rather
+    /// than getting a root created for it.
     #[test]
     fn resolve_source_fk_fails_without_creating_a_root() {
         let mut conn = db();
@@ -893,8 +912,8 @@ mod tests {
         assert_eq!(resolve_source_fk(&conn, " arxiv:1 ").unwrap(), fk);
     }
 
-    /// Every surface must be able to address a paper by the id the user knows,
-    /// namespaced or not — the CLI used to assume `arxiv:` and lost DOI/BibTeX rows.
+    /// Every surface addresses a paper by the id the user knows, namespaced or
+    /// not; assuming `arxiv:` loses DOI/BibTeX rows.
     #[test]
     fn canonical_source_id_tries_verbatim_then_each_namespace() {
         let mut conn = db();
@@ -928,9 +947,8 @@ mod tests {
         });
     }
 
-    /// `pdf_custom_path` is the single-column sibling of `get`'s `Source` arm:
-    /// same key resolution (canonical id, version-0 → latest) and same
-    /// visibility (trashed roots yield None), pinned against `get` itself.
+    /// `pdf_custom_path` matches `get`'s `Source` arm — canonical id, version-0
+    /// → latest, trashed → None — pinned against `get` itself.
     #[test]
     fn pdf_custom_path_matches_get_source_arm() {
         let mut conn = db();
@@ -968,9 +986,8 @@ mod tests {
             Some("/tmp/v1.pdf")
         );
 
-        // `pdf_ref` carries the canonical id and concrete version alongside the
-        // path, and distinguishes a pathless row (Some with None path) from an
-        // absent paper (None).
+        // `pdf_ref` adds the canonical id and concrete version, and tells a
+        // pathless row (Some with None path) from an absent paper (None).
         assert_eq!(
             pdf_ref(&conn, "A", Some(1)).unwrap(),
             Some(("arxiv:A".into(), 1, Some("/tmp/v1.pdf".into())))
@@ -1140,9 +1157,8 @@ mod tests {
         assert!(get_papers_by_tag(&conn, "nope").unwrap().is_empty());
     }
 
-    /// Pins the paper_id lookup's exact semantics: the one version row that PK
-    /// names, with FULL_TEXT blanked like every list read (the source_id path
-    /// via `get_paper` does return the body — the difference is load-bearing).
+    /// Pins the paper_id lookup: the one version row that PK names. FULL_TEXT is
+    /// blanked, as on every `PAPER_COLUMNS_NO_TEXT` read.
     #[test]
     fn paper_by_id_returns_exact_version_with_full_text_blanked() {
         let mut conn = db();
@@ -1158,8 +1174,8 @@ mod tests {
         assert!(get(&conn, &PaperRef::Id(424242)).unwrap().is_none());
     }
 
-    /// Pins get_categories: distinct, NULLs excluded, byte-order ascending
-    /// (BTreeSet<String> order == SQL BINARY collation), latest versions only.
+    /// Pins get_categories: distinct, NULLs excluded, latest versions only,
+    /// ascending under SQL's default BINARY collation (byte order).
     #[test]
     fn get_categories_distinct_sorted_null_free_latest_only() {
         let mut conn = db();
@@ -1186,9 +1202,8 @@ mod tests {
         );
     }
 
-    /// Pins get_papers_by_tag: ASCII-case-insensitive whole-tag match on the
-    /// JSON list, published DESC with NULL-published papers last, and papers
-    /// with NULL TAGS skipped rather than erroring.
+    /// Pins get_papers_by_tag: ASCII-case-insensitive whole-tag match, published
+    /// DESC with NULLs last, NULL-TAGS papers skipped rather than erroring.
     #[test]
     fn get_papers_by_tag_matches_case_insensitively_and_sinks_null_published() {
         let mut conn = db();
@@ -1350,9 +1365,8 @@ mod tests {
         assert!(got.downloaded_source);
     }
 
-    /// Saving a paper then storing its text must make it findable — the claim the
-    /// whole ingestion path exists to satisfy. Seeding `papers_fts` by hand (as the
-    /// storage-layer search tests do) would not catch a break between the two.
+    /// Saving a paper then storing its text must make it findable; seeding
+    /// `papers_fts` by hand would not catch a break between the two.
     #[test]
     fn set_full_text_feeds_search_full_text() {
         use crate::storage::queries::search::search_full_text;
@@ -1377,9 +1391,8 @@ mod tests {
             1
         );
 
-        // …and the rebuild after a delete has to find that older body too. It
-        // would be unrecoverable otherwise: a forced re-fetch of v2 extracts
-        // empty again and so stores nothing to rebuild from.
+        // …and the rebuild after a delete must find that older body: a forced
+        // re-fetch of v2 extracts empty again, so there'd be nothing to rebuild.
         let key = PaperRef::source("arxiv:ft".into());
         delete(&mut conn, &key).unwrap();
         assert!(search_full_text(&conn, "zephyranthes", 10)
@@ -1451,9 +1464,8 @@ mod tests {
 
     #[test]
     fn backfill_candidates_skip_papers_with_no_tex_source_to_fetch() {
-        // Everything source_fetch_url would refuse has to stay off the list:
-        // the backfill would hand each one to the fetcher on every rebuild, and
-        // the count backing the UI's progress line would never reach zero.
+        // Anything source_fetch_url refuses must stay off the list, or the
+        // UI's progress count never reaches zero.
         let mut conn = db();
         let other_provider = PaperMetadata {
             url: Some("http://arxiv.org/pdf/1234v1".into()),
@@ -1478,9 +1490,9 @@ mod tests {
 
     #[test]
     fn backfill_work_list_agrees_with_source_fetch_url() {
-        // The work-list SQL and source_fetch_url must answer "is this arXiv"
-        // identically on rows where the id namespace and the PROVIDER column
-        // disagree — otherwise backfill queues papers the fetcher then skips.
+        // The work-list SQL and source_fetch_url must answer "is this arXiv" the
+        // same way where the id namespace and PROVIDER disagree, or backfill
+        // queues papers the fetcher then skips.
         let mut conn = db();
         let row = |sid: &str, provider: &str, url: &str| PaperMetadata {
             url: Some(url.into()),
@@ -1607,9 +1619,8 @@ mod tests {
         assert_eq!(hits[0].source_id, "arxiv:N");
     }
 
-    // Note-only extras trail in note-recency order (MAX(UPDATED_AT) DESC), not
-    // the bulk read's published/paper_id order — B is inserted first (lower
-    // paper_id, same published date) so the bulk sort alone would yield [A, B].
+    // Note-only extras trail in note-recency order (MAX(UPDATED_AT) DESC): B is
+    // inserted first, so the bulk read's published/paper_id sort would yield [A, B].
     #[test]
     fn search_library_orders_note_hits_by_note_recency() {
         let mut conn = db();
@@ -1639,9 +1650,8 @@ mod tests {
         );
     }
 
-    // The case MCP used to drop before the merge was hoisted here: one query
-    // where paper A matches via indexed full text and paper B only via note
-    // content the FTS tokenizer can't reach. Both must return, FTS hit first.
+    // One query where A matches via indexed full text and B only via note content
+    // the FTS tokenizer can't reach. Both must return, FTS hit first.
     #[test]
     fn search_library_returns_full_text_and_note_hits_together() {
         let mut conn = db();
@@ -1718,8 +1728,8 @@ mod tests {
         assert_eq!(got.authors, vec!["Ada".to_string(), "Bo".to_string()]);
         assert_eq!(got.tags, vec!["nlp".to_string()]);
 
-        // Blank-only tags collapse to None (Python `tags or None`) — every
-        // front door hands raw tags to repair and relies on this.
+        // Blank-only tags collapse to None — every front door hands raw
+        // tags to repair and relies on this.
         let blank_tags = PaperMetadata {
             tags: Some(vec!["  ".into()]),
             ..meta("arxiv:R", 1, "cs.LG", &[])

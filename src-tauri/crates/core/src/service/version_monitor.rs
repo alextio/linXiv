@@ -1,8 +1,8 @@
-//! version_monitor — RSS-style polling for new arXiv versions, separate from the
+//! version_monitor — polling for new arXiv versions, separate from the
 //! opportunistic capture that happens on refetch. Each pass checks the stalest N
 //! saved arXiv papers (tracked per-root in VERSION_CHECK) and records any version
-//! newer than the max already stored, capturing it through the EXISTING path
-//! (`save_paper_metadata`, the same INSERT-OR-IGNORE-per-version write refetch uses).
+//! newer than the max already stored via the EXISTING write path
+//! (`write_paper_version_in_tx`, what `save_paper_metadata` wraps).
 //!
 //! The pass itself is orchestrated by the caller (route): `stale_candidates`
 //! → one batched `fetch_latest` → `apply_results`. Everything but that one
@@ -20,6 +20,17 @@ pub use crate::storage::queries::version_check::{
     MAX_VERSION_CHECK_BATCH,
 };
 
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct VersionCheckResponse {
+    pub checked: usize,
+    pub new_versions: Vec<NewVersion>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct NewVersionsResponse {
+    pub new_versions: Vec<NewVersion>,
+}
+
 /// Latest arXiv metadata for many roots in ONE rate-limited request. Batched and
 /// arXiv-only, so it stays outside the per-Provider dispatch; consumers get it here rather
 /// than reaching into `sources::arxiv` (ADR-0010). Hold no DB lock across it.
@@ -27,17 +38,14 @@ pub async fn fetch_latest(source_ids: &[String]) -> Result<Vec<PaperMetadata>> {
     crate::sources::arxiv::fetch_by_ids(source_ids, &config::data_dir()).await
 }
 
-/// Process one candidate: check root status. For roots that are active and
-/// resolvable, save any newer version and record the check (with the new version
-/// if found, or None if not). Errors are caught and logged by apply_results,
-/// allowing the candidate to rotate out instead of blocking future checks.
-/// Skips both save and record for deleted or inactive roots.
+/// Process one candidate: for active, resolvable roots save any newer version and
+/// record the check (new version or None). Deleted/inactive roots skip both, as
+/// does an error — leaving the candidate at the front of the staleness queue.
 fn process_candidate(
     conn: &mut Connection,
     cand: &Candidate,
     fetched: &[PaperMetadata],
 ) -> Result<Option<NewVersion>> {
-    // Check root status unconditionally; skip both save and record if deleted or inactive.
     let Some(root) = store::get_paper_root(conn, &cand.source_id)? else {
         return Ok(None);
     };
@@ -50,7 +58,7 @@ fn process_candidate(
         .filter(|m| m.version > cand.known_version);
     if let Some(m) = newer {
         // Save + flag as one transaction: either both land or neither does, so a
-        // crash mid-write can't silently raise known_version without capturing it.
+        // crash can't raise known_version with the discovery unflagged.
         transaction(conn, |tx| {
             store::write_paper_version_in_tx(tx, m, None)?;
             record_check(tx, root.source_fk, Some(m.version))
@@ -67,10 +75,8 @@ fn process_candidate(
     Ok(None)
 }
 
-/// Apply one pass's fetched metadata: for every candidate with an active root,
-/// capture a newer-than-known version and record the check (with or without the
-/// new version). Candidates with missing/inactive roots are skipped entirely.
-/// Per-candidate errors are logged and swallowed so the pass continues.
+/// Apply one pass's fetched metadata: capture each candidate's newer-than-known
+/// version and record the check; per-candidate errors are logged and swallowed.
 pub fn apply_results(
     conn: &mut Connection,
     candidates: &[Candidate],

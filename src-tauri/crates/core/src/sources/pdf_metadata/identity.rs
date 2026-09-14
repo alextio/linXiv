@@ -1,11 +1,7 @@
-//! Crypto identity — the deterministic `local:<sha256[:16]>` source id.
+//! The deterministic `local:<sha256(bytes)[:16 hex]>` source id.
 
 use crate::models::local_source_id;
 use sha2::{Digest, Sha256};
-
-// ---------------------------------------------------------------------------
-// Local source id:  local:<sha256(bytes)[:16 hex]>
-// ---------------------------------------------------------------------------
 
 pub(crate) fn pdf_source_id(bytes: &[u8]) -> String {
     let h = sha256(bytes);

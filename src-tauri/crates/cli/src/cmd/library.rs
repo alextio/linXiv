@@ -1,5 +1,4 @@
 //! Group `library` — the flat top-level commands `search`, `fetch`, `list`.
-//! cmd_search / cmd_fetch / cmd_list in `linxiv_cli.py`.
 
 use clap::{Args, ValueEnum};
 
@@ -10,7 +9,7 @@ use linxiv_core::service::source as svc_source;
 use crate::ctx::Ctx;
 use crate::output::{fail, output, render_paper, validate_arxiv_id};
 
-/// Paper source backends (argparse `choices=list(_SOURCES)`).
+/// Paper source backends.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Source {
     Arxiv,
@@ -27,6 +26,9 @@ pub struct SearchArgs {
     /// Max results
     #[arg(long, default_value_t = 10)]
     pub max: i64,
+    /// Search the local library full-text index instead of a remote source
+    #[arg(long, conflicts_with = "source")]
+    pub local: bool,
 }
 
 #[derive(Args)]
@@ -70,11 +72,23 @@ pub enum Dir {
     Desc,
 }
 
-// cmd_search: search the source, dump the results as `SearchResultOut` — the
-// canonical search wire shape all three surfaces emit (ADR-0011). The
-// `[search] {e}` prefix line + error JSON mirror Python's two-line stderr on failure.
-pub async fn search(args: SearchArgs, _ctx: &mut Ctx) -> anyhow::Result<()> {
-    // Python `source.search` defaults sort="relevance"; the CLI never overrides it.
+// Search the source, dump the results as `SearchResultOut` — the
+// canonical remote-search wire shape all three surfaces emit (ADR-0011).
+// Two-line stderr on failure: `[search] {e}` prefix line, then the error JSON.
+// `--local` instead dumps the library rows (`PaperDetails`) that
+// `GET /api/papers/search` returns — library hits, not remote-search results.
+pub async fn search(args: SearchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
+    // `--local`: the same `svc_paper::search_library` FTS + note merge the GUI
+    // route and `paper search` call; `--max` caps hits like their `limit`.
+    if args.local {
+        output(&svc_paper::search_library(
+            &ctx.conn,
+            &args.query,
+            args.max,
+        )?);
+        return Ok(());
+    }
+    // Remote search always uses sort="relevance"; the CLI never overrides it.
     let results = match svc_source::search(
         args.source.to_possible_value().unwrap().get_name(),
         &args.query,
@@ -94,7 +108,7 @@ pub async fn search(args: SearchArgs, _ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-// cmd_fetch: validate (arxiv only), fetch, persist, then render-or-dump.
+// Validate (arxiv only), fetch, persist, then render-or-dump.
 pub async fn fetch(args: FetchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
     if matches!(args.source, Source::Arxiv) {
         validate_arxiv_id(&args.source_id);
@@ -119,7 +133,7 @@ pub async fn fetch(args: FetchArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-// cmd_list: latest-version rows, optional category/limit/offset filter, emitted
+// Latest-version rows, optional category/limit/offset filter, emitted
 // as `PaperDetails` (models.rs SERIALIZER 2) — the same wire shape route and MCP
 // list arms serialize. `full_text` never ships (skip_serializing on the model).
 pub async fn list(args: ListArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
@@ -135,6 +149,7 @@ pub async fn list(args: ListArgs, ctx: &mut Ctx) -> anyhow::Result<()> {
         args.limit,
         args.offset,
         args.category.as_deref(),
+        None,
         sort,
         desc,
     )?;
@@ -171,9 +186,17 @@ mod tests {
         svc_paper::save_paper_metadata(&mut conn, &meta, None).unwrap();
         svc_paper::set_full_text(&mut conn, "arxiv:1234.5678", 1, "tex body").unwrap();
 
-        let papers =
-            svc_paper::list_papers_sorted(&conn, true, None, 0, None, PaperSort::Published, true)
-                .unwrap();
+        let papers = svc_paper::list_papers_sorted(
+            &conn,
+            true,
+            None,
+            0,
+            None,
+            None,
+            PaperSort::Published,
+            true,
+        )
+        .unwrap();
         let row = serde_json::to_value(&papers[0]).unwrap();
         let keys: Vec<&str> = row
             .as_object()
@@ -209,6 +232,39 @@ mod tests {
         assert_eq!(row["authors"], json!(["Ada Lovelace", "Alan Turing"]));
         assert_eq!(row["has_pdf"], json!(false)); // bool, not 0/1
         assert_eq!(row["downloaded_source"], json!(true));
+    }
+
+    /// `linxiv search --local` routes to `search_library` — the same FTS call
+    /// the GUI route and `paper search` make. Seed a temp-dir library with a
+    /// full-text paper and assert the hit comes back.
+    #[test]
+    fn local_search_finds_a_full_text_hit() {
+        let dir =
+            std::env::temp_dir().join(format!("linxiv-cli-local-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = storage::open(&dir.join("papers.db")).unwrap();
+        storage::init_db(&conn).unwrap();
+
+        let meta: PaperMetadata = serde_json::from_value(json!({
+            "source_id": "arxiv:1234.5678",
+            "version": 1,
+            "title": "T",
+            "authors": ["Ada Lovelace"],
+            "published": "2024-01-01",
+            "summary": "s",
+            "category": "cs.LG",
+            "source": "arxiv",
+        }))
+        .unwrap();
+        svc_paper::save_paper_metadata(&mut conn, &meta, None).unwrap();
+        svc_paper::set_full_text(&mut conn, "arxiv:1234.5678", 1, "the rare word zymurgy").unwrap();
+
+        let hits = svc_paper::search_library(&conn, "zymurgy", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_id, "arxiv:1234.5678");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `linxiv search` emits `SearchResultOut` (ADR-0011) — pin the exact wire

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { listAuthors, getAuthor, updateAuthor, deleteAuthor, mergeAuthors, getMergeCandidates, linkAuthorToPaper, unlinkAuthorFromPaper } from "../api/authors";
-import type { AuthorUpdateBody } from "../api/authors";
+import type { AuthorUpdateBody } from "../types/api";
 import { Spinner } from "../components/ui/spinner";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -14,7 +14,7 @@ import { submitOnCtrlEnter } from "../lib/submitShortcut";
 import { invalidateAuthorQueries } from "../lib/paperMutations";
 
 // Matches an author against a free-text query across full/first/last name and ORCID.
-function authorMatchesQuery(a: { full_name?: string | null; first_name?: string | null; last_name?: string | null; orcid?: string | null }, query: string) {
+function authorMatchesQuery(a: AuthorUpdateBody, query: string) {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return (
@@ -279,10 +279,9 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
   const orcidCandidates = mergeSuggestions?.candidates ?? [];
   const nameCandidates = mergeSuggestions?.name_candidates ?? [];
 
-  // Two-click confirm for every destructive action on this page — per-paper
-  // link surgery and both merge buttons (window.confirm is unreliable under
-  // WebKitGTK): first click arms, second fires. One shared key means arming
-  // one action disarms any other.
+  // Two-click confirm for per-paper link surgery and both merge buttons
+  // (window.confirm is suppressed under WebKitGTK): first click arms, second
+  // fires. One shared key means arming one action disarms any other.
   const [armedPaperAction, setArmedPaperAction] = useState<string | null>(null);
 
   const unlinkMutation = useMutation({
@@ -507,7 +506,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
                         key={c.author_id}
                         armed={armedPaperAction === key}
                         disabled={busy}
-                        armedLabel="Confirm — moves the paper"
+                        armedLabel="Confirm: moves the paper"
                         label={`Reassign to ${c.full_name ?? "(unnamed)"}`}
                         onClick={() => {
                           if (armedPaperAction === key) {
@@ -522,7 +521,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
                   <ArmedActionButton
                     armed={armedPaperAction === unlinkKey}
                     disabled={busy}
-                    armedLabel="Confirm — removes this paper"
+                    armedLabel="Confirm: removes this paper"
                     label="Unlink"
                     onClick={() => {
                       if (armedPaperAction === unlinkKey) {
@@ -560,7 +559,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
           >
             <p style={{ color: "var(--color-text)" }}>
               Same ORCID as{" "}
-              {orcidCandidates.map((a) => a.full_name ?? "(unnamed)").join(", ")} — likely the
+              {orcidCandidates.map((a) => a.full_name ?? "(unnamed)").join(", ")}, likely the
               same person.
             </p>
             <Button
@@ -577,7 +576,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
               }}
             >
               {armedPaperAction === "merge:orcid"
-                ? "Confirm merge — cannot be undone"
+                ? "Confirm merge: cannot be undone"
                 : `Merge duplicate${orcidCandidates.length > 1 ? "s" : ""}`}
             </Button>
           </div>
@@ -591,7 +590,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
             style={{ borderColor: "var(--color-border)" }}
           >
             <p style={{ color: "var(--color-muted)" }}>
-              Same name, separate record{nameCandidates.length > 1 ? "s" : ""} — might be the
+              Same name, separate record{nameCandidates.length > 1 ? "s" : ""}, might be the
               same person, but a shared name alone is weak evidence.
             </p>
             <ul className="space-y-0.5">
@@ -665,7 +664,7 @@ function AuthorDetailView({ authorId }: AuthorDetailViewProps) {
           {mergeMutation.isPending
             ? "Merging…"
             : armedPaperAction === "merge:picker"
-              ? `Confirm merge of ${mergeIds.length} — cannot be undone`
+              ? `Confirm merge of ${mergeIds.length}: cannot be undone`
               : `Merge${mergeIds.length ? ` ${mergeIds.length}` : ""} into this author`}
         </Button>
       </section>
@@ -766,7 +765,7 @@ function FieldDisplay({ label, value }: { label: string; value: string | null })
         {label}
       </dt>
       <dd style={{ color: value ? "var(--color-text)" : "var(--color-muted)" }}>
-        {value ?? "—"}
+        {value ?? "-"}
       </dd>
     </div>
   );

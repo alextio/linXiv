@@ -401,16 +401,16 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automerge"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09b78abcbba93428b9465b26cb2816a5b4654cce507f099a84a8c1b311cb3633"
+checksum = "c1b59cbd9e7685a1ac6bf6046ddcd8acb550fa5bf03c09f6c1056728a742b40d"
 dependencies = [
  "cfg-if",
  "flate2",
  "getrandom 0.4.2",
  "hex",
  "hexane",
- "itertools 0.14.0",
+ "itertools",
  "leb128",
  "rand 0.10.1",
  "rustc-hash",
@@ -425,26 +425,26 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b3e9830fb43a71ecbcce339e6ccb0bde5456a3f18d5b810a744870e4a50d832"
+checksum = "4f752152713595c654d109c4d53bebee0d71883447d5c629580c575fbe9569c7"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
  "similar",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "963860d91f829d5c4b3f8581989cdcfcfcc4c4af92182a7b03075180d8973795"
+checksum = "05d40c14f9a45c5dc3ddb857728ecc9d84a0756b65803d4bf25604caa8ad05cb"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2781,9 +2781,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexane"
-version = "0.2.1"
+version = "1.0.0-alpha.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4ecba0bb4e14df997df7cab6d1b584c6432d8865cf2adfced814706d715a7b"
+checksum = "81df830f11babb0eee9a082e09135ef0a7d8791f3fe9b279bb9485bf7eaf23e0"
 dependencies = [
  "leb128",
  "thiserror 2.0.18",
@@ -2926,6 +2926,12 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-range"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
 
 [[package]]
 name = "httparse"
@@ -3593,15 +3599,6 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
@@ -3918,21 +3915,16 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "linxiv-app"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
- "anyhow",
- "argon2",
- "automerge",
- "axum",
- "base64 0.22.1",
- "chrono",
  "futures-util",
- "getrandom 0.3.4",
- "keyring",
+ "gtk",
+ "iroh",
  "linxiv-core",
+ "linxiv-p2p",
+ "linxiv-server",
  "linxiv-share",
  "reqwest 0.12.28",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3949,12 +3941,11 @@ dependencies = [
  "tokio",
  "url",
  "winreg 0.52.0",
- "wiremock",
 ]
 
 [[package]]
 name = "linxiv-cli"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3967,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "linxiv-core"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "biblatex",
@@ -3995,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "linxiv-mcp"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4012,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "linxiv-migrate"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "linxiv-core",
@@ -4020,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "linxiv-p2p"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "automerge",
@@ -4041,13 +4032,41 @@ dependencies = [
  "postcard",
  "rand 0.8.6",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
 
 [[package]]
+name = "linxiv-server"
+version = "0.5.1"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "automerge",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "getrandom 0.3.4",
+ "iroh",
+ "keyring",
+ "linxiv-core",
+ "linxiv-p2p",
+ "linxiv-share",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "ts-rs",
+ "wiremock",
+ "zbus 4.4.0",
+]
+
+[[package]]
 name = "linxiv-share"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "automerge",
  "autosurgeon",
@@ -5160,7 +5179,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "image",
- "itertools 0.15.0",
+ "itertools",
  "js-sys",
  "libloading",
  "log",
@@ -7176,6 +7195,7 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http",
+ "http-range",
  "jni 0.21.1",
  "libc",
  "log",

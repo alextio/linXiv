@@ -1,8 +1,14 @@
-import { apiFetch } from "./client";
-import type { FeedFilterRule, FeedResponse } from "../types/api";
+import { libraryFetch } from "../stores/backend.ts";
+import type {
+  FeedDismissBody,
+  FeedFilterRule,
+  FeedResponse,
+  FeedRuleCreateBody,
+  FeedRulesResponse,
+} from "../types/api";
 
 export async function getFeed(url: string): Promise<FeedResponse> {
-  return apiFetch<FeedResponse>(`/api/feed?url=${encodeURIComponent(url)}`);
+  return libraryFetch<FeedResponse>(`/api/feed?url=${encodeURIComponent(url)}`);
 }
 
 export async function dismissFeedEntry(
@@ -10,14 +16,15 @@ export async function dismissFeedEntry(
   version: number,
   permanent = false,
 ): Promise<void> {
-  await apiFetch("/api/feed/dismiss", {
+  const body: FeedDismissBody = { arxiv_id: arxivId, version, permanent };
+  await libraryFetch("/api/feed/dismiss", {
     method: "POST",
-    body: JSON.stringify({ arxiv_id: arxivId, version, permanent }),
+    body: JSON.stringify(body),
   });
 }
 
 export async function listFeedRules(): Promise<FeedFilterRule[]> {
-  const res = await apiFetch<{ rules: FeedFilterRule[] }>("/api/feed/rules");
+  const res = await libraryFetch<FeedRulesResponse>("/api/feed/rules");
   return res.rules;
 }
 
@@ -26,12 +33,13 @@ export async function createFeedRule(
   keywords: string,
   action: FeedFilterRule["action"] = "DENY",
 ): Promise<void> {
-  await apiFetch("/api/feed/rules", {
+  const body: FeedRuleCreateBody = { field, keywords, action };
+  await libraryFetch("/api/feed/rules", {
     method: "POST",
-    body: JSON.stringify({ field, keywords, action }),
+    body: JSON.stringify(body),
   });
 }
 
 export async function deleteFeedRule(ruleId: number): Promise<void> {
-  await apiFetch(`/api/feed/rules/${ruleId}`, { method: "DELETE" });
+  await libraryFetch(`/api/feed/rules/${ruleId}`, { method: "DELETE" });
 }

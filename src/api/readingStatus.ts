@@ -1,4 +1,10 @@
-import { apiFetch, ApiError } from "./client.ts";
+import { ApiError } from "./client.ts";
+import { libraryFetch } from "../stores/backend.ts";
+import type {
+  ReadingStatusesResponse,
+  ReadingStatusPutBody,
+  ReadingStatusReceipt,
+} from "../types/api";
 import {
   parsePersistedReadingStatuses,
   pushLegacyStatuses,
@@ -11,10 +17,8 @@ import {
  * `crates/core/src/service/reading_list.rs` for the keying contract. */
 export const READING_STATUS_QUERY_KEY = ["reading-status"];
 
-export async function getReadingStatuses(): Promise<{
-  statuses: Record<string, ReadingStatus>;
-}> {
-  return apiFetch("/api/reading-status");
+export async function getReadingStatuses(): Promise<ReadingStatusesResponse> {
+  return libraryFetch("/api/reading-status");
 }
 
 /** `applied` is how many reading lists were written; 0 means the paper is on
@@ -22,10 +26,11 @@ export async function getReadingStatuses(): Promise<{
 export async function putReadingStatus(
   sourceId: string,
   status: ReadingStatus | "unread"
-): Promise<{ ok: boolean; applied: number }> {
-  return apiFetch(`/api/reading-status/${encodeURIComponent(sourceId)}`, {
+): Promise<ReadingStatusReceipt> {
+  const body: ReadingStatusPutBody = { status };
+  return libraryFetch(`/api/reading-status/${encodeURIComponent(sourceId)}`, {
     method: "PUT",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(body),
   });
 }
 

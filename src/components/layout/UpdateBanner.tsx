@@ -131,7 +131,7 @@ function Banner({ message, children }: { message: string; children: ReactNode })
 }
 
 /** Asked while no valid `update_check_frequency` is recorded. Resolving it
- *  clears the corner for the session, whether or not the answer was stored. */
+ *  hands the corner on, whether or not the answer was stored. */
 function OnboardingPrompt({ onResolved }: { onResolved: () => void }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -166,8 +166,8 @@ function OnboardingPrompt({ onResolved }: { onResolved: () => void }) {
       </Button>
       {failed && (
         <>
-          <span className="text-xs text-danger">Couldn't save — try again.</span>
-          {/* Clears the corner for this session without a write; re-asks next launch. */}
+          <span className="text-xs text-danger">Couldn't save. Try again.</span>
+          {/* Drops the prompt without a write; re-asks next launch. */}
           <Button variant="muted" size="sm" onClick={onResolved}>
             Later
           </Button>
@@ -238,8 +238,8 @@ export function UpdateBanner() {
           variant="primary"
           size="sm"
           onClick={() => {
-            // Settings › About owns every install path (updater plugin, pkexec
-            // dpkg/rpm, browser download); the banner just points at it.
+            // Settings › About owns every install path; the banner just
+            // points at it.
             setDismissed(true);
             navigate(`/settings#${ABOUT_GROUP_ID}`);
           }}

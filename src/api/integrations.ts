@@ -9,11 +9,8 @@ export interface MpcClientStatus {
   available: boolean;
   /** Registered command no longer exists on disk (old install); needs a reinstall. */
   stale: boolean;
-  /**
-   * The client's config file exists but couldn't be parsed as JSON, so
-   * installed/stale are unknown (reported false). Needs manual repair —
-   * distinct from "genuinely not installed".
-   */
+  /** Config file exists but isn't parseable JSON, so installed/stale are
+   *  reported false. Needs repair — not the same as "not installed". */
   config_error: boolean;
 }
 

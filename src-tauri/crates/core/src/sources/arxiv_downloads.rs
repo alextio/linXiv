@@ -1,23 +1,9 @@
 //! arxiv_downloads — stream the PDF / TeX-source tarball and extract `.tex` text.
-//! Port of `sources/arxiv_downloads.py`. Plan §5.4.
-//!
-//! Pure pieces (fixture-tested below): `default_filename`, `strip_tex_noise`,
-//! `extract_source` (gzip+tar, keep `*.tex`, comment-strip, path-guard against
-//! `../`/absolute escape), and the `/pdf/`->`/src/` source rewrite.
-//!
-//! The async fetch wrappers stream `reqwest` -> `tokio::fs` and lean on
-//! `http::arxiv_get` for pacing + the `export.arxiv.org` host rewrite + the
-//! arXiv host allowlist/redirect guard (so we never rebuild any of that here).
-//! Dest dirs are DI params — nothing reads config.
-//!
-//! Three size ceilings bound what an upstream response can cost us:
-//! `MAX_DOWNLOAD_BYTES` on the streamed body, `MAX_DECOMPRESSED_BYTES` on bytes
-//! pulled through the gzip decoder, and `MAX_TEX_BYTES` on the TeX read out of
-//! the tarball. `MAX_TEX_BYTES` and `MAX_DECOMPRESSED_BYTES` are both
-//! unit-tested; only `MAX_DOWNLOAD_BYTES` is not — `arxiv_get` rewrites the
-//! host to `export.arxiv.org` and enforces the arXiv allowlist, so a loopback
-//! wiremock cannot drive the download path without weakening that guard (the same
-//! constraint `service::files`' download tests document).
+//! Plan §5.4. Fetches lean on `http::arxiv_get` for pacing + the host guard;
+//! dest dirs are DI params. Three size ceilings bound upstream cost:
+//! `MAX_DOWNLOAD_BYTES` (streamed body), `MAX_DECOMPRESSED_BYTES` (gzip output),
+//! `MAX_TEX_BYTES` (TeX kept). Only the first is untested: the host guard
+//! keeps a loopback wiremock off the download path.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -35,23 +21,16 @@ use crate::sources::http;
 // ---------------------------------------------------------------------------
 
 /// Rewrite an arXiv `/pdf/` URL to its `/src/` (TeX tarball) sibling.
-/// Mirrors Python's `pdf_url.replace('/pdf/', '/src/')`.
 fn pdf_to_src(url: &str) -> String {
     url.replace("/pdf/", "/src/")
 }
 
-/// Map an arXiv `…/pdf/<id>v<n>` URL to the matching object on the free public
-/// GCS mirror (`gs://arxiv-dataset`, served over HTTPS without auth) so a PDF
-/// view skips arXiv's rate limit. Returns None unless the URL is an arXiv `/pdf/`
-/// link carrying an explicit version — the bucket keys objects by `<id>v<n>.pdf`
-/// with no version-less alias — so an unmappable URL is left to the arXiv host.
-///
-/// New-style `…/pdf/2204.12985v4` → `…/arxiv/arxiv/pdf/2204/2204.12985v4.pdf`.
-/// Old-style `…/pdf/hep-th/9901001v1` → `…/arxiv/hep-th/pdf/9901/9901001v1.pdf`.
+/// Map an arXiv `…/pdf/<id>v<n>` URL to its object on the free public GCS
+/// mirror (`gs://arxiv-dataset`), so a PDF view skips arXiv's rate limit.
+/// `None` unless an arXiv `/pdf/` link with a version (no version-less alias).
 pub(crate) fn gcs_pdf_url(pdf_url: &str) -> Option<String> {
     // Only an arXiv-hosted URL may be mapped onto the mirror; otherwise the proxy
-    // would fetch an attacker-chosen storage.googleapis.com object. A rejected host
-    // yields None, so the caller falls back to the host-guarded arXiv fetch.
+    // would fetch an attacker-chosen storage.googleapis.com object.
     http::assert_host_allowed(pdf_url, http::ARXIV_HOSTS).ok()?;
     let after = pdf_url.split_once("/pdf/")?.1;
     let after = after
@@ -62,15 +41,13 @@ pub(crate) fn gcs_pdf_url(pdf_url: &str) -> Option<String> {
     let (archive_path, last) = after.rsplit_once('/').unwrap_or(("", after));
     // Tolerate the canonical `.pdf` suffix on the object id.
     let last = last.strip_suffix(".pdf").unwrap_or(last);
-    // The bucket has no version-less object, so an explicit trailing v<digits> is
-    // required; without one, defer to the arXiv host.
     let vpos = last.rfind('v')?;
     let (base, vdigits) = (&last[..vpos], &last[vpos + 1..]);
     if base.is_empty() || vdigits.is_empty() || !vdigits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let (archive, yymm) = match base.split_once('.') {
-        // New-style "YYMM.NNNNN": the archive bucket is literally "arxiv".
+        // New-style "YYMM.NNNNN": the archive path is literally "arxiv".
         Some((yymm, _)) => ("arxiv", yymm),
         // Old-style "<archive>/NNNNNNN": the archive is a single path segment —
         // reject a multi-segment or `..` path so it can't escape the bucket.
@@ -91,7 +68,6 @@ pub(crate) fn gcs_pdf_url(pdf_url: &str) -> Option<String> {
 
 /// Safe default filename from a paper id or URL: take the last path segment,
 /// replace every char outside `[A-Za-z0-9_.-]` with `_`, append `.<extension>`.
-/// Mirrors `_default_filename` (`re.sub(r'[^\w.\-]', '_', tail)`).
 pub fn default_filename(id_or_url: &str, extension: &str) -> String {
     let tail = id_or_url.rsplit('/').next().unwrap_or(id_or_url);
     let safe: String = tail
@@ -108,13 +84,12 @@ pub fn default_filename(id_or_url: &str, extension: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// TeX noise stripping  (regex-free: the `regex` crate is not a dependency, and
-// its comment pattern needs a lookbehind `regex` doesn't support anyway)
+// TeX noise stripping  (regex-free: `regex` is not a dependency, and the
+// un-escaped-`%` pattern needs a lookbehind it doesn't support anyway)
 // ---------------------------------------------------------------------------
 
-/// Drop a TeX line comment: everything from the first un-escaped `%` to EOL.
-/// A `%` is a comment iff the char immediately before it is not `\` — exactly
-/// the `(?<!\\)%` rule, so `\%` (escaped percent) is preserved.
+/// Drop a TeX line comment: everything from the first un-escaped `%` to EOL;
+/// `\%` (escaped percent) is preserved.
 fn strip_line_comment(line: &str) -> &str {
     let b = line.as_bytes();
     for i in 0..b.len() {
@@ -125,9 +100,8 @@ fn strip_line_comment(line: &str) -> &str {
     line
 }
 
-/// The boilerplate commands removed wholesale (`\cmd{...}`), longest-first so
-/// `\bibliographystyle{}` is matched before the `bibliography` prefix — the
-/// same precedence as the Python alternation's leftmost rule.
+/// The boilerplate commands removed wholesale (`\cmd{...}`). The required `{`
+/// keeps `bibliography` from eating `\bibliographystyle{...}`.
 const TEX_COMMANDS: &[&str] = &[
     "bibliographystyle",
     "documentclass",
@@ -140,9 +114,8 @@ const TEX_COMMANDS: &[&str] = &[
     "ref",
 ];
 
-/// Remove `\<cmd>{<no-brace>}` for each command in `TEX_COMMANDS`.
-/// `{...}` is non-greedy to the first `}` (mirrors `\{[^}]*\}`); a `\cmd` with
-/// no following `{...}` is left untouched.
+/// Remove `\<cmd>{...}` for each command in `TEX_COMMANDS`, the `{...}` running
+/// to the first `}`. A `\cmd` not followed by `{` is left untouched.
 fn strip_commands(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -177,7 +150,7 @@ fn push_stripped_lines(out: &mut String, text: &str) {
     }
 }
 
-/// Remove TeX comments then boilerplate commands. Port of `_strip_tex_noise`.
+/// Remove TeX comments then boilerplate commands.
 pub fn strip_tex_noise(text: &str) -> String {
     let mut no_comments = String::with_capacity(text.len());
     push_stripped_lines(&mut no_comments, text);
@@ -188,8 +161,8 @@ pub fn strip_tex_noise(text: &str) -> String {
 // TeX source extraction
 // ---------------------------------------------------------------------------
 
-/// PATH-GUARD: reject any tar member that is absolute or contains a `..`
-/// component, so extraction can never reference a path outside the archive.
+/// PATH-GUARD: skip a tar member whose path is absolute or holds a `..`
+/// component. Nothing is written to disk; the guard is defence in depth.
 fn member_is_safe(name: &str) -> bool {
     let p = Path::new(name);
     !p.is_absolute()
@@ -197,24 +170,18 @@ fn member_is_safe(name: &str) -> bool {
         && !p.components().any(|c| matches!(c, Component::ParentDir))
 }
 
-/// Ceiling on `.tex` bytes retained for the FTS index, read out of one tarball
-/// through a shrinking allowance rather than trusting the archive's own sizes.
-/// Bytes from skipped (non-`.tex` or unsafe) members are bounded separately by
-/// `MAX_DECOMPRESSED_BYTES` on the shared reader.
+/// Ceiling on `.tex` bytes kept for the FTS index — a shrinking allowance
+/// counted on bytes actually read, never the archive's own sizes.
 const MAX_TEX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Ceiling on bytes pulled through the gzip decoder for the whole tarball,
-/// including bytes from members skipped before reaching `MAX_TEX_BYTES`.
+/// including non-`.tex` members the tar walk inflates to seek past.
 const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Extract TeX source from a `.tar.gz` at `tarpath`, returning concatenated,
-/// noise-stripped plain text. `.tex` members only, root files before nested
-/// (stable sort by `/` depth), unsafe paths skipped. Any tar/io error -> `""`.
-/// Every safe `.tex` member is read in full (bounded only by the archive-level
-/// `MAX_DECOMPRESSED_BYTES` cap) before the root-first sort runs; `MAX_TEX_BYTES`
-/// is then applied to the sorted list.
-/// Port of `extract_source` (we read members straight from the stream rather
-/// than extracting to a temp dir — the path-guard makes a temp dir unneeded).
+/// Extract TeX source from a `.tar.gz`: `.tex` members only, root files before
+/// nested (stable sort by `/` depth), unsafe paths skipped; noise-stripped
+/// concat. Any tar/io error -> `""`. Kept members are read whole (bounded
+/// by `MAX_DECOMPRESSED_BYTES`) before the sort; `MAX_TEX_BYTES` caps output.
 pub fn extract_source(tarpath: &Path) -> String {
     extract_source_inner(tarpath).unwrap_or_default()
 }
@@ -261,10 +228,9 @@ fn extract_capped(tarpath: &Path, max_decompressed: u64, max_tex: u64) -> Result
     }
     tex.sort_by_key(|(name, _)| name.matches('/').count()); // stable: root first
 
-    // Comment-strip each member straight into one pre-sized buffer (with the
-    // "\n\n" join separators inline) instead of materializing per-member owned
-    // strings, the joined text, and the comment-stripped rejoin — this path can
-    // run to MAX_TEX_BYTES, so each avoided copy is up to 16 MiB.
+    // Comment-strip each member straight into one pre-sized buffer, separators
+    // inline, instead of per-member strings + a joined copy + a stripped rejoin:
+    // this path runs to MAX_TEX_BYTES, so each copy avoided is up to 16 MiB.
     let total: u64 = tex.iter().map(|(_, b)| b.len() as u64).sum();
     let mut clean = String::with_capacity(total.min(max_tex) as usize + 2 * tex.len());
     let mut remaining = max_tex;
@@ -285,18 +251,16 @@ fn extract_capped(tarpath: &Path, max_decompressed: u64, max_tex: u64) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// PDF / source download  (async, streamed; integration-tested via http later)
+// PDF / source download  (async, streamed)
 // ---------------------------------------------------------------------------
 
-/// Ceiling on a streamed download. The body is written as it arrives, so without
-/// a running total a hostile or merely enormous response would fill the disk;
-/// `Content-Length` is not trusted for this, only bytes actually written.
-/// Matches `sources::download::MAX_PDF_BYTES` (200 MiB, the Python spec's cap).
+/// Ceiling on a streamed download, counted on bytes actually written (never
+/// trusting `Content-Length`) so a hostile response can't fill the disk.
+/// Matches `sources::download::MAX_PDF_BYTES` (200 MiB).
 const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Stream `arxiv_get(url)` to `dest_dir/<filename>` atomically (tmp -> rename),
-/// refusing a body that grows past `max_bytes`. The partial file is best-effort
-/// removed on failure (a failed cleanup delete is logged, not fatal).
+/// refusing a body past `max_bytes`; the partial file is best-effort removed.
 async fn stream_to(
     url: &str,
     dest_dir: &Path,
@@ -380,19 +344,14 @@ pub async fn download_source(pdf_url: &str, dest_dir: &Path, data_dir: &Path) ->
 }
 
 /// Fetch a paper's arXiv TeX source and return the extracted, noise-stripped
-/// text — the write half of full-text search, which until now had no caller.
-/// The tarball lands in a temp dir that is dropped (and deleted) before the text
-/// is returned.
-///
-/// An empty string means the tarball held no usable `.tex` (arXiv serves PDF-only
-/// submissions from the same `/src/` path); callers treat that as "no full text
-/// available", not as an error.
+/// text; the tarball lives in a temp dir deleted before return. An empty string
+/// means no usable `.tex` (a PDF-only submission): no full text, not an error.
 pub async fn fetch_source_text(pdf_url: &str, data_dir: &Path) -> Result<String> {
     let scratch = tempfile::tempdir()
         .map_err(|e| CoreError::Internal(format!("create temp dir for TeX source: {e}")))?;
     let tarball = download_source(pdf_url, scratch.path(), data_dir).await?;
-    // Gunzip + tar walk is CPU-bound and can run to MAX_TEX_BYTES, so keep it off
-    // the async worker. `scratch` is moved in and dropped here, deleting the tarball.
+    // Gunzip + tar walk is CPU-bound and can inflate to MAX_DECOMPRESSED_BYTES,
+    // so keep it off the async worker; `scratch` is moved in and drops here.
     tokio::task::spawn_blocking(move || {
         let text = extract_source(&tarball);
         drop(scratch);
@@ -403,17 +362,16 @@ pub async fn fetch_source_text(pdf_url: &str, data_dir: &Path) -> Result<String>
 }
 
 // ---------------------------------------------------------------------------
-// PDF housekeeping  (sync FS; ports cleanup_pdfs / saved_pdfs_size)
+// PDF housekeeping  (sync FS)
 // ---------------------------------------------------------------------------
 
-/// Absolute path without requiring the file to exist (Python's `os.path.abspath`).
+/// Absolute path without requiring the file to exist.
 fn abs(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Delete every `*.pdf` in `dir` whose absolute path is not in `keep`.
-/// A file that can't be removed (locked by a viewer) is skipped, not fatal.
-/// Returns the paths deleted. Port of `cleanup_pdfs`.
+/// Delete each `*.pdf` (any case) in `dir` whose absolute path is not in
+/// `keep`; one locked by a viewer is skipped. Returns the paths deleted.
 pub fn cleanup_pdfs(dir: &Path, keep: &HashSet<PathBuf>) -> Result<Vec<PathBuf>> {
     let keep_abs: HashSet<PathBuf> = keep.iter().map(|p| abs(p)).collect();
     let mut deleted = Vec::new();
@@ -436,7 +394,7 @@ pub fn cleanup_pdfs(dir: &Path, keep: &HashSet<PathBuf>) -> Result<Vec<PathBuf>>
     Ok(deleted)
 }
 
-/// Total byte size of the existing files among `paths`. Port of `saved_pdfs_size`.
+/// Total byte size of the existing files among `paths`.
 pub fn saved_pdfs_size(paths: &HashSet<PathBuf>) -> u64 {
     paths
         .iter()
@@ -447,7 +405,7 @@ pub fn saved_pdfs_size(paths: &HashSet<PathBuf>) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — pure parsers against synthetic tar fixtures (no network).
+// Tests — parsers + FS helpers on synthetic fixtures (no network).
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -522,7 +480,7 @@ mod tests {
             gcs_pdf_url("https://arxiv.org/pdf/2204.12985v4.pdf").as_deref(),
             Some("https://storage.googleapis.com/arxiv-dataset/arxiv/arxiv/pdf/2204/2204.12985v4.pdf")
         );
-        // No explicit version -> unmappable -> caller falls back to the arXiv host.
+        // No explicit version -> unmappable -> the caller uses the arXiv host.
         assert_eq!(gcs_pdf_url("http://arxiv.org/pdf/2204.12985"), None);
         // Non-arXiv host must NOT be mapped onto the mirror (SSRF host guard).
         assert_eq!(gcs_pdf_url("https://evil.com/pdf/9901001v1"), None);
@@ -640,9 +598,7 @@ mod tests {
         assert_eq!(extract_source(&p), "");
     }
 
-    // The two ceilings are exercised through `extract_capped` at kilobyte scale.
-    // Driving them through the real 16 MiB / 256 MiB constants would allocate a
-    // 257 MiB String per run for the same assertions.
+    // Both ceilings are exercised through `extract_capped` at kilobyte scale.
 
     #[test]
     fn extract_stops_at_the_tex_byte_cap() {

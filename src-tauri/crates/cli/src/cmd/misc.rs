@@ -1,5 +1,4 @@
 //! Group `misc` — the flat top-level commands `stats`, `categories`, `settings`.
-//! cmd_stats / cmd_categories / cmd_settings_* in `linxiv_cli.py`.
 
 use std::path::PathBuf;
 
@@ -24,19 +23,18 @@ pub enum SettingsCmd {
     },
 }
 
-// cmd_stats — `service::stats` owns the envelope (ADR-0011: gained `recent_papers`).
+// `service::stats` owns the envelope (includes `recent_papers`).
 pub async fn stats(ctx: &mut Ctx) -> anyhow::Result<()> {
     output(&linxiv_core::service::stats::stats(&ctx.conn)?);
     Ok(())
 }
 
-// cmd_categories
 pub async fn categories(ctx: &mut Ctx) -> anyhow::Result<()> {
     output(&svc_paper::get_categories(&ctx.conn)?);
     Ok(())
 }
 
-// cmd_settings_get / cmd_settings_update (JSON-parse the value, else keep it as a string).
+// Set JSON-parses the value, else keeps it as a string.
 pub async fn settings(cmd: SettingsCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
     match cmd {
         SettingsCmd::Get => output(&ctx.settings.all()),

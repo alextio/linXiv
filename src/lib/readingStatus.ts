@@ -1,7 +1,6 @@
 // Reading-list model: a reading list IS a project carrying the reserved
-// READING_LIST_TAG (the single source of truth on both sides — the backend's
-// is_reading_list_project derives from the same tag). Per-paper read state
-// lives in the backend PAPER_TO_READING table, reached via api/readingStatus.
+// READING_LIST_TAG — the backend's is_reading_list_project reads that same tag.
+// Per-paper read state lives in PAPER_TO_READING, via api/readingStatus.
 
 export const READING_LIST_TAG = "reading-list";
 
@@ -44,10 +43,9 @@ export function parsePersistedReadingStatuses(
   return out;
 }
 
-/** Push legacy entries to the backend via `put` (which swallows skippable
- * failures itself, e.g. a paper that no longer exists). Resolves true when
- * every entry went through, false when any push threw — the caller keeps the
- * blob so an idempotent retry can finish the job later. */
+/** Push legacy entries via `put` (which swallows skippable failures itself,
+ * e.g. a paper that no longer exists). True only if every entry went through;
+ * false leaves the caller's blob in place for an idempotent retry. */
 export async function pushLegacyStatuses(
   entries: Record<string, ReadingStatus>,
   put: (sourceId: string, status: ReadingStatus) => Promise<unknown>

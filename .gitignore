@@ -28,8 +28,8 @@ _package_docs/
 .DS_Store
 Thumbs.db
 pyrightconfig.json
-# docs: ignore everything except architecture decision records
-# (see gitignore(5): re-include a subtree by un-ignoring the dir, then ignoring its contents, then un-ignoring paths)
+# docs: ignore all but the re-included paths below
+# (see gitignore(5): un-ignore the dir, ignore its contents, then un-ignore paths)
 docs/*
 !docs/adr/
 docs/adr/*
@@ -39,6 +39,9 @@ docs/cli_ref/*
 !docs/cli_ref/**
 !docs/architecture.md
 !docs/build.md
+!docs/headless/
+docs/headless/*
+!docs/headless/**
 !docs/requirements.md
 # Node / Frontend
 node_modules/

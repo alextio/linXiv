@@ -56,8 +56,8 @@ test("a paper with no category, tags or abstract shows just the head line", () =
   assert.equal(t.summary, undefined);
 });
 
-// The degree is a fact about the library — the Authors page reports the same
-// number — so filtering the canvas must not silently rewrite it.
+// The degree comes from the payload (papers on THIS canvas), so filtering
+// here must not silently rewrite it.
 test("an author reports its degree, unqualified when it is all drawn", () => {
   assert.deepEqual(tooltipFor("author::7", "author", index, allPapers).meta, [
     "Author · 2 papers",

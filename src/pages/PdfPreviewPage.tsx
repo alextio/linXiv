@@ -4,24 +4,33 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Document, Page, pdfjs } from "react-pdf";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { fetchArxiv } from "../api/search";
-import { appendSavedId } from "../api/searchState";
-import { apiFetch, bytesToBase64, isTauri } from "../api/client";
+import { bytesToBase64, isTauri } from "../api/client";
+import { libraryFetch } from "../stores/backend";
 import { getPdfProxyUrl } from "../api/papers";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
-import type { SearchResult } from "../types/api";
+import type { SearchResult, UploadPdfBody } from "../types/api";
 import { isArxivId } from "../lib/papers";
 import { MathText } from "../lib/tex";
 import { invalidatePaperMutationQueries } from "../lib/paperMutations";
 import { errText } from "../lib/errText";
+import { pdfCanvasDpr } from "../lib/zoom";
+import { useUiStore } from "../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url,
 ).toString();
 
+/** The subset of a search result this page actually consumes. Search/Home pass
+ * a full SearchResult; StorageSection's saved-PDF rows only have these fields. */
+export type PdfPreviewResult = Pick<
+  SearchResult,
+  "source_id" | "title" | "version" | "paper_url"
+>;
+
 interface PdfPreviewState {
-  result: SearchResult;
+  result: PdfPreviewResult;
   isSaved: boolean;
 }
 
@@ -39,6 +48,7 @@ function isValidPdfPreviewState(state: unknown): state is PdfPreviewState {
 }
 
 export default function PdfPreviewPage() {
+  const zoom = useUiStore((s) => s.zoom);
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -69,11 +79,11 @@ export default function PdfPreviewPage() {
           const bytes = await pdfDocRef.current.getData();
           const path = `/api/papers/${encodeURIComponent(sourceId)}/pdf`;
           if (isTauri) {
-            await apiFetch(path, { method: "PUT", body: JSON.stringify({ file_b64: bytesToBase64(bytes) }) });
+            await libraryFetch(path, { method: "PUT", body: JSON.stringify({ file_b64: bytesToBase64(bytes) } satisfies UploadPdfBody) });
           } else {
             const form = new FormData();
             form.append("file", new Blob([bytes.slice()], { type: "application/pdf" }), `${sourceId}.pdf`);
-            await apiFetch(path, { method: "PUT", body: form });
+            await libraryFetch(path, { method: "PUT", body: form });
           }
         } catch (e) {
           console.error("PDF attach failed (non-fatal):", e);
@@ -84,9 +94,8 @@ export default function PdfPreviewPage() {
     onSuccess: (data) => {
       if (data.saved) {
         setSaved(true);
-        appendSavedId(data.source_id).catch((e) =>
-          console.error("appendSavedId failed:", e)
-        );
+        // The search page's saved indicator is a ["papers",...] query, so this
+        // invalidation is all it needs to pick the save up.
         invalidatePaperMutationQueries(queryClient);
       }
     },
@@ -209,6 +218,7 @@ export default function PdfPreviewPage() {
                 key={i + 1}
                 pageNumber={i + 1}
                 width={containerWidth ? containerWidth - 32 : undefined}
+                devicePixelRatio={pdfCanvasDpr(zoom)}
                 className="mx-auto my-2 shadow-md"
                 renderTextLayer
                 renderAnnotationLayer

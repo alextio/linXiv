@@ -1,11 +1,10 @@
-// ApiFsResponder — the real FsResponder backing the embedded editor's filesystem.
+// ApiFsResponder — the FsResponder backing the embedded editor's on-disk vault.
 //
-// It replaces NoopFsResponder (src/lib/editorBridge.ts): every FsOp the guest issues
-// over the postMessage bridge is forwarded to the host's /api/editor/vault/<noteId>/fs
-// endpoint, which performs it against the on-disk vault and returns the matching
-// FsResult. The active project's note id is read lazily via a getter so the host can
-// switch projects (re-`sendDocOpen`) without rebuilding the bridge — each op always
-// targets whatever project is currently open.
+// Each FsOp HostFsRouter routes here (i.e. whenever no host-picked disk folder is
+// mounted) is forwarded to /api/editor/vault/<noteId>/fs, which performs it against
+// the vault and returns the matching FsResult. The open project's note id is read
+// lazily via a getter, so switching projects (re-`sendDocOpen`) needn't rebuild
+// the bridge.
 //
 // Errors: vaultFsOp throws ApiError on a non-2xx response; the bridge's handleFs
 // catches it and replies texbrain:fs:result { ok:false, error }, which the guest's

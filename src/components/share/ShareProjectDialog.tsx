@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createShareTicket, publishSecure, shareErrText } from "../../api/share";
-import { listProjects } from "../../api/projects";
+import { createProjectLocal, listProjectsLocal } from "../../api/projects";
 import { Button } from "../ui/button";
 import { Dialog } from "../ui/dialog";
-import { Textarea } from "../ui/input";
+import { Input, Textarea } from "../ui/input";
 import { OptionSelect } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 
@@ -13,9 +13,13 @@ const SHARE_MODE_OPTIONS: { value: "plain" | "e2ee"; label: string }[] = [
   { value: "e2ee", label: "End-to-end encrypted" },
 ];
 
+/** Sentinel value in the project select for "create a new project first". */
+const NEW_PROJECT = "new";
+
 export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState("");
+  const [newName, setNewName] = useState("");
   const [mode, setMode] = useState<"plain" | "e2ee">("plain");
   const [ticket, setTicket] = useState("");
   const [secured, setSecured] = useState(false);
@@ -23,6 +27,15 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const genTokenRef = useRef(0);
+  // Last inline-created project, so a re-click after a mid-flight reset (or a
+  // share failure) reuses it instead of minting a duplicate. createReqRef
+  // covers the in-flight window before the create resolves: a re-click then
+  // awaits the same request instead of firing a second one.
+  const createdRef = useRef<{ name: string; id: number } | null>(null);
+  const createReqRef = useRef<{ name: string; promise: Promise<number> } | null>(null);
+  // Bumped on close so a create resolving after the dialog session ended
+  // can't repopulate createdRef past handleClose's reset.
+  const dialogSessionRef = useRef(0);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -32,8 +45,10 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
   }, []);
 
   const { data } = useQuery({
-    queryKey: ["projects", "active"],
-    queryFn: () => listProjects("active"),
+    // Local-only: sharing publishes from the local library, so the picker
+    // must not follow the default-backend routing (distinct query key).
+    queryKey: ["projects", "active", "local"],
+    queryFn: () => listProjectsLocal("active"),
     enabled: open,
   });
   const projects = data?.projects ?? [];
@@ -48,8 +63,9 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
   }
 
   async function handleGenerate() {
-    const id = Number(selected);
-    if (!id || generating) return;
+    const creating = selected === NEW_PROJECT;
+    let id = Number(selected);
+    if (generating || (creating ? !newName.trim() : !id)) return;
     const token = ++genTokenRef.current;
     setGenerating(true);
     setError("");
@@ -57,6 +73,35 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
     setSecured(false);
     setCopied(false);
     try {
+      if (creating) {
+        const nm = newName.trim();
+        let created = createdRef.current?.name === nm ? createdRef.current.id : null;
+        if (created == null) {
+          let req =
+            createReqRef.current?.name === nm ? createReqRef.current.promise : null;
+          if (req == null) {
+            const session = dialogSessionRef.current;
+            req = createProjectLocal({ name: nm }).then((res) => {
+              if (dialogSessionRef.current === session) {
+                createdRef.current = { name: nm, id: res.project.id };
+              }
+              queryClient.invalidateQueries({ queryKey: ["projects"] });
+              return res.project.id;
+            });
+            createReqRef.current = { name: nm, promise: req };
+            req.finally(() => {
+              if (createReqRef.current?.promise === req) createReqRef.current = null;
+            });
+          }
+          created = await req;
+        }
+        if (genTokenRef.current !== token || !alive.current) return;
+        id = created;
+        // Point the select at the created project so a retry after a share
+        // failure doesn't create a duplicate.
+        setSelected(String(id));
+        setNewName("");
+      }
       if (mode === "e2ee") {
         await publishSecure(id);
         if (genTokenRef.current !== token || !alive.current) return;
@@ -66,7 +111,10 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
         if (genTokenRef.current !== token || !alive.current) return;
         setTicket(t);
       }
-      // Publishing (either mode) grows the Hoster grid.
+      // Publishing (either mode) grows the Hoster grid. The share succeeded,
+      // so the create-dedupe is spent: a future same-named "New project" is a
+      // genuinely new project, not a reuse.
+      createdRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["share", "published"] });
     } catch (e) {
       if (genTokenRef.current !== token || !alive.current) return;
@@ -92,6 +140,11 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
   function handleClose() {
     resetTicketState();
     setSelected("");
+    setNewName("");
+    // The dedupe only guards retries within one dialog session; a project
+    // created earlier could be deleted while the dialog is closed.
+    createdRef.current = null;
+    dialogSessionRef.current++;
     onClose();
   }
 
@@ -113,8 +166,21 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
               setSelected(v);
               resetTicketState();
             }}
-            options={projects.map((p) => ({ value: String(p.id), label: p.name }))}
+            options={[
+              { value: NEW_PROJECT, label: "＋ New project…" },
+              ...projects.map((p) => ({ value: String(p.id), label: p.name })),
+            ]}
           />
+          {selected === NEW_PROJECT && (
+            <Input
+              aria-label="New project name"
+              className="flex-1 min-w-[140px]"
+              placeholder="New project name…"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
+            />
+          )}
           <OptionSelect
             aria-label="Share mode"
             size="sm"
@@ -129,7 +195,11 @@ export function ShareProjectDialog({ open, onClose }: { open: boolean; onClose: 
             variant="primary"
             size="sm"
             onClick={handleGenerate}
-            disabled={generating || !selected}
+            disabled={
+              generating ||
+              !selected ||
+              (selected === NEW_PROJECT && !newName.trim())
+            }
           >
             {generating ? (
               <Spinner size={14} />

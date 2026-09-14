@@ -5,7 +5,7 @@
 #
 # PINNED to a specific release so the pdfium C ABI matches pdfium-render 0.8.x —
 # "latest" can drift ahead of the bindings and segfault at runtime (uncatchable).
-# The asset is sha256-verified before it is unpacked + dlopen'd in-process.
+# Assets with a pinned sha256 below are verified before unpacking.
 set -euo pipefail
 
 PIN="chromium/7906"   # bblanchon release tag (libpdfium build 7906)

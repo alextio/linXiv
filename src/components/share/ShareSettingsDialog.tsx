@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Lock } from "lucide-react";
 import {
   getShareSettings,
-  importReceived,
   leaveShare,
+  unlinkShare,
   unpublishShare,
   updateShareSettings,
   type ShareDirection,
@@ -12,13 +12,13 @@ import {
   type ShareSettings,
   shareErrText,
 } from "../../api/share";
-import { listProjects } from "../../api/projects";
+import { listProjectsLocal } from "../../api/projects";
 import { invalidateProjectMutationQueries } from "../../lib/paperMutations";
 import { Button } from "../ui/button";
 import { Dialog } from "../ui/dialog";
 import { OptionSelect } from "../ui/select";
 import { Spinner } from "../ui/spinner";
-import { type ShareRole } from "./ShareCard";
+import { useImportReceived, type ShareRoleLabel } from "./ShareCard";
 import { MembersSection } from "./MembersSection";
 
 const DIRECTION_OPTIONS: { value: ShareDirection; label: string }[] = [
@@ -42,7 +42,7 @@ export function ShareSettingsDialog({
   onClose,
 }: {
   share: SharedSummary;
-  role: ShareRole;
+  role: ShareRoleLabel;
   onClose: () => void;
 }) {
   const hosted = role === "Hoster";
@@ -54,14 +54,16 @@ export function ShareSettingsDialog({
     queryFn: () => getShareSettings(share.share_id),
   });
   // Resolves the hoster's project and the reader's linked-project name
-  // by matching against both active and archived projects.
+  // by matching against both active and archived projects. Local-only:
+  // shares live in the local library, so a remote default backend's
+  // project rows would never match (distinct query keys).
   const projectsActiveQ = useQuery({
-    queryKey: ["projects", "active"],
-    queryFn: () => listProjects("active"),
+    queryKey: ["projects", "active", "local"],
+    queryFn: () => listProjectsLocal("active"),
   });
   const projectsArchivedQ = useQuery({
-    queryKey: ["projects", "archived"],
-    queryFn: () => listProjects("archived"),
+    queryKey: ["projects", "archived", "local"],
+    queryFn: () => listProjectsLocal("archived"),
   });
   const projects = [
     ...(projectsActiveQ.data?.projects ?? []),
@@ -88,8 +90,9 @@ export function ShareSettingsDialog({
       invalidateShares();
     },
   });
-  const importM = useMutation({
-    mutationFn: () => importReceived(share.share_id),
+  const importM = useImportReceived(share.share_id);
+  const unlinkM = useMutation({
+    mutationFn: () => unlinkShare(share.share_id),
     onSuccess: () => {
       invalidateShares();
       invalidateProjectMutationQueries(queryClient);
@@ -114,7 +117,12 @@ export function ShareSettingsDialog({
   });
 
   const err =
-    update.error ?? importM.error ?? leaveM.error ?? unpublishM.error ?? settings.error;
+    update.error ??
+    importM.error ??
+    unlinkM.error ??
+    leaveM.error ??
+    unpublishM.error ??
+    settings.error;
   const settingsUnusable = settings.isLoading || settings.isError;
   const paused = settings.data?.paused ?? share.paused;
   const dangerLabel = hosted ? "Unpublish" : "Leave share";
@@ -124,7 +132,7 @@ export function ShareSettingsDialog({
     <Dialog
       open
       onClose={onClose}
-      title={`Settings — ${share.name || "pending share"}`}
+      title={`Settings: ${share.name || "pending share"}`}
     >
       <div className="flex flex-col gap-4">
         {share.e2ee && (
@@ -159,7 +167,7 @@ export function ShareSettingsDialog({
         <SettingsRow label="Local project">
           {hosted ? (
             <span className="truncate text-[13px]" style={{ color: "var(--color-muted)" }}>
-              {hosterProject?.name ?? "—"}
+              {hosterProject?.name ?? "-"}
             </span>
           ) : share.pending ? (
             // Nothing has arrived to import yet; "Sync now" on the card is the
@@ -177,9 +185,25 @@ export function ShareSettingsDialog({
               {importM.isPending ? <Spinner size={14} /> : "Import to library"}
             </Button>
           ) : (
-            <span className="truncate text-[13px]" style={{ color: "var(--color-muted)" }}>
-              {linkedProject?.name ?? `Project #${share.project_fk}`}
-            </span>
+            <div className="flex min-w-0 items-center gap-2">
+              <span
+                className="truncate text-[13px]"
+                style={{ color: "var(--color-muted)" }}
+              >
+                {linkedProject?.name ?? `Project #${share.project_fk}`}
+              </span>
+              {/* Detaches the link only — membership, mirror, and the local
+                  project all stay; the row flips back to "Import to library". */}
+              <Button
+                variant="muted"
+                size="sm"
+                title="Unlink local project"
+                onClick={() => unlinkM.mutate()}
+                disabled={unlinkM.isPending}
+              >
+                {unlinkM.isPending ? <Spinner size={14} /> : "Unlink"}
+              </Button>
+            </div>
           )}
         </SettingsRow>
         {err != null && (
@@ -194,7 +218,10 @@ export function ShareSettingsDialog({
             Start the app with networking available and leave again.
           </p>
         )}
-        {hosted && share.e2ee && <MembersSection shareId={share.share_id} />}
+        {share.e2ee &&
+          (hosted || share.role === "admin" || share.role === "co-admin") && (
+            <MembersSection shareId={share.share_id} hosted={hosted} />
+          )}
         <div className="flex items-center justify-between border-t border-[var(--color-border)] pt-4">
           <span className="text-xs" style={{ color: "var(--color-muted)" }}>
             {hosted

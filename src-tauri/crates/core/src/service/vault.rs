@@ -1,22 +1,19 @@
 //! On-disk LaTeX vault backing the embedded TeXbrain editor's filesystem.
-//! Rust port of `service/vault.py`.
 //!
 //! Each embedded-editor project owns one directory tree (its `vault_root`, keyed
 //! by note id under `vault_dir()/note_<NOTE_SK>/`). The TeXbrain editor, in an
 //! iframe, drives its FileSystemDirectoryHandle over a postMessage RPC; the host
 //! forwards each [`FsOp`] to [`run_fs_op`] here, which returns the matching
-//! [`FsResult`]. The wire shapes mirror src/lib/editorBridgeTypes.ts.
+//! [`FsResult`]. The wire shapes generate src/types/generated.ts.
 //!
-//! DI: `vault_root` is a PARAMETER, not read from config — the binary layer maps
-//! `note_id` -> `vault_dir()/note_<id>` and passes the resolved path in (the
-//! tests use a tempdir, never config). No DB here; this module is pure FS.
+//! DI: `vault_root` is a PARAMETER, not read from config. No DB here; pure FS.
 //!
-//! Security (trust boundary — ported exactly, do not simplify): every op resolves
+//! Security (trust boundary — do not simplify): every op resolves
 //! its path through [`safe_path`], which rejects absolute paths and any `..`
 //! traversal BEFORE the join, then asserts the result stays under `vault_root`.
-//! text-vs-binary is classified by EXTENSION (matching the TeXbrain guest's
-//! readDirRecursive), NOT by utf-8 decodability — otherwise a latin-1 `.tex`
-//! would ship as base64 and the guest's `.text()` would mojibake it.
+//! text-vs-binary is classified by EXTENSION, with utf-8 decodability deciding
+//! only unknown ones — otherwise a latin-1 `.tex` would ship as base64 and the
+//! guest's `.text()` would mojibake it.
 
 use std::path::{Path, PathBuf};
 
@@ -24,19 +21,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 
-/// Map a filesystem error to `Internal` (HTTP 500) — Python lets `OSError`
-/// bubble to the FastAPI 500 handler. (core's `CoreError` has no blanket
-/// `From<io::Error>`, so each FS call routes through this.)
+/// Map a filesystem error to `Internal` — same as core's `From<io::Error>`.
 fn io(e: std::io::Error) -> CoreError {
     CoreError::Internal(e.to_string())
 }
 
-// ── wire types (vendored from editorBridgeTypes.ts FsOp/FsResult) ───────────────
+// ── wire types (canonical for editorBridgeTypes.ts FsOp/FsResult) ───────────────
 // Tagged by `kind`; camelCase matches the wire ("readFile"/"writeFile"/"mkdir").
-// An unknown kind fails at deserialize time (-> the binary layer maps the serde
-// error to BadRequest), which is why `run_fs_op` needs no unknown-kind arm.
+// An unknown kind fails at deserialize time (the route's `parse_body` answers
+// 422), which is why `run_fs_op` needs no unknown-kind arm.
+// `path`/`data` carry serde(default) as server-side leniency only; the client
+// contract keeps them required, so they are NOT ts(optional).
 
-#[derive(Debug, Clone, Deserialize)]
+/// One vault FS RPC op — the request body of `POST /api/editor/vault/{note_id}/fs`.
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FsOp {
     List {
@@ -53,6 +51,7 @@ pub enum FsOp {
         #[serde(default)]
         data: String,
         #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
         binary: bool,
     },
     Mkdir {
@@ -63,18 +62,21 @@ pub enum FsOp {
         #[serde(default)]
         path: String,
         #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
         recursive: bool,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 pub struct DirEntry {
     pub name: String,
-    /// "directory" | "file" (the guest re-joins each basename to the parent).
+    /// The guest re-joins each basename to the parent.
+    #[ts(type = "\"file\" | \"directory\"")]
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `POST /api/editor/vault/{note_id}/fs` response; the write ops all answer `ok`.
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FsResult {
     List { entries: Vec<DirEntry> },
@@ -88,7 +90,7 @@ pub enum FsResult {
 ///
 /// Rejects absolute paths and any `..` traversal, then asserts the resolved path
 /// stays within `vault_root`. `relpath == ""` resolves to the vault root itself.
-/// Python's `ValueError` maps to [`CoreError::BadRequest`] (HTTP 400).
+/// Violations are [`CoreError::BadRequest`] (HTTP 400).
 pub fn safe_path(vault_root: &Path, relpath: &str) -> Result<PathBuf> {
     let raw = relpath.replace('\\', "/");
     if raw.starts_with('/') {
@@ -106,16 +108,15 @@ pub fn safe_path(vault_root: &Path, relpath: &str) -> Result<PathBuf> {
         ));
     }
     let target = vault_root.join(parts.join("/"));
-    // Containment belt: parts are already `..`/absolute-free, so the lexical
-    // prefix check always holds — but it stays as the explicit trust-boundary
-    // assert (Python's is_relative_to).
+    // Containment belt: redundant on posix, where parts are already
+    // `..`/absolute-free — kept as the explicit trust-boundary assert.
     if !parts.is_empty() && !target.starts_with(vault_root) {
         return Err(CoreError::BadRequest("path escapes the vault root".into()));
     }
     Ok(target)
 }
 
-// ── extension-based text/binary classifier (matches the TeXbrain guest) ─────────
+// ── extension-based text/binary classifier ──────────────────────────────────────
 
 const TEXT_EXTS: &[&str] = &[
     "tex", "sty", "cls", "bib", "bst", "def", "cfg", "fd", "dtx", "ins", "ltx", "txt", "bbx",
@@ -129,9 +130,8 @@ const BINARY_EXTS: &[&str] = &[
 /// `Some(true)`/`Some(false)` per the editor's extension sets; `None` for an
 /// unknown extension (the caller then falls back to utf-8 decodability).
 fn ext_is_text(relpath: &str) -> Option<bool> {
-    // Mirror Python's `Path(relpath).suffix.lower().lstrip(".")`: the substring
-    // after the last '.' in the basename (Path::extension drops a leading-dot
-    // "dotfile" the same way `.suffix` returns "" for it).
+    // The substring after the last '.' in the basename; Path::extension
+    // treats a leading-dot "dotfile" as extensionless.
     let ext = Path::new(relpath)
         .extension()
         .and_then(|e| e.to_str())
@@ -148,8 +148,7 @@ fn ext_is_text(relpath: &str) -> Option<bool> {
 
 // ── individual ops (error on failure; the route maps to HTTP status) ────────────
 
-/// List immediate children (BASENAMES only). A missing dir lists as empty rather
-/// than erroring, so a freshly-mounted vault doesn't break the editor's scan.
+/// List immediate children (BASENAMES only). A missing dir lists as empty.
 pub fn list_dir(vault_root: &Path, relpath: &str) -> Result<FsResult> {
     let target = safe_path(vault_root, relpath)?;
     let mut entries: Vec<DirEntry> = Vec::new();
@@ -209,7 +208,7 @@ pub fn read_file(vault_root: &Path, relpath: &str) -> Result<FsResult> {
 }
 
 /// Write a file, creating parent dirs. `data` is base64 when `binary`, else raw
-/// text. An empty string materializes a zero-length file (the create-empty path).
+/// text. An empty string materializes a zero-length file.
 pub fn write_file(vault_root: &Path, relpath: &str, data: &str, binary: bool) -> Result<FsResult> {
     let target = safe_path(vault_root, relpath)?;
     if target == *vault_root {
@@ -268,8 +267,8 @@ pub fn run_fs_op(vault_root: &Path, op: &FsOp) -> Result<FsResult> {
     }
 }
 
-/// Every file in the vault as root-relative posix paths (no content read). Used
-/// to resolve/repair the project's main file. A missing root lists as empty.
+/// Every file in the vault as root-relative posix paths (no content read).
+/// `get_doc` resolves the project's main file with it. A missing root is empty.
 pub fn list_files(vault_root: &Path) -> Result<Vec<String>> {
     if !vault_root.is_dir() {
         return Ok(Vec::new());
@@ -298,8 +297,7 @@ fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Remove an editor project's entire vault tree (best-effort, like Python's
-/// `shutil.rmtree(..., ignore_errors=True)`).
+/// Remove an editor project's entire vault tree (best-effort, errors ignored).
 pub fn delete_vault(vault_root: &Path) {
     if vault_root.is_dir() {
         let _ = std::fs::remove_dir_all(vault_root);
@@ -336,7 +334,7 @@ mod tests {
             safe_path(root, "a/b.tex").unwrap(),
             root.join("a").join("b.tex")
         );
-        // "." and "" components are dropped, like Python.
+        // "." and "" components are dropped.
         assert_eq!(
             safe_path(root, "./a//b.tex").unwrap(),
             root.join("a").join("b.tex")
@@ -589,7 +587,7 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
-        // unknown kind -> serde error (the seam maps it to BadRequest).
+        // unknown kind -> serde error (the route answers 422).
         assert!(serde_json::from_str::<FsOp>(r#"{"kind":"chmod","path":"a"}"#).is_err());
     }
 

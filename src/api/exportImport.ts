@@ -1,9 +1,21 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { join as pathJoin } from "@tauri-apps/api/path";
-import { apiFetch, BASE_URL, bytesToBase64, isTauri } from "./client";
-import type { BibtexImportReceipt, ImportPreview } from "../types/api";
+import { BASE_URL, bytesToBase64, isTauri } from "./client";
+import { libraryFetch } from "../stores/backend.ts";
+import type {
+  BibtexImportReceipt,
+  ImportBibtexBody,
+  ImportCommitBody,
+  ImportPdfBody,
+  ImportPreviewBody,
+  ImportPreviewResponse,
+  ImportedProject,
+  OkReceipt,
+  PaperImportResult,
+  ProjectExportBody,
+} from "../types/api";
 
-export type { ImportPreview };
+export type { ImportPreviewResponse };
 
 async function fileToBase64(file: File): Promise<string> {
   return bytesToBase64(new Uint8Array(await file.arrayBuffer()));
@@ -52,45 +64,52 @@ export async function exportProject(
       filters: [{ name: "linXiv Project", extensions: ["lxproj"] }],
     });
     if (!destPath) throw pickerCancelled();
-    await apiFetch(`/api/projects/${projectId}/export`, {
+    const body: ProjectExportBody = { include_pdfs: includePdfs, dest_path: destPath };
+    await libraryFetch<OkReceipt>(`/api/projects/${projectId}/export`, {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, include_pdfs: includePdfs, dest_path: destPath }),
+      body: JSON.stringify(body),
     });
     return;
   }
+  const body: ProjectExportBody = { include_pdfs: includePdfs };
   const { blob, filename } = await fetchBlob(`${BASE_URL}/api/projects/${projectId}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project_id: projectId, include_pdfs: includePdfs }),
+    body: JSON.stringify(body),
   });
   triggerDownload(blob, filename ?? slug);
 }
 
-export async function previewImport(file: File): Promise<ImportPreview> {
+export async function previewImport(file: File): Promise<ImportPreviewResponse> {
   if (isTauri) {
-    return apiFetch<ImportPreview>("/api/projects/import/preview", {
+    const body: ImportPreviewBody = { file_b64: await fileToBase64(file) };
+    return libraryFetch<ImportPreviewResponse>("/api/projects/import/preview", {
       method: "POST",
-      body: JSON.stringify({ file_b64: await fileToBase64(file) }),
+      body: JSON.stringify(body),
     });
   }
   const fd = new FormData();
   fd.append("file", file);
-  return apiFetch<ImportPreview>("/api/projects/import/preview", { method: "POST", body: fd });
+  return libraryFetch<ImportPreviewResponse>("/api/projects/import/preview", { method: "POST", body: fd });
 }
 
 export async function commitImport(
   file: File,
   onConflict: "merge" | "overwrite" = "merge"
-): Promise<{ project_id: number }> {
+): Promise<ImportedProject> {
   if (isTauri) {
-    return apiFetch<{ project_id: number }>("/api/projects/import/commit", {
+    const body: ImportCommitBody = {
+      file_b64: await fileToBase64(file),
+      on_conflict: onConflict,
+    };
+    return libraryFetch<ImportedProject>("/api/projects/import/commit", {
       method: "POST",
-      body: JSON.stringify({ file_b64: await fileToBase64(file), on_conflict: onConflict }),
+      body: JSON.stringify(body),
     });
   }
   const fd = new FormData();
   fd.append("file", file);
-  return apiFetch<{ project_id: number }>(
+  return libraryFetch<ImportedProject>(
     `/api/projects/import/commit?on_conflict=${onConflict}`,
     { method: "POST", body: fd }
   );
@@ -104,7 +123,7 @@ export async function exportBibtex(projectId: number, projectName?: string): Pro
       filters: [{ name: "BibTeX", extensions: ["bib"] }],
     });
     if (!destPath) throw pickerCancelled();
-    await apiFetch(`/api/projects/${projectId}/export/bibtex?dest_path=${encodeURIComponent(destPath)}`);
+    await libraryFetch<OkReceipt>(`/api/projects/${projectId}/export/bibtex?dest_path=${encodeURIComponent(destPath)}`);
     return;
   }
   const { blob } = await fetchBlob(`${BASE_URL}/api/projects/${projectId}/export/bibtex`);
@@ -118,7 +137,7 @@ export async function exportObsidian(projectId: number, projectName?: string): P
     const destDir = Array.isArray(picked) ? picked[0] : picked;
     if (!destDir) throw pickerCancelled();
     const destPath = await pathJoin(destDir, slug);
-    await apiFetch(`/api/projects/${projectId}/export/obsidian?dest_path=${encodeURIComponent(destPath)}`);
+    await libraryFetch<OkReceipt>(`/api/projects/${projectId}/export/obsidian?dest_path=${encodeURIComponent(destPath)}`);
     return;
   }
   const { blob } = await fetchBlob(`${BASE_URL}/api/projects/${projectId}/export/obsidian`);
@@ -131,11 +150,14 @@ export async function importBibtex(
 ): Promise<BibtexImportReceipt> {
   if (isTauri) {
     const file_b64 = await fileToBase64(file);
-    return apiFetch<BibtexImportReceipt>(
+    const body: ImportBibtexBody = projectId
+      ? { file_b64, project_id: projectId }
+      : { file_b64 };
+    return libraryFetch<BibtexImportReceipt>(
       "/api/papers/import/bibtex",
       {
         method: "POST",
-        body: JSON.stringify(projectId ? { file_b64, project_id: projectId } : { file_b64 }),
+        body: JSON.stringify(body),
       }
     );
   }
@@ -144,23 +166,27 @@ export async function importBibtex(
   const path = projectId
     ? `/api/papers/import/bibtex?project_id=${projectId}`
     : "/api/papers/import/bibtex";
-  return apiFetch<BibtexImportReceipt>(path, { method: "POST", body: fd });
+  return libraryFetch<BibtexImportReceipt>(path, { method: "POST", body: fd });
 }
 
 export async function importPdf(
   file: File,
   projectId?: number
-): Promise<{ source_id: string; title: string }> {
+): Promise<PaperImportResult> {
   const path = projectId
     ? `/api/papers/import/pdf?project_id=${projectId}`
     : "/api/papers/import/pdf";
   if (isTauri) {
-    return apiFetch<{ source_id: string; title: string }>(path, {
+    const body: ImportPdfBody = {
+      file_b64: await fileToBase64(file),
+      filename: file.name,
+    };
+    return libraryFetch<PaperImportResult>(path, {
       method: "POST",
-      body: JSON.stringify({ file_b64: await fileToBase64(file), filename: file.name }),
+      body: JSON.stringify(body),
     });
   }
   const fd = new FormData();
   fd.append("file", file);
-  return apiFetch<{ source_id: string; title: string }>(path, { method: "POST", body: fd });
+  return libraryFetch<PaperImportResult>(path, { method: "POST", body: fd });
 }

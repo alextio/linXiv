@@ -1,17 +1,26 @@
-import { apiFetch, BASE_URL, isTauri } from "./client";
+import { BASE_URL, isTauri } from "./client.ts";
+import { libraryFetch } from "../stores/backend.ts";
 import type {
   Paper,
+  PaperRepairBody,
+  PapersListing,
   PaperVersionsResponse,
+  DoiCandidates,
   DoiVersionCandidate,
+  FullTextPending,
   FullTextReceipt,
   MergeReceipt,
+  PaperMergeBody,
+  PaperSavedBody,
+  SavedSourceIds,
+  DeletedPaperReceipt,
+  RemovedFromProjects,
 } from "../types/api";
 
 // The in-process app serves PDF bytes over the `linxiv://` custom scheme (the
-// invoke()-based transport can't stream binary). The webview host form differs by
-// platform (Tauri docs): linxiv://localhost on Linux/macOS, http://linxiv.localhost
-// on Windows. In browser dev there is no custom scheme — keep the HTTP URL so the
-// Vite proxy reaches the sidecar.
+// invoke() transport can't stream binary). The host form is platform-dependent:
+// linxiv://localhost on Linux/macOS, http://linxiv.localhost on Windows. Browser
+// dev has no custom scheme, so callers keep the HTTP URL for the Vite proxy.
 function linxivUrl(path: string): string {
   const isWindows =
     typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
@@ -32,72 +41,90 @@ export type PaperSort =
 export async function listPapers(
   limit = 200,
   offset = 0,
-  sort?: PaperSort
-): Promise<{ papers: Paper[] }> {
+  sort?: PaperSort,
+  project?: number
+): Promise<PapersListing> {
   const order = sort ? `&sort=${sort.split("_")[0]}&dir=${sort.split("_")[1]}` : "";
-  return apiFetch<{ papers: Paper[] }>(
-    `/api/papers?limit=${limit}&offset=${offset}${order}`
+  const proj = project !== undefined ? `&project=${project}` : "";
+  return libraryFetch<PapersListing>(
+    `/api/papers?limit=${limit}&offset=${offset}${order}${proj}`
   );
 }
 
+// Server-side cap on GET /api/papers?limit=; project-scoped fetches use it so
+// membership, not a 200-paper window, decides what a page shows.
+// ponytail: a single project >5000 papers is still windowed; page with offset=
+// if that ever becomes real.
+export const PAPER_LIMIT_MAX = 5000;
+
+/** All papers linked to a project, filtered server-side (no client window). */
+export function listProjectPapers(projectId: number): Promise<PapersListing> {
+  return listPapers(PAPER_LIMIT_MAX, 0, undefined, projectId);
+}
+
+/** Which of the given stored ids (`entry_id`s, e.g. "arxiv:2204.12985") the
+ *  library holds active, echoed back verbatim — trashed/unknown ids are absent.
+ *  Backs the search page's saved indicator. */
+export async function getSavedSourceIds(entryIds: string[]): Promise<string[]> {
+  if (entryIds.length === 0) return [];
+  const body: PaperSavedBody = { source_ids: entryIds };
+  const data = await libraryFetch<SavedSourceIds>(
+    "/api/papers/saved",
+    { method: "POST", body: JSON.stringify(body) }
+  );
+  return data.saved_source_ids;
+}
+
 export async function getPaper(sourceId: string): Promise<Paper> {
-  return apiFetch<Paper>(`/api/papers/${encodeURIComponent(sourceId)}`);
+  return libraryFetch<Paper>(`/api/papers/${encodeURIComponent(sourceId)}`);
 }
 
 export async function getPaperBySfk(sfk: number, version?: number): Promise<Paper> {
   const query = version !== undefined ? `?version=${version}` : "";
-  return apiFetch<Paper>(`/api/papers/sfk/${sfk}${query}`);
+  return libraryFetch<Paper>(`/api/papers/sfk/${sfk}${query}`);
 }
 
 export async function getPaperVersions(sfk: number): Promise<PaperVersionsResponse> {
-  return apiFetch<PaperVersionsResponse>(`/api/papers/sfk/${sfk}/versions`);
+  return libraryFetch<PaperVersionsResponse>(`/api/papers/sfk/${sfk}/versions`);
 }
 
 export async function getDoiVersionCandidates(sfk: number): Promise<DoiVersionCandidate[]> {
-  const data = await apiFetch<{ candidates: DoiVersionCandidate[] }>(
+  const data = await libraryFetch<DoiCandidates>(
     `/api/papers/sfk/${sfk}/doi-candidates`
   );
   return data.candidates;
 }
 
-// Merge a duplicate paper root INTO the paper `winnerSfk` (the open paper's
-// metadata stays canonical; the duplicate's notes, annotations, memberships,
-// tags, missing versions and PDFs move over, then the duplicate is deleted).
-// 409s on self/trashed/share-linked duplicates.
+// Merge a duplicate paper root INTO `winnerSfk`: the winner's metadata stays
+// canonical; the duplicate's notes, annotations, memberships, tags, missing
+// versions and PDFs move over, then it's deleted. 409s on self/trashed/
+// share-linked duplicates.
 export async function mergePapers(
   winnerSfk: number,
   loserSfk: number
 ): Promise<MergeReceipt> {
-  return apiFetch<MergeReceipt>(`/api/papers/sfk/${winnerSfk}/merge`, {
+  const body: PaperMergeBody = { loser_source_fk: loserSfk };
+  return libraryFetch<MergeReceipt>(`/api/papers/sfk/${winnerSfk}/merge`, {
     method: "POST",
-    body: JSON.stringify({ loser_source_fk: loserSfk }),
+    body: JSON.stringify(body),
   });
 }
 
-export async function deletePaper(sourceId: string): Promise<{ deleted: string }> {
-  return apiFetch<{ deleted: string }>(
+export async function deletePaper(sourceId: string): Promise<DeletedPaperReceipt> {
+  return libraryFetch<DeletedPaperReceipt>(
     `/api/papers/${encodeURIComponent(sourceId)}`,
     { method: "DELETE" }
   );
 }
 
-export interface PaperRepairBody {
-  title: string;
-  authors: string[];
-  published: string;
-  summary: string;
-  category?: string | null;
-  doi?: string | null;
-  url?: string | null;
-  tags?: string[] | null;
-}
+export type { PaperRepairBody };
 
-export async function removeFromAllProjects(sfk: number): Promise<{ ok: boolean; removed_from_projects: number[] }> {
-  return apiFetch(`/api/papers/sfk/${sfk}/projects`, { method: "DELETE" });
+export async function removeFromAllProjects(sfk: number): Promise<RemovedFromProjects> {
+  return libraryFetch(`/api/papers/sfk/${sfk}/projects`, { method: "DELETE" });
 }
 
 export async function repairPaper(sfk: number, body: PaperRepairBody): Promise<Paper> {
-  return apiFetch<Paper>(`/api/papers/sfk/${sfk}`, {
+  return libraryFetch<Paper>(`/api/papers/sfk/${sfk}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
@@ -106,8 +133,8 @@ export async function repairPaper(sfk: number, body: PaperRepairBody): Promise<P
 export async function searchLibrary(
   q: string,
   limit = 50
-): Promise<{ papers: Paper[] }> {
-  return apiFetch<{ papers: Paper[] }>(
+): Promise<PapersListing> {
+  return libraryFetch<PapersListing>(
     `/api/papers/search?q=${encodeURIComponent(q)}&limit=${limit}`
   );
 }
@@ -115,37 +142,30 @@ export async function searchLibrary(
 /** Core's `FullTextReceipt`. */
 export type { FullTextReceipt as FullTextResult } from "../types/api";
 
-/**
- * Downloads a paper's arXiv TeX source and indexes it, so `searchLibrary` can
- * match on the body and not just the metadata. arXiv-only; already-indexed
- * papers are skipped unless `force`.
- */
+/** Downloads a paper's arXiv TeX source and indexes it, so `searchLibrary` can
+ *  match the body and not just the metadata. Already-indexed papers are skipped
+ *  unless `force`. */
 export async function fetchFullText(
   sourceId: string,
   force = false
 ): Promise<FullTextReceipt> {
-  return apiFetch<FullTextReceipt>(
+  return libraryFetch<FullTextReceipt>(
     `/api/papers/${encodeURIComponent(sourceId)}/full-text${force ? "?force=true" : ""}`,
     { method: "POST" }
   );
 }
 
-/**
- * How many stored arXiv papers still have no indexed TeX source — the backlog
- * the background full-text worker is working through.
- */
-export async function fullTextPending(): Promise<{ pending: number }> {
-  return apiFetch<{ pending: number }>("/api/papers/full-text-pending");
+/** How many stored arXiv papers still have no indexed TeX source — the backlog
+ *  the background full-text worker chews through. */
+export async function fullTextPending(): Promise<FullTextPending> {
+  return libraryFetch<FullTextPending>("/api/papers/full-text-pending");
 }
 
-/**
- * Returns the URL to stream/download the PDF for a paper. In Tauri this hits
- * the backend directly; in browser dev it goes through the Vite proxy.
- */
+/** URL that streams a paper's PDF. */
 export function getPaperPdfUrl(sourceId: string, version?: number): string {
   const id = encodeURIComponent(sourceId);
   // Tauri: id travels as a query param (a slash-bearing old-style id stays one
-  // token). Browser dev: the HTTP path the Vite proxy forwards to the sidecar.
+  // token). Browser dev: the HTTP path Vite proxies to the dev server.
   if (isTauri) {
     const v = version !== undefined ? `&version=${version}` : "";
     return linxivUrl(`pdf?id=${id}${v}`);
@@ -154,10 +174,8 @@ export function getPaperPdfUrl(sourceId: string, version?: number): string {
   return `${BASE_URL}/api/papers/${id}/pdf${query}`;
 }
 
-/**
- * URL that streams an external (arXiv) PDF through the host-allowlisted proxy.
- * Used by the preview pages' CORS fallback. linxiv:// in the app, HTTP in dev.
- */
+/** URL that streams an external (arXiv) PDF through the host-allowlisted proxy —
+ *  the preview pages' CORS fallback. linxiv:// in the app, HTTP in dev. */
 export function getPdfProxyUrl(remoteUrl: string): string {
   const url = encodeURIComponent(remoteUrl);
   if (isTauri) return linxivUrl(`pdf-proxy?url=${url}`);

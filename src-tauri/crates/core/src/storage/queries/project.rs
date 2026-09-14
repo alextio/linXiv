@@ -8,11 +8,11 @@ use crate::models::{ProjectDetails, Status};
 use crate::storage::db::{timestamp_from_sql, timestamp_to_sql, transaction};
 use crate::storage::query::Q;
 
-// Columns in fixed order; both queries share `raw_from_row` / `to_model`.
+// Column list + FROM, in the order `raw_from_row` indexes.
 const SELECT_COLS: &str =
     "PROJECT_FK, NAME, DESCRIPTION, COLOR, STATUS, CREATED_AT, UPDATED_AT, ARCHIVED_AT, SHARE_ID FROM PROJECT";
 
-/// Raw column values before decltype conversion (closure stays in rusqlite-error
+/// Raw column values as SQLite returns them (closure stays in rusqlite-error
 /// land; `to_model` does the CoreError-returning conversions).
 struct RawProject {
     id: i64,
@@ -59,14 +59,13 @@ pub(crate) fn status_to_sql(s: Status) -> &'static str {
     }
 }
 
-/// Maps a row to ProjectDetails. `source_fks` is left empty for the caller to
-/// fill via `load_source_fks`; `project_tags` stays empty — Python's
-/// `Project.from_row` does not load tags either.
+/// Maps a row to ProjectDetails. `source_fks` and `project_tags` are left empty
+/// for the caller to fill.
 fn to_model(raw: RawProject) -> Result<ProjectDetails> {
     Ok(ProjectDetails {
         id: Some(raw.id),
         name: raw.name,
-        description: raw.description.unwrap_or_default(), // Python: DESCRIPTION or ""
+        description: raw.description.unwrap_or_default(), // NULL DESCRIPTION -> ""
         color: raw.color.map(|c| c as i32),
         project_tags: Vec::new(),
         source_fks: Vec::new(),
@@ -102,7 +101,7 @@ pub fn ensure_share_id(
         .optional()?)
 }
 
-/// PROJECT_FK of the project claiming this SHARE_ID (hoster- or reader-linked).
+/// PROJECT_FK of the live (non-trashed) project claiming this SHARE_ID.
 pub fn find_by_share_id(conn: &Connection, share_id: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
@@ -130,6 +129,14 @@ pub fn share_id_claimed_by_other(
         .is_some())
 }
 
+/// Clear SHARE_ID from any live (non-trashed) holder of this share_id.
+pub fn release_share_id(conn: &Connection, share_id: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE PROJECT SET SHARE_ID = NULL WHERE SHARE_ID = ?1 AND STATUS != 'deleted'",
+        [share_id],
+    )?)
+}
+
 /// Clear SHARE_ID from any trashed (STATUS = 'deleted') holder of this share_id.
 pub fn release_share_id_from_deleted(conn: &Connection, share_id: &str) -> Result<usize> {
     Ok(conn.execute(
@@ -138,8 +145,8 @@ pub fn release_share_id_from_deleted(conn: &Connection, share_id: &str) -> Resul
     )?)
 }
 
-/// `storage/projects.py::_load_source_fks` — active-paper membership in
-/// PROJECT_TO_PAPER_FK (insertion) order; soft-deleted roots are excluded.
+/// Active-paper membership in PROJECT_TO_PAPER_FK (insertion) order;
+/// soft-deleted roots are excluded.
 fn load_source_fks(conn: &Connection, project_fk: i64) -> Result<Vec<i64>> {
     Ok(source_fks_by_project(conn, &[project_fk])?
         .remove(&project_fk)
@@ -206,10 +213,8 @@ pub fn active_paper_count(conn: &Connection, project_fk: i64) -> Result<Option<u
         .map(|n| n as usize))
 }
 
-/// `storage/projects.py::get_project` — full project row. `load_sources` mirrors
-/// Python (default true): when false, `source_fks` stays empty and the caller
-/// fills counts via the bulk loader (port of `list_project_source_ids_bulk` in
-/// storage/config/queries.py, deferred to the service phase).
+/// Full project row. `load_sources = false` leaves `source_fks` empty for the
+/// caller to fill via the bulk loader.
 pub fn get_project(
     conn: &Connection,
     project_id: i64,
@@ -232,11 +237,8 @@ pub fn get_project(
     Ok(Some(proj))
 }
 
-/// `storage/projects.py::filter_projects` — list projects by optional predicate.
-/// `load_sources` mirrors Python (default true): false skips the per-row membership
-/// query — the list/graph paths pass false and fill counts via the bulk loader
-/// (port of `list_project_source_ids_bulk`, deferred to the service phase), which
-/// avoids the N+1.
+/// List projects by optional predicate. `load_sources = true` batches every
+/// project's membership into one chunked query (no N+1); `false` skips it.
 pub fn list_projects(
     conn: &Connection,
     condition: Option<Q>,
@@ -273,11 +275,10 @@ pub fn list_projects(
     Ok(out)
 }
 
-// ── Writes — Python `storage/projects.py`. ────────────────────────────────────
+// ── Writes ────────────────────────────────────────────────────────────────────
 
 /// Insert a new PROJECT row (CREATED_AT = UPDATED_AT = now). Returns PROJECT_FK.
-/// Membership is NOT written here — the caller composes `save_source_fks`
-/// (mirrors Python `save()` on insert, which calls `_save_source_fks` next).
+/// Membership is NOT written here — the caller composes `save_source_fks` next.
 pub fn insert_project(
     conn: &Connection,
     name: &str,
@@ -296,10 +297,9 @@ pub fn insert_project(
 }
 
 /// Fields-only UPDATE (NAME/DESCRIPTION/COLOR/STATUS/ARCHIVED_AT + UPDATED_AT).
-/// NON-NEGOTIABLE: membership is deliberately NOT rewritten — Python `save()` on
-/// update writes fields only, so a stale in-memory member list can't clobber rows
-/// other requests wrote. Returns false if no row matched. Covers delete/archive/
-/// restore (those just set STATUS/ARCHIVED_AT then call this).
+/// NON-NEGOTIABLE: membership is deliberately NOT rewritten, so a stale
+/// in-memory member list can't clobber rows other requests wrote. Returns false
+/// if no row matched. Covers delete/archive/restore.
 pub fn update_project_fields(
     conn: &Connection,
     project_fk: i64,
@@ -326,9 +326,8 @@ pub fn update_project_fields(
     Ok(n > 0)
 }
 
-/// Full membership replace, diffed against current rows (not a blanket
-/// delete-then-reinsert) so a retained paper's PAPER_TO_READING cascade FK never
-/// fires. Must run in the same transaction as `insert_project`.
+/// Full membership replace, diffed against current rows so a retained paper's
+/// PAPER_TO_READING cascade never fires (not a blanket delete-then-reinsert).
 pub fn save_source_fks(tx: &Transaction, project_fk: i64, source_fks: &[i64]) -> Result<()> {
     let existing: std::collections::HashSet<i64> = {
         let mut stmt =
@@ -353,7 +352,7 @@ pub fn save_source_fks(tx: &Transaction, project_fk: i64, source_fks: &[i64]) ->
 }
 
 /// Incremental add — INSERT OR IGNORE per row (idx_project_to_paper_unique makes
-/// dupes a no-op). Python `Project.add_papers`.
+/// dupes a no-op).
 pub fn add_papers(conn: &Connection, project_fk: i64, source_fks: &[i64]) -> Result<()> {
     let mut stmt = conn.prepare(
         "INSERT OR IGNORE INTO PROJECT_TO_PAPER (PROJECT_FK, SOURCE_FK) VALUES (?1, ?2)",
@@ -364,7 +363,7 @@ pub fn add_papers(conn: &Connection, project_fk: i64, source_fks: &[i64]) -> Res
     Ok(())
 }
 
-/// Incremental remove — DELETE per (project, paper). Python `Project.remove_papers`.
+/// Incremental remove — DELETE per (project, paper).
 pub fn remove_papers(conn: &Connection, project_fk: i64, source_fks: &[i64]) -> Result<()> {
     let mut stmt =
         conn.prepare("DELETE FROM PROJECT_TO_PAPER WHERE PROJECT_FK = ?1 AND SOURCE_FK = ?2")?;
@@ -386,8 +385,7 @@ pub fn replace_papers(conn: &mut Connection, project_fk: i64, source_fks: &[i64]
     transaction(conn, |tx| save_source_fks(tx, project_fk, &deduped))
 }
 
-/// PROJECT_FKs of every project containing this paper — any status. Python
-/// `get_paper_project_fks`. Callers filter to active themselves.
+/// PROJECT_FKs of every project containing this paper — any status, unfiltered.
 pub fn get_paper_project_fks(conn: &Connection, source_fk: i64) -> Result<Vec<i64>> {
     Ok(project_fks_by_source_fk(conn, &[source_fk])?
         .remove(&source_fk)
@@ -422,8 +420,8 @@ pub fn project_fks_by_source_fk(
     Ok(by_paper)
 }
 
-/// Remove a paper from every project; returns the FKs it was removed from.
-/// Python `remove_paper_from_all_projects` (select-then-delete, transactional).
+/// Remove a paper from every project (select-then-delete, transactional);
+/// returns the FKs it was removed from.
 pub fn remove_paper_from_all_projects(conn: &mut Connection, source_fk: i64) -> Result<Vec<i64>> {
     transaction(conn, |tx| {
         let fks = get_paper_project_fks(tx, source_fk)?;
@@ -437,9 +435,9 @@ pub fn remove_paper_from_all_projects(conn: &mut Connection, source_fk: i64) -> 
     })
 }
 
-/// Permanently remove a project + associations in ONE transaction (Python
-/// `hard_delete_project`). NULLs NOTE.PROJECT_FK rather than deleting notes, and
-/// leaves orphan TAG rows, per ADR-0009. No-ops cleanly if the project is absent.
+/// Permanently remove a project + associations in ONE transaction. NULLs
+/// NOTE/ANNOTATION.PROJECT_FK instead of deleting them; orphan TAG rows stay
+/// (ADR-0009). No-ops if the project is absent.
 pub fn hard_delete_project(conn: &mut Connection, project_fk: i64) -> Result<()> {
     transaction(conn, |tx| {
         tx.execute(
@@ -686,14 +684,14 @@ mod tests {
             ReadingStatus::Read
         );
 
-        // (b) removing the paper from the project cascades to drop its reading row.
+        // removing the paper from the project cascades to drop its reading row.
         remove_papers(&conn, 1, &[10]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),
             ReadingStatus::Unread
         );
 
-        // (c) re-adding it starts fresh — no resurrected status from the orphaned row.
+        // re-adding it starts fresh — the cascade left nothing to resurrect.
         add_papers(&conn, 1, &[10]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),
@@ -766,7 +764,7 @@ mod tests {
         set_reading_status(&conn, 1, 10, ReadingStatus::Read).unwrap();
         set_reading_status(&conn, 1, 11, ReadingStatus::Reading).unwrap();
 
-        // no-op save (same set, same order): reading status for both survives.
+        // no-op save (same set): reading status for both survives.
         replace_papers(&mut conn, 1, &[10, 11]).unwrap();
         assert_eq!(
             get_reading_status(&conn, 1, 10).unwrap(),

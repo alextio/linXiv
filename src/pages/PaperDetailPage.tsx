@@ -16,7 +16,7 @@ import { getNotes, deleteNote } from "../api/notes";
 import { getAnnotations, deleteAnnotation, updateAnnotation } from "../api/annotations";
 import { listProjects } from "../api/projects";
 import { apiFetch, bytesToBase64, isTauri } from "../api/client";
-import type { Note, Paper, Annotation } from "../types/api";
+import type { Note, Paper, Annotation, UploadPdfBody } from "../types/api";
 import { PdfReader } from "../components/pdf/PdfReader";
 import { PagePill } from "../components/pdf/PagePill";
 import { parseAnchor } from "../lib/pdfAnchor";
@@ -40,7 +40,11 @@ import { MathText } from "../lib/tex";
 import { formatDate } from "../lib/date";
 import { TagBadge } from "../components/tags/TagBadge";
 import { openPdfInSystem } from "../api/pdfs";
+import { remotePdfPath } from "../api/remote";
+import { libraryFetch, useBackendStore } from "../stores/backend";
 import { errText } from "../lib/errText";
+import { pdfCanvasDpr } from "../lib/zoom";
+import { useUiStore } from "../stores/ui";
 
 const LATEST_VERSION_KEY = "latest" as const;
 
@@ -188,8 +192,7 @@ export default function PaperDetailPage() {
   const { data: doiCandidates } = useQuery({
     queryKey: ["paper", "doi-candidates", sfk],
     queryFn: () => getDoiVersionCandidates(Number(sfk)),
-    // Gated on a DOI actually being present — skips the round trip for the
-    // (majority) of papers that have none.
+    // Gated on a DOI being present — skips the round trip for papers without one.
     enabled: !!sfk && Number.isFinite(Number(sfk)) && !!paper?.doi,
   });
 
@@ -227,11 +230,11 @@ export default function PaperDetailPage() {
       const bytes = await pdfPreviewDocRef.current.getData();
       const path = `/api/papers/${encodeURIComponent(sourceId)}/pdf`;
       if (isTauri) {
-        await apiFetch(path, { method: "PUT", body: JSON.stringify({ file_b64: bytesToBase64(bytes) }) });
+        await libraryFetch(path, { method: "PUT", body: JSON.stringify({ file_b64: bytesToBase64(bytes) } satisfies UploadPdfBody) });
       } else {
         const form = new FormData();
         form.append("file", new Blob([bytes.slice()], { type: "application/pdf" }), `${sourceId}.pdf`);
-        await apiFetch(path, { method: "PUT", body: form });
+        await libraryFetch(path, { method: "PUT", body: form });
       }
     },
     onSuccess: () => {
@@ -244,11 +247,11 @@ export default function PaperDetailPage() {
       const path = `/api/papers/${encodeURIComponent(sourceId)}/pdf`;
       if (isTauri) {
         const file_b64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
-        await apiFetch(path, { method: "PUT", body: JSON.stringify({ file_b64 }) });
+        await libraryFetch(path, { method: "PUT", body: JSON.stringify({ file_b64 } satisfies UploadPdfBody) });
       } else {
         const form = new FormData();
         form.append("file", file, file.name);
-        await apiFetch(path, { method: "PUT", body: form });
+        await libraryFetch(path, { method: "PUT", body: form });
       }
     },
     onSuccess: () => {
@@ -367,11 +370,18 @@ export default function PaperDetailPage() {
     const controller = new AbortController();
     openNativeAbortRef.current = controller;
     try {
-      const versionQuery = paper.version > 0 ? `?version=${paper.version}` : "";
-      const { path } = await apiFetch<{ path: string }>(
-        `/api/papers/${encodeURIComponent(paper.source_id)}/pdf-path${versionQuery}`,
-        { signal: controller.signal }
-      );
+      // Remote backend: pdf-path is denied by the node (403) — fetch the bytes
+      // over the byte lane into the local cache and open that path instead.
+      const remote = useBackendStore.getState().defaultBackend;
+      const version = paper.version > 0 ? paper.version : undefined;
+      const path = remote
+        ? await remotePdfPath(remote.id, paper.source_id, version)
+        : (
+            await apiFetch<{ path: string }>(
+              `/api/papers/${encodeURIComponent(paper.source_id)}/pdf-path${version !== undefined ? `?version=${version}` : ""}`,
+              { signal: controller.signal }
+            )
+          ).path;
       if (controller.signal.aborted) return;
       if (typeof path !== "string" || !path) throw new Error("Invalid response from pdf-path endpoint");
       await openPdfInSystem(path);
@@ -519,8 +529,12 @@ export default function PaperDetailPage() {
             : undefined
         }
       >
-        {/* Left pane: PDF */}
-        <div className={hasPdfContent ? "min-h-0 overflow-y-auto bg-surface2 border-r border-border" : "shrink-0 flex items-center gap-3 flex-wrap px-6 py-3 bg-surface2 border-b border-border"}>
+        {/* Left pane: PDF. While the metadata editor (a non-modal dialog with
+            a z-40 click shield) is open, raise this pane above the shield so
+            the PDF stays selectable while the rest of the page is inert.
+            Only when it actually shows a PDF — the no-PDF strip holds
+            mutating save/link buttons that must stay behind the shield. */}
+        <div className={`${showEditor && hasPdfContent ? "relative z-[45] " : ""}${hasPdfContent ? "min-h-0 overflow-y-auto bg-surface2 border-r border-border" : "shrink-0 flex items-center gap-3 flex-wrap px-6 py-3 bg-surface2 border-b border-border"}`}>
           <div className={hasPdfContent ? "h-full flex flex-col" : "contents"}>
             <PdfPane
               paper={paper}
@@ -567,7 +581,7 @@ export default function PaperDetailPage() {
           />
         )}
 
-        {/* Right pane: identity + Details/Notes */}
+        {/* Right pane: identity + tabs */}
         <div className={`overflow-y-auto bg-panel ${hasPdfContent ? "min-h-0" : "flex-1 min-h-0"}`}>
           <div className={hasPdfContent ? "px-[18px] py-5 space-y-5" : "max-w-[760px] mx-auto px-8 py-6 space-y-5"}>
             {/* Identity block */}
@@ -703,7 +717,7 @@ export default function PaperDetailPage() {
                           {mergeMutation.isPending && mergeMutation.variables === c.source_fk
                             ? "Merging…"
                             : armedMergeSfk === c.source_fk
-                              ? "Confirm — deletes the duplicate"
+                              ? "Confirm: deletes the duplicate"
                               : "Merge into this paper"}
                         </button>
                       </div>
@@ -718,7 +732,6 @@ export default function PaperDetailPage() {
               )}
             </div>
 
-            {/* Tabs: Details | Notes */}
             <Tabs defaultValue="details">
               <TabsList>
                 <TabsTrigger value="details">Details</TabsTrigger>
@@ -730,7 +743,6 @@ export default function PaperDetailPage() {
                 </TabsTrigger>
               </TabsList>
 
-              {/* Details tab: abstract */}
               <TabsContent value="details" className="pt-5">
                 {paper.summary ? (
                   <div className="space-y-2">
@@ -1081,6 +1093,7 @@ function PdfPane({
   projectId,
   asStrip,
 }: PdfPaneProps) {
+  const zoom = useUiStore((s) => s.zoom);
   const previewScrollRafRef = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -1091,17 +1104,58 @@ function PdfPane({
     [],
   );
 
+  // Remote backend: the linxiv:// scheme only serves the LOCAL library, so pull
+  // the bytes through `remote_pdf` into the local cache first, then hand the
+  // cached file to the same reader via convertFileSrc (the assetProtocol scope
+  // covers remote_pdf_cache).
+  const remoteBackend = useBackendStore((s) => s.defaultBackend);
+  const remotePdfQ = useQuery({
+    queryKey: ["remote-pdf", remoteBackend?.id, paper.source_id, paper.version],
+    enabled: !!remoteBackend && paper.has_pdf,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const path = await remotePdfPath(
+        remoteBackend!.id,
+        paper.source_id,
+        paper.version > 0 ? paper.version : undefined,
+      );
+      const { convertFileSrc } = await import("@tauri-apps/api/core");
+      return convertFileSrc(path);
+    },
+  });
+
   if (paper.has_pdf) {
+    // Remote: loading/error surface while the byte-lane fetch fills the cache.
+    if (remoteBackend && remotePdfQ.data === undefined) {
+      return (
+        <div className="flex h-full w-full items-center justify-center bg-panel px-6">
+          {remotePdfQ.isError ? (
+            <p className="text-sm text-center" style={{ color: "var(--color-danger)" }}>
+              {errText(remotePdfQ.error, "Failed to fetch the PDF from the remote backend")}
+            </p>
+          ) : (
+            <div className="flex items-center gap-2 text-sm text-muted">
+              <Spinner size={16} />
+              Fetching PDF from {remoteBackend.label}…
+            </div>
+          )}
+        </div>
+      );
+    }
     // Saved PDF: the annotating reader (select→highlight, click→comment/delete)
     // replaces the plain iframe so highlights can overlay the pages.
     return (
       <div className="relative w-full h-full min-h-0 flex flex-col">
         <div className="flex-1 min-h-0 w-full overflow-hidden bg-panel">
           <PdfReader
-            file={getPaperPdfUrl(
-              paper.source_id,
-              paper.version > 0 ? paper.version : undefined
-            )}
+            file={
+              remoteBackend
+                ? remotePdfQ.data!
+                : getPaperPdfUrl(
+                    paper.source_id,
+                    paper.version > 0 ? paper.version : undefined
+                  )
+            }
             sourceId={paper.source_id}
             version={paper.version}
             projectId={projectId}
@@ -1221,6 +1275,7 @@ function PdfPane({
                         key={i + 1}
                         pageNumber={i + 1}
                         width={containerWidth ? containerWidth - 32 : undefined}
+                        devicePixelRatio={pdfCanvasDpr(zoom)}
                         className="mx-auto my-2 shadow-md"
                         renderTextLayer
                         renderAnnotationLayer

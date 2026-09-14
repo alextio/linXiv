@@ -1,21 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useIsMutating,
+  useMutation,
+  useMutationState,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Lock, Settings2 } from "lucide-react";
 import {
   downloadSharedPdf,
+  importReceived,
   listReceivedPapers,
   syncShare,
   type SharedSummary,
+  type SyncReceipt,
   shareErrText,
 } from "../../api/share";
 import { ApiError } from "../../api/client";
-import { invalidatePaperMutationQueries } from "../../lib/paperMutations";
+import {
+  invalidatePaperMutationQueries,
+  invalidateProjectMutationQueries,
+} from "../../lib/paperMutations";
+import { SHARE_SYNC_MUTATION_KEY } from "../../lib/syncPill";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 
-export type ShareRole = "Hoster" | "Reader";
+export type ShareRoleLabel = "Hoster" | "Reader";
 
-function RolePill({ role }: { role: ShareRole }) {
+function RolePill({ role }: { role: ShareRoleLabel }) {
   const hosted = role === "Hoster";
   return (
     <span
@@ -29,6 +40,33 @@ function RolePill({ role }: { role: ShareRole }) {
       }}
     >
       {role}
+    </span>
+  );
+}
+
+/** Per-card sync state: live "Syncing" while this share's sync mutation is in
+ * flight, otherwise "Synced" / "Not synced" from synced_at. */
+function SyncBadge({ syncing, synced }: { syncing: boolean; synced: boolean }) {
+  return (
+    <span
+      className="flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2 py-1 font-mono text-[10.5px] font-semibold leading-none"
+      style={{ color: "var(--color-muted)" }}
+    >
+      {syncing ? (
+        <>
+          <Spinner size={10} /> Syncing
+        </>
+      ) : (
+        <>
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{
+              backgroundColor: synced ? "var(--color-success)" : "var(--color-ink-3)",
+            }}
+          />
+          {synced ? "Synced" : "Not synced"}
+        </>
+      )}
     </span>
   );
 }
@@ -68,9 +106,9 @@ const SYNC_REASON_LABELS: Record<string, string | undefined> = {
   "paused": "Sync paused",
   "direction": "Skipped by sync direction",
   "revoked or awaiting key": "Access revoked or key not yet received",
-  "awaiting first sync": "The host has not answered yet — nothing to show",
+  "awaiting first sync": "The host has not answered yet, nothing to show",
   "no key for any content":
-    "Content arrived but none of it decrypts — it was published before your invite, so the host must republish it",
+    "Content arrived but none of it decrypts; it was published before your invite, so the host must republish it",
 };
 
 function humanizeReason(code: string | undefined): string {
@@ -79,13 +117,33 @@ function humanizeReason(code: string | undefined): string {
 }
 
 /** The reader leg's raw counters, for pasting into a bug report. */
-function syncCounters(d: {
-  applied?: number;
-  no_key?: number;
-  failed?: number;
-}): string | null {
-  if (d.applied == null) return null;
+function syncCounters(d: SyncReceipt): string | null {
+  if (!d.synced || d.applied == null) return null;
   return `applied ${d.applied} · no key ${d.no_key ?? 0} · failed ${d.failed ?? 0}`;
+}
+
+/** Import a received mirror into the library; shared by the card's visible
+ * "Import to library" button and the settings dialog's Local-project row.
+ * `isPending` is derived across ALL instances of the keyed mutation, so the
+ * dialog's button is disabled while the card's import is in flight (and vice
+ * versa) instead of firing a duplicate import. */
+export function useImportReceived(shareId: string) {
+  const queryClient = useQueryClient();
+  const key = ["share", "import-received", shareId];
+  const m = useMutation({
+    mutationKey: key,
+    mutationFn: () => importReceived(shareId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["share", "published"] });
+      queryClient.invalidateQueries({ queryKey: ["share", "received"] });
+      invalidateProjectMutationQueries(queryClient);
+    },
+  });
+  const pendingAnywhere =
+    useMutationState({
+      filters: { mutationKey: key, status: "pending" },
+    }).length > 0;
+  return { ...m, isPending: m.isPending || pendingAnywhere };
 }
 
 export function ShareCard({
@@ -94,23 +152,39 @@ export function ShareCard({
   onSettings,
 }: {
   share: SharedSummary;
-  role: ShareRole;
+  role: ShareRoleLabel;
   onSettings: () => void;
 }) {
   const hosted = role === "Hoster";
   const queryClient = useQueryClient();
+  const importM = useImportReceived(share.share_id);
   const sync = useMutation({
+    // Suffixing the shared key keeps the header SyncStatusPill's prefix match
+    // working while letting this card's badge watch its own share only.
+    mutationKey: [...SHARE_SYNC_MUTATION_KEY, share.share_id],
     mutationFn: () => syncShare(share.share_id),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["share", "published"] });
       queryClient.invalidateQueries({ queryKey: ["share", "received"] });
     },
   });
+  const syncingThis =
+    useIsMutating({ mutationKey: [...SHARE_SYNC_MUTATION_KEY, share.share_id] }) > 0;
+  // The pill's Sync-all registers under the exact bare key; a card firing a
+  // second concurrent sync for the same share mid-batch must be blocked.
+  const batchSyncing =
+    useIsMutating({ mutationKey: SHARE_SYNC_MUTATION_KEY, exact: true }) > 0;
   const resetRef = useRef(sync.reset);
   resetRef.current = sync.reset;
   useEffect(() => {
     resetRef.current();
   }, [share.synced_at, share.paused]);
+  // A fresh mirror (unlink → re-import gives a new project_fk) must not show
+  // the previous mirror's "Saved N of M PDFs" result.
+  const pdfsResetRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    pdfsResetRef.current();
+  }, [share.project_fk]);
   // Sequential fetch of every has_pdf paper; result summarized below.
   const [pdfProgress, setPdfProgress] = useState({ done: 0, total: 0 });
   const pdfCancelRef = useRef(false);
@@ -157,6 +231,7 @@ export function ShareCard({
       invalidatePaperMutationQueries(queryClient);
     },
   });
+  pdfsResetRef.current = pdfs.reset;
   return (
     <div className="flex flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)]">
       <div className="px-5 pb-3.5 pt-4">
@@ -185,8 +260,17 @@ export function ShareCard({
               Pending
             </span>
           )}
+          <SyncBadge syncing={syncingThis} synced={share.synced_at != null} />
           <RolePill role={role} />
         </div>
+        {share.description && (
+          <p
+            className="mt-1 truncate pl-[21px] text-xs"
+            style={{ color: "var(--color-muted)" }}
+          >
+            {share.description}
+          </p>
+        )}
       </div>
       <div className="mx-5 flex items-center gap-2 border-y border-[var(--color-border)] py-2.5">
         <span
@@ -199,7 +283,7 @@ export function ShareCard({
           {share.paused
             ? "Sync paused"
             : share.pending
-              ? "Waiting for the host — nothing has arrived yet"
+              ? "Waiting for the host, nothing has arrived yet"
               : syncedText(share.synced_at)}
           {" · "}
           {hosted ? "published from your library" : "read-only mirror"}
@@ -239,11 +323,21 @@ export function ShareCard({
             )}
           </>
         )}
+        {!hosted && !share.pending && share.project_fk == null && (
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => importM.mutate()}
+            disabled={importM.isPending}
+          >
+            {importM.isPending ? <Spinner size={14} /> : "Import to library"}
+          </Button>
+        )}
         <Button
           variant="muted"
           size="sm"
           onClick={() => sync.mutate()}
-          disabled={sync.isPending || share.paused}
+          disabled={sync.isPending || batchSyncing || share.paused}
         >
           {sync.isPending ? <Spinner size={14} /> : "Sync now"}
         </Button>
@@ -256,7 +350,7 @@ export function ShareCard({
           className="px-5 pb-3 text-xs"
           style={{
             // "still waiting on the host" is a state, not a failure.
-            color: sync.data?.pending
+            color: sync.data?.synced && sync.data.pending
               ? "var(--color-muted)"
               : "var(--color-danger)",
           }}
@@ -270,6 +364,11 @@ export function ShareCard({
           style={{ color: "var(--color-ink-3)" }}
         >
           {syncCounters(sync.data)}
+        </p>
+      )}
+      {importM.isError && (
+        <p className="px-5 pb-3 text-xs" style={{ color: "var(--color-danger)" }}>
+          {shareErrText(importM.error)}
         </p>
       )}
       {pdfs.isError && (
@@ -292,7 +391,7 @@ export function ShareCard({
                 pdfs.data.total === 1 ? "" : "s"
               }${pdfs.data.stopped ? ` (${pdfs.data.stopped})` : ""}`}
           {pdfs.data.failed.length > 0 &&
-            ` — ${pdfs.data.failed.slice(0, 3).join("; ")}${
+            `: ${pdfs.data.failed.slice(0, 3).join("; ")}${
               pdfs.data.failed.length > 3
                 ? `; and ${pdfs.data.failed.length - 3} more failed`
                 : ""

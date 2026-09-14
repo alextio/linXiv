@@ -1,15 +1,11 @@
-//! Domain models + the two API serializers, ported from `service/models/*`,
-//! `sources/base.py` (PaperMetadata), and `api/app.py`.
-//!
-//! Plan refs: §5.1 (serializers), §5.2 (domain models), D16.
+//! Domain models + the API serializers. Plan §5.1/§5.2, D16.
 //! D16 NON-NEGOTIABLE: `SearchResultOut` and `PaperDetails` are TWO DISTINCT
 //! serializers and must NOT be unified — their JSON contracts differ
 //! (`paper_url`/`primary_category`/`entry_id` + `published=""` sentinel vs.
 //! `url`/`category` + `published: null`).
 //!
-//! Dates/datetimes use chrono and serialize as ISO strings (matching Python's
-//! `.isoformat()`). LIST columns (categories/authors/tags) are `Vec<String>`
-//! here — their JSON-string (de)serialization is a storage-layer concern.
+//! Dates/datetimes serialize as ISO strings. LIST columns (categories/authors/
+//! tags) are `Vec<String>` here — JSON-string (de)serialization is storage's concern.
 
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
@@ -19,9 +15,8 @@ use ts_rs::TS;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Bare paper ID with the source namespace prefix removed.
-/// Mirrors `_strip_namespace`: `"arxiv:2204.12985"` -> `"2204.12985"`,
-/// `"2204.12985"` (no colon) -> `"2204.12985"`.
+/// Bare paper ID with the source namespace prefix removed:
+/// `"arxiv:2204.12985"` -> `"2204.12985"`; no colon -> unchanged.
 pub fn strip_namespace(source_id: &str) -> String {
     source_id
         .split_once(':')
@@ -49,8 +44,8 @@ pub const OPENALEX_ID_PREFIX: &str = "openalex:";
 pub const DOI_ID_PREFIX: &str = "doi:";
 pub const LOCAL_ID_PREFIX: &str = "local:";
 
-/// The one home for `source_id` namespace construction (CONTEXT.md § source_id,
-/// ADR 0002). Sources build ids here so [`strip_namespace`] is the exact inverse.
+/// Namespaced `source_id` construction (CONTEXT.md § source_id, ADR 0002) —
+/// the inverse of [`strip_namespace`].
 pub fn arxiv_source_id(bare_id: &str) -> String {
     format!("{ARXIV_ID_PREFIX}{bare_id}")
 }
@@ -67,17 +62,14 @@ pub fn local_source_id(hash: &str) -> String {
     format!("{LOCAL_ID_PREFIX}{hash}")
 }
 
-/// Strip one leading provider prefix if present (`removeprefix` semantics —
-/// at most once, never mid-string), else return the id unchanged.
+/// Strip one leading provider prefix if present (at most once, never
+/// mid-string), else return the id unchanged.
 pub fn strip_provider_prefix<'a>(source_id: &'a str, prefix: &str) -> &'a str {
     source_id.strip_prefix(prefix).unwrap_or(source_id)
 }
 
-/// The `date.min` sentinel (`0001-01-01`) used to mark "no published date".
-/// [`date_min`] as `date_to_sql` stores it — the "no published date" sentinel.
-/// It is the smallest representable date, so it sinks on its own under DESC but
-/// would otherwise head the list under ASC, and it reads as a real date in year
-/// 1 to anything that forwards the column raw.
+/// The `0001-01-01` sentinel marking "no published date": smallest date, so it
+/// sinks under DESC but reads as a real year-1 date wherever forwarded raw.
 pub const NO_PUBLISHED_DATE: &str = "0001-01-01";
 
 pub(crate) fn date_min() -> NaiveDate {
@@ -85,13 +77,13 @@ pub(crate) fn date_min() -> NaiveDate {
 }
 
 // ---------------------------------------------------------------------------
-// PaperMetadata — normalized, source-agnostic record (sources/base.py)
+// PaperMetadata — normalized, source-agnostic record
 // ---------------------------------------------------------------------------
 
-/// Normalized paper representation produced by every Provider module.
-/// `categories`/`tags` stay `Option` here (pydantic `list[str] | None`),
-/// unlike the DB-row `PaperDetails` where they default to an empty `Vec`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Normalized paper shape the `sources/` fetchers produce.
+/// `categories`/`tags` stay `Option` here, unlike the DB-row `PaperDetails`
+/// where they default to an empty `Vec`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct PaperMetadata {
     /// Namespaced ID, e.g. "arxiv:2204.12985", "openalex:W31...", "local:{hash}".
     pub source_id: String,
@@ -117,11 +109,11 @@ pub struct PaperMetadata {
     pub url: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Backend that produced this record (must equal that source's `source_name`).
+    /// Backend that produced this record; stored as PAPER_META.PROVIDER.
     #[serde(default)]
     pub source: Option<String>,
     /// Index-aligned with `authors` (same length when present); `None` per-author
-    /// where the source didn't carry one. Only crossref/openalex populate this.
+    /// where the source didn't carry one. crossref/openalex + import set it.
     #[serde(default)]
     pub author_orcids: Option<Vec<Option<String>>>,
 }
@@ -155,7 +147,7 @@ fn is_orcid_shaped(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// SERIALIZER 1 — SearchResultOut (api/app.py SearchResultOut.from_metadata)
+// SERIALIZER 1 — SearchResultOut
 // ---------------------------------------------------------------------------
 
 /// Search-result wire shape. D16: distinct from `PaperDetails`; do not unify.
@@ -166,11 +158,11 @@ pub struct SearchResultOut {
     pub title: String,
     pub summary: String,
     pub authors: Vec<String>,
-    /// "" when the published date is the `date.min` sentinel; else ISO date.
+    /// "" when published is the `0001-01-01` sentinel; else ISO date.
     pub published: String,
     pub paper_url: String,
     pub primary_category: String,
-    /// The full namespaced source_id (kept, unlike the stripped `source_id`).
+    /// The `source_id` verbatim; `source_id` above is namespace-stripped.
     pub entry_id: String,
 }
 
@@ -194,13 +186,68 @@ impl From<PaperMetadata> for SearchResultOut {
     }
 }
 
+/// `POST /api/arxiv/search` envelope (route/sources.rs).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ArxivSearchResponse {
+    pub results: Vec<SearchResultOut>,
+    /// Which results the library already holds (stripped ids).
+    pub saved_source_ids: Vec<String>,
+}
+
+/// `POST /api/arxiv/fetch` envelope (route/sources.rs).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ArxivFetchResponse {
+    pub paper: SearchResultOut,
+    pub saved: bool,
+    /// Stripped id — the stored id when saved, else the fetched one.
+    pub source_id: String,
+}
+
+/// `POST /api/openalex/search` envelope (route/sources.rs).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct OpenAlexSearchResponse {
+    pub results: Vec<SearchResultOut>,
+    /// Which results the library already holds (stripped ids).
+    pub saved_source_ids: Vec<String>,
+}
+
+/// `POST /api/openalex/save` envelope (route/sources.rs); `source_id` is the stripped stored id.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct OpenAlexSaveResponse {
+    pub saved: bool,
+    pub source_id: String,
+}
+
+/// `POST /api/crossref/search` envelope (route/sources.rs) — no frontend caller, so not TS-exported.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CrossrefSearchResponse {
+    pub results: Vec<SearchResultOut>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct DoiResolveResponse {
+    pub metadata: PaperMetadata,
+}
+
+/// `POST /api/doi/save` envelope — one shape for route, CLI, and MCP `save_doi`.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct DoiSaveResponse {
+    pub metadata: PaperMetadata,
+    pub saved: bool,
+}
+
+/// `{"ok": true}` — the bare acknowledgement for writes with nothing else to report.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct OkReceipt {
+    pub ok: bool,
+}
+
 // ---------------------------------------------------------------------------
-// SERIALIZER 2 — PaperDetails (service/models/paper.py PaperDetails.to_dict)
+// SERIALIZER 2 — PaperDetails
 // ---------------------------------------------------------------------------
 
 /// Full paper view. D16: distinct from `SearchResultOut`; do not unify.
-/// `published`/`updated` are `Option<NaiveDate>` -> ISO string or `null`,
-/// matching `to_dict`'s `.isoformat() if d else None`.
+/// `published`/`updated` are `Option<NaiveDate>` -> ISO string or `null`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct PaperDetails {
     pub paper_id: i64,
@@ -248,8 +295,8 @@ pub struct PaperDetails {
     pub source_fk: i64,
 }
 
-/// Aggregate view of a paper across all stored versions (PaperDetailsAll).
-/// Display fields come from the latest version; `versions` is oldest-first.
+/// Aggregate of all stored versions. Latest version's display fields, except
+/// `published` (oldest); `versions` is oldest-first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperDetailsAll {
     pub source_id: String,
@@ -284,7 +331,7 @@ pub struct PaperDetailsAll {
 }
 
 // ---------------------------------------------------------------------------
-// Authors (service/models/author.py)
+// Authors
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -300,7 +347,7 @@ pub struct BasicAuthorDetails {
     pub last_name: Option<String>,
 }
 
-/// `AuthorWithCount(BasicAuthorDetails)` — flattened base + `paper_count`.
+/// Flattened `BasicAuthorDetails` base + `paper_count`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AuthorWithCount {
     #[serde(flatten)]
@@ -326,8 +373,8 @@ pub struct AuthorPaperPreview {
     pub title: Option<String>,
 }
 
-/// `{**author, paper_count, papers}` — the author-detail composite every surface
-/// (route GET/PATCH, `linxiv author get`, MCP `get_author`) emits.
+/// Flattened author + `paper_count` + `papers` — the author-detail composite every
+/// surface (route GET/PATCH, `linxiv author get`, MCP `get_author`) emits.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct AuthorWithPapers {
     #[serde(flatten)]
@@ -336,11 +383,24 @@ pub struct AuthorWithPapers {
     pub papers: Vec<AuthorPaperPreview>,
 }
 
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct AuthorsResponse {
+    pub authors: Vec<AuthorWithCount>,
+}
+
+/// `POST /api/authors/{id}/merge` envelope (route/authors.rs) — canonical detail + folded-in ids.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct AuthorMergeResponse {
+    #[serde(flatten)]
+    pub detail: AuthorWithPapers,
+    pub merged_ids: Vec<i64>,
+}
+
 // ---------------------------------------------------------------------------
-// Project (service/models/project.py)
+// Project
 // ---------------------------------------------------------------------------
 
-/// Literal["active","archived","deleted"] — validates at deserialize.
+/// One of "active"/"archived"/"deleted" — validates at deserialize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -390,16 +450,16 @@ pub struct ProjectDetails {
     pub updated_at: Option<NaiveDateTime>,
     #[serde(default)]
     pub archived_at: Option<NaiveDateTime>,
-    /// Persisted share identity (uuid v4); NULL until first publish.
+    /// Share identity (uuid v4); NULL until publish or import.
     #[serde(default)]
     pub share_id: Option<String>,
 }
 
 // SERIALIZER 3 — ProjectOut: the one project wire shape, emitted identically by
 // the route, the CLI and MCP (ADR-0011 scope). `ProjectDetails` itself is
-// deliberately NOT Serialize so no surface can bypass this shape. Produced only
-// via `service::project::to_out`, which resolves `source_fks` → namespaced
-// `source_ids` and renders `color` as `color_hex`.
+// deliberately NOT Serialize so no surface can bypass this shape. Built only by
+// `service::project::to_out{,_many}`: `source_fks` → namespaced `source_ids`,
+// `color` → `color_hex`.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct ProjectOut {
     /// Never null: `ProjectDetails.id` is optional only because that struct
@@ -418,8 +478,26 @@ pub struct ProjectOut {
     pub share_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ProjectsResponse {
+    pub projects: Vec<ProjectOut>,
+}
+
+/// `POST /api/projects` envelope (route/projects.rs) — a bare id/name stub, not a full `ProjectOut`.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CreatedProject {
+    #[ts(inline)]
+    pub project: CreatedProjectRef,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CreatedProjectRef {
+    pub id: i64,
+    pub name: String,
+}
+
 // ---------------------------------------------------------------------------
-// Note (service/models/note.py) — `note_id` serializes as "id"
+// Note — `note_id` serializes as "id"
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -467,8 +545,8 @@ pub struct AnnotationDetails {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// Reject an empty/whitespace-only or over-cap ANCHOR. Returns the message each
-/// write boundary surfaces in its own error type; cap is 64 KiB.
+/// Reject an empty/whitespace-only or over-cap (64 KiB) ANCHOR. The live write
+/// boundary raises the message; imports skip the row instead.
 pub fn validate_anchor(anchor: &str) -> std::result::Result<(), &'static str> {
     if anchor.trim().is_empty() {
         return Err("anchor must not be empty");
@@ -520,7 +598,7 @@ pub struct AnnotationUpdateIn {
 }
 
 // ---------------------------------------------------------------------------
-// Tag (service/models/tag.py)
+// Tag
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,14 +609,13 @@ pub struct TagDetails {
 }
 
 // ---------------------------------------------------------------------------
-// Service input DTOs (service/{author,tag,note,paper,project}.py *In classes)
+// Service input DTOs
 // ---------------------------------------------------------------------------
 
 /// D16 UNSET sentinel deserializer. Maps a JSON field's three states onto
 /// `Option<Option<T>>`: ABSENT -> `None` (unchanged), `null` -> `Some(None)`
 /// (clear), value -> `Some(Some(v))`. Pair with `#[serde(default, ...)]` so an
-/// absent key yields `None` (plain `Option<Option<T>>` would swallow `null`
-/// into `None`, collapsing clear and unchanged). Mirrors `project.py::Unset`.
+/// absent key yields `None`.
 fn de_unset<'de, T, D>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
@@ -547,7 +624,6 @@ where
     Ok(Some(Option::<T>::deserialize(de)?))
 }
 
-/// `service/author.py::AuthorIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthorIn {
     pub full_name: String,
@@ -559,13 +635,11 @@ pub struct AuthorIn {
     pub orcid: Option<String>,
 }
 
-/// `service/tag.py::TagIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TagIn {
     pub label: String,
 }
 
-/// `service/note.py::NoteIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NoteIn {
     pub source_fk: i64,
@@ -580,10 +654,8 @@ pub struct NoteIn {
     pub uuid: Option<String>,
 }
 
-/// `service/note.py::NoteUpdateIn`. title/content are non-nullable columns:
-/// absent and null both mean "unchanged" (plain `Option`), so no UNSET sentinel
-/// here — mirrors Python where `None` means "not provided". Service enforces
-/// "at least one of title/content provided" (Python `__post_init__`).
+/// title/content can never be cleared, so absent and null both mean "unchanged"
+/// (plain `Option`, no UNSET). Service enforces at least one provided.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NoteUpdateIn {
     pub note_id: i64,
@@ -593,7 +665,6 @@ pub struct NoteUpdateIn {
     pub content: Option<String>,
 }
 
-/// `service/paper.py::PaperIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaperIn {
     pub title: String,
@@ -618,7 +689,6 @@ pub struct PaperIn {
     pub source: Option<String>,
 }
 
-/// `service/project.py::ProjectIn`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectIn {
     pub name: String,
@@ -632,10 +702,8 @@ pub struct ProjectIn {
     pub source_fks: Vec<i64>,
 }
 
-/// `service/project.py::update(...)` as a PATCH DTO. `color` is the D16 UNSET
-/// case: absent -> unchanged, `null` -> clear, value -> set (mirrors the
-/// `color: int | None | Unset = UNSET` signature). Other fields are plain
-/// `Option` (absent/null -> unchanged).
+/// Project PATCH DTO. `color` is the D16 UNSET case: absent -> unchanged, `null` ->
+/// clear, value -> set. Other fields are plain `Option` (absent/null -> unchanged).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectUpdateIn {
     pub project_fk: i64,
@@ -652,8 +720,8 @@ pub struct ProjectUpdateIn {
 }
 
 // ---------------------------------------------------------------------------
-// Checks — the only non-trivial logic here is SearchResultOut::from_metadata
-// (namespace strip, date.min sentinel, "" coalescing of url/category).
+// Checks — the parsers (`SearchResultOut::from`, `normalize_orcid`, Status,
+// the D16 UNSET color) and the pinned wire shapes.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -676,7 +744,7 @@ mod tests {
         assert!(!is_arxiv_source_id(&openalex_source_id("W123")));
         assert!(!is_arxiv_source_id(&doi_source_id("10.1000/xyz")));
         assert!(!is_arxiv_source_id(&local_source_id("deadbeef")));
-        // removeprefix semantics: at most one leading prefix comes off.
+        // At most one leading prefix comes off.
         assert_eq!(strip_provider_prefix("doi:doi:1", DOI_ID_PREFIX), "doi:1");
         assert_eq!(
             strip_provider_prefix("10.1000/xyz", DOI_ID_PREFIX),

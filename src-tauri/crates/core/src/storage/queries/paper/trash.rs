@@ -23,9 +23,8 @@ fn latest_pdf_path(tx: &Transaction, source_id: &str) -> Result<Option<String>> 
         .flatten())
 }
 
-/// `soft_delete_paper` — STATUS='deleted', drop the FTS entry. Returns the stored
-/// PDF_PATH so the caller can unlink the file (filesystem side-effects + the
-/// post-unlink HAS_PDF=0 reset are service-layer, not DB consistency).
+/// STATUS='deleted', drop the FTS entry. Returns the stored PDF_PATH so the
+/// caller can unlink the file (filesystem side-effects are service-layer).
 pub fn soft_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
         let path = latest_pdf_path(tx, source_id)?;
@@ -39,7 +38,7 @@ pub fn soft_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Optio
     })
 }
 
-/// `restore_paper` — STATUS='active', and rebuild the FTS entry that
+/// Set STATUS='active' and rebuild the FTS entry that
 /// `soft_delete_paper` dropped. Returns the stored PDF_PATH (the file may be gone).
 pub fn restore_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
@@ -61,8 +60,7 @@ pub fn restore_paper(conn: &mut Connection, source_id: &str) -> Result<Option<St
     })
 }
 
-/// `hard_delete_paper` — permanently delete the root; PAPER/PAPER_META/
-/// PAPER_TO_TAG/PAPER_TO_AUTHOR/PROJECT_TO_PAPER cascade off the FK (PRAGMA ON).
+/// Permanently delete the root; dependent tables cascade off the FK (PRAGMA ON).
 /// AUTHOR orphans are intentionally NOT cleaned (ADR-0009). Returns the latest
 /// PDF_PATH for the caller to unlink.
 pub fn hard_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
@@ -74,7 +72,7 @@ pub fn hard_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Optio
     })
 }
 
-/// `is_paper_deleted` — true if a PAPER_ROOTS row exists with STATUS='deleted'.
+/// True if a PAPER_ROOTS row exists with STATUS='deleted'.
 pub fn is_paper_deleted(conn: &Connection, source_id: &str) -> Result<bool> {
     let row: Option<i64> = conn
         .query_row(
@@ -122,7 +120,7 @@ pub struct DeletedPaper {
     pub had_pdf: bool,
 }
 
-/// `list_deleted_papers` — all soft-deleted papers, newest-deleted first.
+/// All soft-deleted papers, newest-deleted first.
 pub fn list_deleted_papers(conn: &Connection) -> Result<Vec<DeletedPaper>> {
     let mut stmt = conn.prepare("SELECT * FROM deleted_papers ORDER BY deleted_at DESC")?;
     let mut rows = stmt.query([])?;

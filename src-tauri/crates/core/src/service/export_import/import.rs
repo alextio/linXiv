@@ -36,11 +36,11 @@ pub fn preview_from_manifest(manifest: &Manifest) -> ImportPreview {
     }
 }
 
-/// Two-phase commit over an already-decoded manifest + decoded PDF bytes. Creates a
-/// fresh project, imports papers (merge/overwrite), links them, writes bundled PDFs,
-/// then imports notes. On ANY failure the project is soft-deleted (trash) and a
-/// `CoreError::ProjectImport` is returned — papers saved before the failure remain
-/// (Python parity). Returns the new project_fk.
+/// Two-phase commit over an already-decoded manifest + PDF bytes. Creates the
+/// project, imports papers (merge/overwrite), links them, writes bundled PDFs,
+/// then notes and annotations. On ANY failure the project is soft-deleted (trash)
+/// and `CoreError::ProjectImport` is returned — papers saved before the failure
+/// remain. Returns the new project_fk.
 pub fn commit_from_manifest(
     conn: &mut Connection,
     manifest: &Manifest,
@@ -76,7 +76,7 @@ pub fn commit_from_manifest(
             Ok(project_fk)
         }
         Err(e) => {
-            // Trash the partially-built project (Python `_project.delete`).
+            // Trash the partially-built project.
             tracing::warn!("import failed, trashing project {project_fk}: {e}");
             let _ = project::delete(
                 conn,
@@ -113,8 +113,8 @@ fn commit_body(
                     // is not held to the Paper Repair input rules the front doors apply.
                     paper::repair_paper_unvalidated(conn, root.source_fk, &pe.to_metadata())?;
                 }
-                // UNION the archive paper's tags onto the existing paper (Python
-                // `_paper.add_paper_tags`) so a merge-import never discards them.
+                // UNION the archive paper's tags onto the existing paper so a
+                // merge-import never discards them.
                 if !pe.tags.is_empty() {
                     paper::add_paper_tags(conn, &source_id, &pe.tags)?;
                 }
@@ -155,7 +155,7 @@ fn commit_body(
 /// Write bundled PDFs into `pdf_dir` under their ARCHIVE basename
 /// (`{source_id}_v{version}.pdf` — kept verbatim, NOT the on-disk `v` form) and
 /// record the path on the matching paper version. A PDF naming a version that
-/// wasn't imported is skipped and its extracted file removed (Python parity).
+/// wasn't imported is skipped and its extracted file removed.
 pub(super) fn import_pdfs(
     conn: &mut Connection,
     pdfs: &[ArchivePdf],
@@ -185,11 +185,12 @@ pub(super) fn import_pdfs(
             .unwrap_or(&entry.archive_name);
         let dest = pdf_dir.join(basename);
         std::fs::write(&dest, &entry.bytes).map_err(|e| CoreError::Internal(e.to_string()))?;
+        crate::service::files::note_pdf_written(&dest, entry.bytes.len() as u64);
         let dest_str = dest.to_string_lossy().to_string();
 
         if let Err(e) = paper::mark_pdf_saved(conn, &name.source_id, &dest_str, name.version) {
             // Bundled PDF names a version that wasn't imported: drop the file, log, skip.
-            let _ = std::fs::remove_file(&dest);
+            crate::service::files::remove_pdf_counted(&dest);
             tracing::warn!("import: skipping PDF {basename}: {e}");
         }
     }

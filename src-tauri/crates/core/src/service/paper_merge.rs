@@ -1,12 +1,11 @@
 //! paper_merge service — the paper/PDF dedupe workflow's front door.
 //!
 //! Orchestrates [`storage::queries::paper::merge_plan`] /
-//! [`merge_paper_roots`] around the filesystem work, in the same shape as
-//! `paper_import`'s rollback philosophy:
+//! [`merge_paper_roots`] around the filesystem work:
 //!
 //! 1. Plan (read-only DB classification of the loser's versions).
 //! 2. FS phase: rename loser PDFs to the winner's on-disk names — reversible.
-//! 3. DB transaction: every dependent row re-pointed, loser root deleted.
+//! 3. DB transaction: rows re-pointed or collapsed, loser root deleted.
 //!    On failure the renames are undone (best-effort) and the error surfaces.
 //! 4. Post-commit only: unlink duplicate loser PDFs — the one irreversible
 //!    filesystem step goes last, and a failure there can no longer corrupt
@@ -17,9 +16,8 @@
 //!
 //! Accepted crash window (same class as `paper_import`'s rename-then-commit):
 //! a process kill between the FS renames and the DB commit leaves loser rows
-//! pointing at moved files. Nothing is lost — the files sit under the winner's
-//! on-disk names, and readers fall back from the stored path to the recomputed
-//! managed name — but a re-run is needed to reconcile the pointers.
+//! pointing at moved files. No bytes are lost — they sit under the winner's
+//! on-disk names — but a re-run is needed to reconcile the pointers.
 
 use crate::error::{CoreError, Result};
 use crate::service::paper::{pdf_on_disk_name, resolve_source_id, PaperRef};
@@ -54,12 +52,12 @@ pub struct MergeReceipt {
     /// Loser PDFs renamed to winner on-disk names in the managed dir.
     pub pdfs_renamed: usize,
     /// Loser PDFs that filled a PDF-less winner version — renamed in, or
-    /// pointed at in place when stored outside the managed dir.
+    /// pointed at in place when they cannot be moved.
     pub pdfs_adopted: usize,
     /// Duplicate loser PDFs unlinked after commit.
     pub pdfs_deleted: usize,
     /// Duplicate loser PDFs left on disk because they live outside the
-    /// managed PDF dir (never deleted there).
+    /// managed PDF dir.
     pub pdfs_kept_external: usize,
     /// Loser versions whose stored PDF path had no file behind it
     /// (transplants/adoptions found gone pre-rename, duplicates found gone
@@ -86,16 +84,15 @@ fn resolve_source_fk(conn: &Connection, paper: &PaperRef) -> Result<i64> {
     }
 }
 
-/// One executed (reversible) rename, kept so a failed DB phase can undo it.
+/// One executed (reversible) rename, kept so a later failure can undo it.
 struct DoneRename {
     from: PathBuf,
     to: PathBuf,
 }
 
-/// Merge the `loser` paper root into the `winner`: winner's metadata is
-/// canonical; the loser's notes, annotations, project memberships, reading
-/// statuses, tags, missing versions, and PDFs move over; the loser root is
-/// deleted. See the storage module for the exact row-level contract.
+/// Merge the `loser` paper root into the `winner`: winner's metadata is canonical;
+/// the loser's notes, annotations, memberships, reading statuses, tags, missing
+/// versions, and PDFs move over; the loser root is deleted (row-level contract in storage).
 pub fn merge_papers(
     conn: &mut Connection,
     pdf_dir: &Path,
@@ -115,8 +112,7 @@ pub fn merge_papers(
     let mut pdfs_adopted = 0usize;
     let mut pdfs_missing = 0usize;
 
-    // Never move a file that lives outside the managed PDF dir (a hand-linked
-    // or legacy path): keep it where it is and let the DB keep pointing at it.
+    // Canonical managed dir; None (unresolvable) makes every path external.
     let managed = fs::canonicalize(pdf_dir).ok();
     let mut rename_for = |version: i64,
                           from_str: &str,
@@ -135,10 +131,9 @@ pub fn merge_papers(
                 .and_then(|p| fs::canonicalize(p).ok())
                 .is_some_and(|p| p == m)
         });
-        // Keep the file where it is (DB points at it) when it must not be
-        // moved: it lives outside the managed dir, or an unrelated file (e.g.
-        // an orphan from a crashed import) already occupies the destination —
-        // rename() would silently destroy that file's bytes.
+        // Leave the file put (DB points at it) when it must not move: outside
+        // the managed dir, or an unrelated file (a crashed import's orphan)
+        // already holds the destination, which rename() would overwrite.
         if !inside_managed || (from != to.as_path() && to.exists()) {
             renames.push((version, from_str.to_owned()));
             if adopt {
@@ -147,7 +142,7 @@ pub fn merge_papers(
             return Ok(());
         }
         if from != to.as_path() {
-            fs::rename(from, &to).map_err(|e| {
+            crate::service::files::rename_pdf_counted(pdf_dir, from, &to).map_err(|e| {
                 CoreError::Internal(format!(
                     "merge_papers: renaming PDF {from:?} -> {to:?} failed: {e}"
                 ))
@@ -183,14 +178,14 @@ pub fn merge_papers(
         }
     }
     if let Err(e) = fs_result {
-        return Err(fold_undo_failures(e, undo_renames(&done)));
+        return Err(fold_undo_failures(e, undo_renames(pdf_dir, &done)));
     }
 
     // ── DB phase ────────────────────────────────────────────────────────────
     let stats: MergeStats = match store::merge_paper_roots(conn, &plan, &renames) {
         Ok(s) => s,
         Err(e) => {
-            return Err(fold_undo_failures(e, undo_renames(&done)));
+            return Err(fold_undo_failures(e, undo_renames(pdf_dir, &done)));
         }
     };
 
@@ -246,10 +241,10 @@ pub fn merge_papers(
 
 /// Reverse the FS phase, reporting what could NOT be restored (the caller
 /// folds failures into its error instead of silently losing them).
-fn undo_renames(done: &[DoneRename]) -> Vec<String> {
+fn undo_renames(pdf_dir: &Path, done: &[DoneRename]) -> Vec<String> {
     let mut failed = Vec::new();
     for r in done.iter().rev() {
-        if let Err(e) = fs::rename(&r.to, &r.from) {
+        if let Err(e) = crate::service::files::rename_pdf_counted(pdf_dir, &r.to, &r.from) {
             failed.push(format!("{:?} -> {:?}: {e}", r.to, r.from));
         }
     }
@@ -343,7 +338,7 @@ mod tests {
         assert_eq!(r.pdfs_deleted, 1); // duplicate v1
         assert_eq!(r.pdfs_missing, 0);
 
-        // Filesystem: winner names exist with the loser's bytes; loser names gone.
+        // Filesystem: all three under winner names; the loser's names are gone.
         let read = |n: &str| fs::read_to_string(dir.path().join(n)).unwrap();
         assert_eq!(read("arxiv_Wv1.pdf"), "winner-v1");
         assert_eq!(read("arxiv_Wv2.pdf"), "adopt-me");
@@ -367,6 +362,33 @@ mod tests {
         assert_eq!(row(1), (expect("arxiv_Wv1.pdf"), true));
         assert_eq!(row(2), (expect("arxiv_Wv2.pdf"), true));
         assert_eq!(row(3), (expect("arxiv_Wv3.pdf"), true));
+    }
+
+    /// The rename must move the storage-cache entry with the file: a phantom entry
+    /// only skews the total once the renamed PDF is deleted — assert there.
+    #[test]
+    fn merge_renames_keep_the_pdf_storage_cache_in_sync() {
+        use crate::service::files::{delete_pdf, pdf_storage_bytes};
+        let dir = tempdir().unwrap();
+        let (mut conn, w, _l) = seeded(dir.path());
+        assert!(pdf_storage_bytes(dir.path()) > 0); // seed the cache pre-merge
+
+        merge_papers(
+            &mut conn,
+            dir.path(),
+            &PaperRef::SourceFk(w),
+            &PaperRef::source("local:L".into()),
+        )
+        .unwrap();
+
+        let renamed = dir.path().join("arxiv_Wv2.pdf");
+        assert!(delete_pdf(dir.path(), &renamed.to_string_lossy()));
+        // Fresh walk with the production filter (.pdf files only), so the
+        // comparison holds the real counting semantics, not read_dir's.
+        let walk: u64 = crate::service::files::walk_pdf_files(dir.path())
+            .values()
+            .sum();
+        assert_eq!(pdf_storage_bytes(dir.path()), walk);
     }
 
     #[test]
@@ -496,9 +518,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&expected).unwrap(), "the-only-real-copy");
     }
 
-    /// An unrelated file already at the destination name (orphan of a crashed
-    /// import) must never be overwritten: the loser file stays put and the DB
-    /// points at it in place.
+    /// An unrelated file already at the destination name (orphan of a crashed import)
+    /// must never be overwritten: the loser file stays put and the DB points at it in place.
     #[test]
     fn merge_never_overwrites_an_orphan_at_the_destination_name() {
         let dir = tempdir().unwrap();
@@ -549,7 +570,7 @@ mod tests {
             from: dir.path().join("orig2.pdf"),
             to: dir.path().join("never-existed.pdf"),
         };
-        let failed = undo_renames(&[restorable, gone]);
+        let failed = undo_renames(dir.path(), &[restorable, gone]);
         assert_eq!(failed.len(), 1);
         assert!(dir.path().join("orig.pdf").is_file());
 

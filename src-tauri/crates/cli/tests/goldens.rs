@@ -1,13 +1,5 @@
-//! Runs the frozen CLI goldens in `goldens/cli/` against the built binary.
-//!
-//! `.json` goldens are a byte-for-byte contract: each is one command's stdout on an
-//! EMPTY database, keys in Python-parity insertion order (serde_json `preserve_order`).
-//! Parsing them before comparing would silently accept a key-order regression, so we
-//! compare bytes. Every capture gets its own fresh `LINXIV_DATA_DIR`.
-//!
-//! `.txt` goldens are still frozen *argparse* text while the CLI is clap, so byte
-//! comparison is impossible. We assert structure instead: the command set matches
-//! both ways, and every long flag the golden names still exists.
+//! Frozen CLI goldens (`goldens/cli/`): `.json` are a byte-for-byte stdout contract
+//! on an empty DB (key order matters); `.txt` are pre-clap help text, checked structurally.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,7 +20,7 @@ fn goldens_with_extension(ext: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// `tag_list-all.json` -> `["tag", "list-all"]`.
+/// `tag_list-all` -> `["tag", "list-all"]`.
 fn argv_from_slug(slug: &str) -> Vec<&str> {
     if slug.is_empty() {
         vec![]
@@ -112,7 +104,7 @@ fn json_goldens_match_byte_for_byte() {
     }
 }
 
-/// A bare `assert_eq!` on two multi-KB strings is unreadable; point at the line.
+/// `assert_eq!` on whole blobs hides where they diverge; point at the line.
 fn describe_diff(expected: &str, actual: &str) -> String {
     let exp: Vec<&str> = expected.lines().collect();
     let act: Vec<&str> = actual.lines().collect();
@@ -125,7 +117,7 @@ fn describe_diff(expected: &str, actual: &str) -> String {
             exp.get(i).unwrap_or(&"<end of output>"),
             act.get(i).unwrap_or(&"<end of output>"),
         ),
-        // Same lines but unequal strings: trailing-newline difference.
+        // Same lines, unequal strings: whitespace-only difference.
         None => "  lines are identical; trailing whitespace differs\n".to_string(),
     };
     msg.push_str(&format!(

@@ -1,22 +1,15 @@
-// The cytoscape stylesheet, resolved from the app's live theme.
-//
-// The graph used to be a separate document with its own copy of the palette,
-// which went stale silently every time src/lib/theme.ts gained a preset. It is
-// part of the bundle now, so it reads `ThemeColors` directly — the same value
-// every other surface in the app is painted from.
+// The cytoscape stylesheet, resolved from the same live `ThemeColors` every
+// other surface is painted from.
 
 import type { StylesheetJson } from "cytoscape";
 import type { ThemeColors } from "../theme.ts";
 
-/**
- * Authors get no colour of their own because theme.ts has no fourth semantic
- * token. Node type is also encoded by SHAPE (paper = ellipse, author = diamond,
- * tag = roundrectangle), so this fixed hue only has to read as "not the accent".
- */
+/** Authors get no theme colour: `ThemeColors` has no fourth semantic token.
+ *  Type is also carried by shape (paper ellipse, author diamond, tag
+ *  round-rectangle), so this fixed hue only has to read as "not the accent". */
 export const AUTHOR_COLOR = "#e8a838";
 
-/** The app's own stack, from src/styles/globals.css. Cytoscape wants a bare CSS
- *  font-family string, so no quoting. */
+/** The app's own stack from globals.css; cytoscape wants it bare, unquoted. */
 export const LABEL_FONT_FAMILY = "Inter";
 export const LABEL_FONT = `${LABEL_FONT_FAMILY}, system-ui, sans-serif`;
 /** Longest a stalled webfont request may hold up the first render. */
@@ -97,20 +90,18 @@ export function graphStylesheet(t: ThemeColors): StylesheetJson {
         shape: "round-rectangle",
         width: "label",
         height: 20,
-        // A single length, NOT the CSS `0 7px` shorthand this was ported as.
-        // cytoscape's `padding` is one `sizeMaybePercent`; a two-token string
-        // misses its unit regex and then falls through to `parseFloat`, which
-        // reads "0 7px" as 0 and accepts it silently — no warning, and every tag
-        // chip drawn hard against its own label, since `width: "label"` makes the
-        // chip exactly as wide as the text. The explicit height above is what
-        // keeps this from padding the chip vertically too.
+        // One length, NOT the CSS `0 7px` shorthand this was ported as:
+        // cytoscape's `padding` is a single `sizeMaybePercent`, so a two-token
+        // string misses its unit regex, silently parseFloats to 0, and — with
+        // `width: "label"` — draws each chip hard against its text. The explicit
+        // height above stops this from padding vertically too.
         padding: "7px",
         "background-color": tagColor(t),
         label: "data(label)",
         "font-size": 12,
         "font-weight": 600,
-        // Label sits inside the chip: white text over a neutral scrim, so it
-        // stays readable whatever hue --color-success resolves to.
+        // Label sits inside the chip: white on a neutral scrim, readable
+        // whatever hue `t.success` is.
         color: "#ffffff",
         "text-outline-color": "rgba(0,0,0,0.55)",
         "text-outline-width": 1.5,
@@ -134,20 +125,17 @@ export function graphStylesheet(t: ThemeColors): StylesheetJson {
 }
 
 /**
- * Cytoscape measures every node label on an offscreen canvas with `ctx.font` and
- * caches the result on the RENDERER, keyed by the label text plus the font style
- * properties — not by whether the family had actually arrived. Inter is a
- * self-hosted webfont, so on a cold load the labels can all be measured in the
- * fallback face and keep those widths for the rest of the session: tag chips
- * (`width: 'label'`) come out the wrong size and `text-max-width` ellipsizes at
- * the wrong point. Reinstalling the stylesheet later does NOT help, so the fix
- * is to have the face in hand before the first render.
+ * Cytoscape caches label measurements on the RENDERER, keyed by text plus font
+ * style and not by whether the family had arrived. Inter is a self-hosted
+ * webfont, so on a cold load every label can be measured in the fallback face
+ * and keep that width all session: tag chips (`width: 'label'`) size wrong and
+ * `text-max-width` ellipsizes at the wrong point. Reinstalling the stylesheet
+ * later does NOT help — have the face in hand before the first render.
  */
 export function whenLabelFontReady(): Promise<void> {
   const fonts = typeof document === "undefined" ? null : document.fonts;
   if (!fonts?.load) return Promise.resolve();
-  // Never let a stalled font request hold the canvas hostage: past the timeout
-  // the graph draws in the fallback face rather than not at all.
+  // Past the timeout, draw in the fallback face rather than not at all.
   return new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, FONT_LOAD_TIMEOUT_MS);
     const done = () => {
@@ -158,12 +146,9 @@ export function whenLabelFontReady(): Promise<void> {
   });
 }
 
-/**
- * The opacity one element is painted at.
- *
- * Filtered out → the filter dim (0 under isolate); selected → full; visible but
- * unselected while something IS selected → a softer dim; otherwise full.
- */
+/** The opacity one element is painted at: filtered out → the filter dim (0
+ *  under isolate); selected → full; visible but unselected while something IS
+ *  selected → a softer dim; otherwise full. */
 export function opacityFor(
   filterVisible: boolean,
   selected: boolean,
@@ -176,12 +161,11 @@ export function opacityFor(
 }
 
 /**
- * Cytoscape decides what a click can land on from `events` / `visibility` /
- * `display` and never from opacity, so an element the isolate filter has taken
- * to opacity 0 stays fully hit-testable: tapping apparently blank canvas
- * navigated to a paper the user could not see, dragged an invisible node, and
- * swallowed the background tap that clears the selection. Tie interactivity to
- * visibility instead.
+ * Cytoscape hit-tests from `events` / `visibility` / `display`, never opacity,
+ * so an element the isolate filter took to opacity 0 stays fully clickable:
+ * taps on apparently blank canvas navigated to papers the user couldn't see,
+ * dragged them, and ate the background tap that clears the selection. So gate
+ * `events` on opacity here.
  */
 export function eventsFor(opacity: number): "yes" | "no" {
   return opacity === 0 ? "no" : "yes";

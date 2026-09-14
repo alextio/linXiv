@@ -496,7 +496,7 @@ fn commit_rolls_back_project_when_a_paper_cannot_be_linked() {
         commit_from_manifest(&mut conn, &manifest, &[], OnConflict::Merge, tmp.path()).unwrap_err();
     assert!(matches!(err, CoreError::ProjectImport(_)));
 
-    // The project must NOT survive as active — it was trashed (Python `_project.delete`).
+    // The project must NOT survive as active — it was trashed.
     let active = project::get_many(
         &conn,
         &project::Projects {
@@ -746,10 +746,9 @@ fn commit_merge_unions_tags_onto_existing_paper() {
     assert_eq!(relational, 2);
 }
 
-/// SECURITY BOUNDARY. `route/share.rs` joins share ids onto `share_dir` at six
-/// call sites, so anything this accepts becomes a path component. The
-/// commit_adopts/rejects pair below only exercises it through the importer;
-/// this pins the validator itself.
+/// SECURITY BOUNDARY. Share ids become path components under `share_dir`, so
+/// anything this accepts lands in a file path. The commit_adopts/rejects pair
+/// below only exercises it through the importer; this pins the validator itself.
 #[test]
 fn valid_share_id_rejects_everything_that_could_escape_share_dir() {
     // A real share id — a uuid v4 — is the only shape that must pass.

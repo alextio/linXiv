@@ -1,9 +1,7 @@
-//! RSS feed pipeline — the one seam for the home feed (ADR-0010): async
-//! network fetch (`fetch`), sync cache apply (`apply_fetch`), the filtered
-//! read model (`read_page`), and the dismissal/rule mutations. Callers
-//! (route today, CLI/MCP later) sequence fetch → apply → read without ever
-//! touching `storage::queries::rss` or `sources::feed` directly; the
-//! fetch/apply split exists so no DB lock is held across the await.
+//! RSS feed pipeline — the one seam for the home feed (ADR-0010): async network
+//! fetch (`fetch`), sync cache apply (`apply_fetch`), the filtered read model
+//! (`read_page`), and the dismissal/rule mutations. Callers sequence
+//! fetch → apply → read; the split exists so no DB lock is held across the await.
 
 use std::path::Path;
 
@@ -24,15 +22,31 @@ pub struct FetchedFeed {
     pub entries: Vec<rss::CacheEntry>,
 }
 
-/// The filtered feed page: survivors of block/dismissal/rule filtering
-/// (recorded as seen), plus which of them are already in the library.
-/// `window_was_empty` reports the pre-filter DB window state, so a caller
-/// holding a fetch error can distinguish "nothing cached at all" (surface the
-/// error) from "everything filtered out" (serve the empty page).
+/// The filtered feed page: up to 200 survivors of block/dismissal/rule filtering
+/// (recorded as seen), plus which are already in the library. `window_was_empty`
+/// reports the pre-filter DB window: "nothing cached" vs "everything filtered out".
 pub struct FeedPage {
     pub entries: Vec<Value>,
     pub saved_arxiv_ids: Vec<String>,
     pub window_was_empty: bool,
+}
+
+/// `GET /api/feed` envelope; `entries` are untyped cached blobs, so the TS type stays hand-written.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FeedResponse {
+    pub title: String,
+    pub entries: Vec<Value>,
+    pub saved_arxiv_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct FeedRulesResponse {
+    pub rules: Vec<FilterRule>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct CreatedFeedRule {
+    pub rule_id: i64,
 }
 
 /// Parse a feed entry's `published` string (RSS is RFC 822, Atom is RFC 3339).
@@ -213,7 +227,6 @@ pub fn dismiss(conn: &Connection, arxiv_id: &str, version: i64, permanent: bool)
     rss::dismiss(conn, &format!("arxiv:{arxiv_id}"), version, permanent)
 }
 
-/// List auto-filter rules.
 pub fn list_rules(conn: &Connection) -> Result<Vec<FilterRule>> {
     rss::list_rules(conn)
 }
@@ -268,8 +281,8 @@ mod tests {
         );
     }
 
-    /// Dismissed versions drop out of the page; survivors are recorded as
-    /// seen; `window_was_empty` reflects the pre-filter window.
+    /// Dismissed versions drop out of the page; `window_was_empty` reflects
+    /// the pre-filter window.
     #[test]
     fn read_page_filters_dismissed_and_reports_raw_window() {
         let mut c = conn();

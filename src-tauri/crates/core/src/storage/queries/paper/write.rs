@@ -28,7 +28,7 @@ fn opt_date_val(d: &Option<NaiveDate>) -> Value {
     }
 }
 
-/// `_author_fk_for_name` — find (case-insensitive) or create an AUTHOR row.
+/// Find (case-insensitive) or create an AUTHOR row.
 fn author_fk_for_name(tx: &Transaction, full_name: &str) -> Result<i64> {
     if let Some(fk) = tx
         .prepare_cached(
@@ -44,11 +44,11 @@ fn author_fk_for_name(tx: &Transaction, full_name: &str) -> Result<i64> {
     Ok(tx.last_insert_rowid())
 }
 
-/// `_sync_paper_authors` — relational half of dual author storage. Replaces the
-/// PAPER_TO_AUTHOR rows for this paper, then garbage-collects AUTHOR rows that no
-/// paper references any more (ADR-0009: hard-delete leaves orphans, this does not).
-/// `author_orcids`, index-aligned with `authors` when present, fills a NULL
-/// ORCID only (never overwrites); inherits `author_fk_for_name`'s name-collision ceiling.
+/// Relational half of dual author storage: replaces the PAPER_TO_AUTHOR rows,
+/// then garbage-collects AUTHOR rows no paper references (ADR-0009).
+/// `author_orcids` (index-aligned with `authors`) fills a NULL ORCID only.
+/// GC only deletes bare rows — an ORCID-bearing or split-name row is kept even
+/// paperless, so manual edits never die to a respelled name.
 fn sync_paper_authors(
     tx: &Transaction,
     paper_id: i64,
@@ -67,8 +67,10 @@ fn sync_paper_authors(
         tx.prepare_cached("DELETE FROM PAPER_TO_AUTHOR WHERE PAPER_ID = ?")?
             .execute([paper_id])?;
     }
+    // OR IGNORE: metadata occasionally lists the same author twice; the
+    // unique link index keeps the first occurrence (and its AUTHOR_INDEX).
     let mut link = tx.prepare_cached(
-        "INSERT INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO PAPER_TO_AUTHOR (PAPER_ID, AUTHOR_FK, AUTHOR_INDEX) VALUES (?, ?, ?)",
     )?;
     let mut fill_orcid = tx.prepare_cached(
         "UPDATE AUTHOR SET AUTHOR_ORCID = ? WHERE AUTHOR_FK = ? AND AUTHOR_ORCID IS NULL",
@@ -88,6 +90,7 @@ fn sync_paper_authors(
         tx.execute(
             &format!(
                 "DELETE FROM AUTHOR WHERE AUTHOR_FK IN ({placeholders}) \
+                 AND AUTHOR_ORCID IS NULL AND AUTHOR_FIRST IS NULL AND AUTHOR_LAST IS NULL \
                  AND NOT EXISTS (SELECT 1 FROM PAPER_TO_AUTHOR \
                                  WHERE AUTHOR_FK = AUTHOR.AUTHOR_FK)"
             ),
@@ -97,8 +100,8 @@ fn sync_paper_authors(
     Ok(())
 }
 
-/// `_sync_paper_tags` — relational half of dual tag storage. Replaces the
-/// PAPER_TO_TAG rows (PAPER_ID + composite (SOURCE_ID, VERSION)) for this paper.
+/// Relational half of dual tag storage: replaces the PAPER_TO_TAG rows
+/// (PAPER_ID + composite (SOURCE_ID, VERSION)) for this paper.
 pub(super) fn sync_paper_tags(
     tx: &Transaction,
     paper_id: i64,
@@ -143,9 +146,9 @@ pub(super) fn sync_paper_tags_for_versions(
     Ok(())
 }
 
-/// `_insert_metadata`'s tag merge: union of the paper's own tags and the extra
-/// tags, deduped. `None`/empty extra leaves the paper's tags (incl. `None`)
-/// untouched — preserving the NULL-vs-`[]` distinction in PAPER_META.TAGS.
+/// Union of the paper's own tags and the extra tags, deduped. `None`/empty
+/// extra leaves the paper's tags (incl. `None`) untouched — preserving the
+/// NULL-vs-`[]` distinction in PAPER_META.TAGS.
 fn merge_tags(base: &Option<Vec<String>>, extra: Option<&[String]>) -> Option<Vec<String>> {
     match extra {
         Some(e) if !e.is_empty() => {
@@ -161,15 +164,11 @@ fn merge_tags(base: &Option<Vec<String>>, extra: Option<&[String]>) -> Option<Ve
     }
 }
 
-/// `_write_paper_version` — INSERT OR IGNORE one PAPER version + its PAPER_META,
-/// then sync the relational tag/author rows. A duplicate (SOURCE_ID, VERSION) is
-/// a no-op (matches Python's early return). `pdf_path`/`full_text`/
-/// `downloaded_source` are always NULL on this path; FTS is not touched here
-/// (full_text is None) — set_full_text/repair/restore own the FTS index.
-/// `extra_tags` are merged into the paper's own tags. tx-level, for callers that
-/// need the write to share a transaction with other statements of their own
-/// (e.g. version_monitor saving a new version and flagging it as checked as one
-/// atomic unit instead of two ordered-but-separate writes).
+/// INSERT OR IGNORE one PAPER version + its PAPER_META, then sync the relational
+/// tag/author rows; a duplicate (SOURCE_ID, VERSION) is a no-op.
+/// `pdf_path`/`full_text`/`downloaded_source` are always NULL here and FTS is
+/// untouched — set_full_text/repair/restore own the FTS index. tx-level so
+/// callers (e.g. version_monitor) can share one atomic transaction.
 pub(crate) fn write_paper_version_in_tx(
     tx: &Transaction,
     meta: &PaperMetadata,
@@ -177,8 +176,8 @@ pub(crate) fn write_paper_version_in_tx(
 ) -> Result<()> {
     let merged_tags = merge_tags(&meta.tags, extra_tags);
     let source_fk = ensure_paper_root_row(tx, &meta.source_id)?;
-    // UPDATED_AT is date('now'), not the column's datetime('now') default: the
-    // Python-era post-INSERT UPDATE stored date-only strings, kept for parity.
+    // UPDATED_AT is date('now'), not the column's datetime('now') default:
+    // legacy rows store date-only strings, kept for parity.
     let changed = tx.prepare_cached(
         "INSERT OR IGNORE INTO PAPER (SOURCE_ID, VERSION, TITLE, CATEGORY, HAS_PDF, SOURCE_FK, UPDATED_AT) \
          VALUES (?, ?, ?, ?, 0, ?, date('now'))",
@@ -227,9 +226,8 @@ pub(crate) fn write_paper_version_in_tx(
     Ok(())
 }
 
-/// `save_paper_metadata` — persist one paper version atomically (PAPER +
-/// PAPER_META + PAPER_ROOTS + dual tag/author sync). `extra_tags` are merged into
-/// the paper's own tags. Returns (source_id, version).
+/// Persist one paper version atomically (PAPER + PAPER_META + PAPER_ROOTS +
+/// dual tag/author sync); `extra_tags` merged in. Returns (source_id, version).
 pub fn save_paper_metadata(
     conn: &mut Connection,
     meta: &PaperMetadata,
@@ -239,10 +237,8 @@ pub fn save_paper_metadata(
     Ok((meta.source_id.clone(), meta.version))
 }
 
-/// `save_papers_metadata` — persist many paper versions in ONE transaction
-/// (bulk import/search-save paths pay one IMMEDIATE tx per batch instead of one
-/// per paper). All-or-nothing: an error rolls back the whole batch. Returns the
-/// source_ids in input order (duplicates included; a dup version is a no-op).
+/// Persist many paper versions in ONE transaction (one IMMEDIATE tx per batch).
+/// All-or-nothing. Returns the source_ids in input order (a dup version is a no-op).
 pub fn save_papers_metadata(conn: &mut Connection, metas: &[PaperMetadata]) -> Result<Vec<String>> {
     if metas.is_empty() {
         return Ok(Vec::new());
@@ -255,11 +251,10 @@ pub fn save_papers_metadata(conn: &mut Connection, metas: &[PaperMetadata]) -> R
     })
 }
 
-/// `db.add_paper_tags` — UNION `tags` onto a paper's existing tags across BOTH
-/// halves of dual tag storage: the JSON `PAPER_META.TAGS` list (all versions) and
-/// the relational `PAPER_TO_TAG` rows (re-synced per version). Dedup preserves
-/// first-seen order (Python `dict.fromkeys`). Returns the merged tag list. Errors
-/// if the paper has no latest version.
+/// UNION `tags` onto a paper's existing tags across BOTH halves of dual tag
+/// storage: the JSON `PAPER_META.TAGS` list (all versions) and the relational
+/// `PAPER_TO_TAG` rows (re-synced per version). Dedup preserves first-seen
+/// order. Returns the merged tag list; errors if the paper has no latest version.
 pub fn add_paper_tags(
     conn: &mut Connection,
     source_id: &str,
@@ -302,10 +297,9 @@ pub fn add_paper_tags(
     })
 }
 
-/// `db.remove_paper_tags` — remove `tags` from a paper across BOTH halves of dual
-/// tag storage: the JSON `PAPER_META.TAGS` list (all versions) and the relational
-/// `PAPER_TO_TAG` rows (re-synced per version). Returns the remaining tag list.
-/// Errors if the paper has no latest version. Symmetric with `add_paper_tags`.
+/// Remove `tags` from a paper across BOTH halves of dual tag storage (JSON list
+/// on all versions + relational rows re-synced per version). Returns the
+/// remaining tag list; errors if no latest version. Symmetric with `add_paper_tags`.
 pub fn remove_paper_tags(
     conn: &mut Connection,
     source_id: &str,
@@ -347,19 +341,14 @@ pub fn remove_paper_tags(
     })
 }
 
-/// `repair_paper` — in-place metadata repair keyed by the stable SOURCE_FK,
-/// migrating SOURCE_ID if the full id changed.
-///
-/// Composite-FK ORDER is load-bearing: PAPER.SOURCE_ID is renamed BEFORE
-/// PAPER_TO_TAG.SOURCE_ID (whose (SOURCE_ID, VERSION) FK references PAPER), then
-/// the FTS row is moved (DELETE old id + INSERT new id). Wrong order = FK
-/// violation or orphaned/duplicated FTS rows.
+/// In-place metadata repair keyed by the stable SOURCE_FK, migrating SOURCE_ID
+/// if the full id changed. FK checks are deferred to commit so the renames can
+/// land in any order; the FTS rebuild must follow them — it reads the new id.
 pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata) -> Result<()> {
     transaction(conn, |tx| {
         // Defer FK checks to commit: immediate FK rejects a parent-key rename
         // (PAPER.SOURCE_ID) while child rows (PAPER_TO_TAG) still reference the
-        // old value, no matter the statement order. Deferring lets the documented
-        // PAPER-first ordering land all renames before the single commit-time check.
+        // old value, no matter the statement order.
         tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
         let old_id: Option<String> = tx
             .query_row(
@@ -372,8 +361,6 @@ pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata)
         let new_id = &meta.source_id;
         let renamed = *new_id != old_id;
         if renamed {
-            // PAPER first (PAPER_TO_TAG's composite FK references it), then roots,
-            // then the PAPER_TO_TAG rename.
             tx.execute(
                 "UPDATE PAPER SET SOURCE_ID = ? WHERE SOURCE_FK = ?",
                 params![new_id, source_fk],
@@ -497,7 +484,7 @@ mod tests {
         let p = get_paper(&conn, "arxiv:B", None).unwrap().unwrap();
         assert_eq!(p.authors, vec!["Alice".to_string(), "Bob".to_string()]);
 
-        // UPDATED_AT keeps its Python-era date-only precision (now set in the
+        // UPDATED_AT keeps its legacy date-only precision (now set in the
         // INSERT rather than a follow-up UPDATE).
         let updated_at: String = conn
             .query_row("SELECT UPDATED_AT FROM PAPER LIMIT 1", [], |r| r.get(0))
@@ -535,6 +522,57 @@ mod tests {
         save_paper_metadata(&mut conn, &m2, None).unwrap();
         assert_eq!(orcid(&conn, "Alice").as_deref(), Some("0000-1")); // unchanged
         assert_eq!(orcid(&conn, "Bob").as_deref(), Some("0000-2")); // filled, was NULL
+    }
+
+    #[test]
+    fn author_gc_spares_manual_orcid_on_respelled_name() {
+        let mut conn = open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        save_paper_metadata(&mut conn, &meta("arxiv:X", 1), None).unwrap();
+        let source_fk = ensure_paper_root(&mut conn, "arxiv:X").unwrap();
+
+        // Manually set Alice's ORCID via the real manual-edit path.
+        let alice_fk: i64 = conn
+            .query_row(
+                "SELECT AUTHOR_FK FROM AUTHOR WHERE AUTHOR_FULL_NAME = 'Alice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        crate::storage::queries::author::update_author(
+            &conn,
+            alice_fk,
+            None,
+            None,
+            None,
+            Some("0000-7"),
+        )
+        .unwrap();
+
+        // Re-save with both names respelled: old spellings become paperless.
+        let mut m2 = meta("arxiv:X", 1);
+        m2.authors = vec!["Alicia".into(), "Robert".into()];
+        repair_paper(&mut conn, source_fk, &m2).unwrap();
+
+        // Alice's row holds a manually-set ORCID -> exempt from GC.
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM AUTHOR WHERE AUTHOR_FK = ? AND AUTHOR_ORCID = '0000-7'",
+                [alice_fk],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "manual ORCID row must survive a respelling");
+
+        // Bob's row held nothing beyond the auto-created name -> still GC'd.
+        let bob: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM AUTHOR WHERE AUTHOR_FULL_NAME = 'Bob'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bob, 0, "bare paperless rows are still garbage-collected");
     }
 
     #[test]

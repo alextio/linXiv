@@ -1,10 +1,6 @@
-//! Share transport: a thin wrapper over the vendored `linxiv-p2p` sync node.
-//!
-//! A [`ShareNode`] owns one iroh endpoint with a persisted device key and serves
-//! every locally-published doc (`share_dir/<id>.automerge`, top level only) over
-//! the p2p sync ALPN. Received mirrors live under `share_dir/received/`; the
-//! access check only allows ids whose doc file exists at the top level of
-//! `share_dir`.
+//! Share transport over the vendored `linxiv-p2p` node: on the share ALPN a
+//! [`ShareNode`] serves only top-level `share_dir/<id>.automerge` docs (access
+//! needs the file there); received mirrors are quarantined in `received/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,9 +49,8 @@ pub fn e2ee_received_dir(share_dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedInvite {
     pub share_id: String,
-    /// The host could not be reached, so the join is only half done: the invite
-    /// is parked and the mirror on disk is an empty placeholder. The interval
-    /// sync finishes it. General p2p limitations apply; membership not tracked.
+    /// Host unreachable, so the join is half done: parked invite, empty
+    /// placeholder mirror, finished by the interval sync.
     pub pending: bool,
 }
 
@@ -90,7 +85,6 @@ impl From<linxiv_p2p::SyncOutcome> for E2eeSyncOutcome {
 
 /// Raw doc bytes to `dir/<share_id>.automerge` via tmp+rename (mirror writes
 /// preserve remote CRDT history byte-for-byte, unlike `save`'s reconcile).
-#[cfg(feature = "sync-beelay")]
 fn write_doc_bytes(dir: &Path, share_id: &str, bytes: Vec<u8>) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{share_id}.automerge.tmp"));
@@ -117,7 +111,7 @@ pub fn member_id_hex(m: &MemberId) -> String {
     m.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Inverse of [`member_id_hex`]; `None` unless `s` is exactly 32 hex bytes.
+/// Inverse of [`member_id_hex`]; `None` unless `s` is 64 hex chars.
 #[cfg(feature = "sync-beelay")]
 pub fn member_id_from_hex(s: &str) -> Option<MemberId> {
     Some(MemberId(decode_hex(s)?.try_into().ok()?))
@@ -134,18 +128,15 @@ pub struct ShareNode {
 }
 
 impl ShareNode {
-    /// Production node: iroh n0 defaults (relay + discovery). `share_dir` is the
-    /// only directory served; `p2p_dir` holds the persisted device key.
+    /// Production node: iroh n0 defaults (relay + discovery). Serves only
+    /// `share_dir`; `p2p_dir` holds the key files + keyhive/beelay state.
     pub async fn bind(share_dir: impl Into<PathBuf>, p2p_dir: &Path) -> Result<Self> {
         Self::bind_inner(share_dir.into(), p2p_dir, false, None, None).await
     }
 
-    /// Like [`Self::bind`], but with `Some(dek)` the at-rest key files
-    /// (`device.key`, `auth.key`, keyhive `state.bin`) are AEAD-wrapped under
-    /// the 32-byte DEK; legacy plaintext files migrate encrypted once. The
-    /// DEK comes from the app (OS keychain / passphrase); `None` keeps
-    /// today's plaintext store. `relay` swaps in a self-hosted relay instead
-    /// of n0's public ones (Settings → Sharing); `None` keeps n0 defaults.
+    /// Like [`Self::bind`]; `Some(dek)` AEAD-wraps the at-rest key files under the
+    /// 32-byte DEK (legacy plaintext migrates once), `None` keeps plaintext.
+    /// `relay` swaps in a self-hosted relay; `None` keeps n0 defaults.
     #[cfg(feature = "sync-beelay")]
     pub async fn bind_with_dek(
         share_dir: impl Into<PathBuf>,
@@ -156,8 +147,7 @@ impl ShareNode {
         Self::bind_inner(share_dir.into(), p2p_dir, false, relay, dek).await
     }
 
-    /// Offline/hermetic node: no relays or discovery, direct addrs only. Used by
-    /// tests and any same-host transfer.
+    /// Offline/hermetic test node: no relays or discovery, direct addrs only.
     pub async fn bind_offline(share_dir: impl Into<PathBuf>, p2p_dir: &Path) -> Result<Self> {
         Self::bind_inner(share_dir.into(), p2p_dir, true, None, None).await
     }
@@ -215,9 +205,8 @@ impl ShareNode {
         .map_err(net)
     }
 
-    /// Plain sync + beelay + blobs on ONE endpoint. On a corrupt keyhive
-    /// state (or an auth key that won't decrypt), falls back to a plain bind
-    /// with no beelay node.
+    /// Plain sync + beelay + blobs on ONE endpoint. Corrupt keyhive state (or an
+    /// auth key that won't decrypt) falls back to a plain bind with no beelay node.
     #[cfg(feature = "sync-beelay")]
     async fn bind_stack(
         identity: &DeviceIdentity,
@@ -295,9 +284,8 @@ impl ShareNode {
         Ok(())
     }
 
-    /// (Re-)register `share_id` from its doc file, so the p2p registry serves the
-    /// latest published bytes. Missing file → `NotFound`. Reads and decodes the
-    /// doc off the async runtime via `spawn_blocking`.
+    /// (Re-)register `share_id` from its doc file so the registry serves the
+    /// latest bytes; missing file → `NotFound`. Reads/decodes via `spawn_blocking`.
     pub async fn refresh(&self, share_id: &str) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -320,10 +308,9 @@ impl ShareNode {
         Ok(())
     }
 
-    /// Register `share_id` from the just-reconciled doc `save()` returned,
-    /// skipping [`Self::refresh`]'s re-read and re-parse of the file that was
-    /// written moments ago. Callers must have `save()`d the doc first, or the
-    /// access check will refuse to serve it.
+    /// Register `share_id` from the doc `save()` returned, skipping
+    /// [`Self::refresh`]'s re-read. Callers must `save()` first, or the access
+    /// check refuses to serve it.
     pub fn register_doc(&self, share_id: &str, mut doc: automerge::AutoCommit) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -361,7 +348,7 @@ impl ShareNode {
             .doc(share_id)
             .ok_or_else(|| net("synced doc missing from registry"))?;
         let sp: SharedProject = autosurgeon::hydrate(&doc).map_err(super::crdt)?;
-        // The doc-internal share_id is attacker-controlled and feeds save()'s paths.
+        // The doc-internal share_id is host-controlled and feeds caller paths.
         if !valid_share_id(&sp.share_id) {
             return Err(net(format!("remote share_id is unsafe: {:?}", sp.share_id)));
         }
@@ -371,11 +358,11 @@ impl ShareNode {
                 sp.share_id
             )));
         }
-        // Namespaced mirror dir.
-        save(&received_dir(dest_share_dir), &sp)?;
+        // Namespaced mirror dir; raw bytes so the host's actors/timestamps
+        // survive instead of being re-authored as this device.
+        write_doc_bytes(&received_dir(dest_share_dir), share_id, doc.save())?;
         Ok(sp)
     }
-    ///TODO: Extra functionality needed here if heavyweight summary/CRDTs are posted
     /// Hydrate a received mirror by id from `dest_share_dir/received`.
     pub fn received(dest_share_dir: &Path, share_id: &str) -> Result<SharedProject> {
         if !valid_share_id(share_id) {
@@ -387,6 +374,23 @@ impl ShareNode {
     /// Summaries of every received mirror under `dest_share_dir/received`.
     pub fn list_received(dest_share_dir: &Path) -> Result<Vec<crate::SharedSummary>> {
         crate::list_shared(&received_dir(dest_share_dir))
+    }
+
+    /// This node's iroh endpoint id (the device's share identity), as hex.
+    pub fn endpoint_id(&self) -> String {
+        self.inner.endpoint_id().to_string()
+    }
+
+    /// The underlying iroh endpoint — Remote Query Mode's client half dials
+    /// remote nodes from it (one endpoint, never a second bind).
+    pub fn endpoint(&self) -> &linxiv_p2p::Endpoint {
+        self.inner.endpoint()
+    }
+
+    /// Remote Query Mode: installs the `linxiv-api/1` handler on this endpoint.
+    /// Headless-only; until installed, api-ALPN connections are refused.
+    pub fn set_api_protocol(&self, handler: Box<dyn linxiv_p2p::DynProtocolHandler>) {
+        self.inner.set_api_protocol(handler);
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -415,9 +419,8 @@ impl ShareNode {
         })
     }
 
-    /// Publish (or republish) a project as an e2ee share: evolve the doc file
-    /// under `share_dir/e2ee`, then register it with (or merge it into) the
-    /// beelay engine. Content is encrypted lazily at invite/sync time.
+    /// Publish (or republish) a project as an e2ee share: evolve the doc under
+    /// `share_dir/e2ee`, then register/merge in beelay; encrypts at invite/sync.
     pub async fn publish_secure(&self, sp: &SharedProject) -> Result<()> {
         let beelay = self.beelay()?;
         if !valid_share_id(&sp.share_id) {
@@ -460,10 +463,8 @@ impl ShareNode {
         Ok(card.iter().map(|b| format!("{b:02x}")).collect())
     }
 
-    /// Grant the device behind `member_code` `role` on an e2ee share, then
-    /// mint its pasteable invite. Returns the member id (keep it: it is the
-    /// handle for [`ShareNode::revoke`] / [`ShareNode::query_role`]) and the
-    /// invite string.
+    /// Grant the device behind `member_code` `role` on an e2ee share and mint
+    /// its invite. Returns the member id (the revoke/query_role handle) + invite.
     pub async fn invite_member(
         &self,
         share_id: &str,
@@ -533,10 +534,8 @@ impl ShareNode {
             .map_err(net)
     }
 
-    /// Change a member's role on an e2ee share (viewer ↔ editor). The
-    /// capability layer revokes + regrants under the hood; a downgrade also
-    /// rotates the project key (PCS), so the caller should re-key stored
-    /// blobs afterwards. Refusing to drop the doc's last reader surfaces as
+    /// Change a member's role. A downgrade rotates the project key (PCS) — re-key
+    /// stored blobs afterwards. Dropping the doc's last reader surfaces as
     /// [`ShareError::LastReader`].
     pub async fn set_role(&self, share_id: &str, member: MemberId, role: Role) -> Result<()> {
         if !valid_share_id(share_id) {
@@ -564,10 +563,8 @@ impl ShareNode {
             .map_err(net)
     }
 
-    /// Encrypt `bytes` under the share key and serve them as a blob; returns
-    /// a pasteable ticket. Storage caps are the caller's job — the blobs API
-    /// exposes no size before fetch, so enforce limits before persisting a
-    /// [`ShareNode::read_pdf_blob`] result.
+    /// Encrypt `bytes` under the share key and serve them as a blob; returns a
+    /// pasteable ticket. Size caps are the caller's job (no size before fetch).
     pub async fn store_pdf_blob(&self, share_id: &str, bytes: &[u8]) -> Result<String> {
         self.beelay()?
             .store_blob(share_id, bytes)
@@ -612,8 +609,7 @@ impl ShareNode {
     /// `share_dir/e2ee/received`. An unreachable host is not an error.
     pub async fn accept_invite(&self, invite: &str) -> Result<AcceptedInvite> {
         let beelay = self.beelay()?;
-        // The invite's project id feeds file paths below; reject unsafe ids
-        // before adopting anything.
+        // The invite's project id feeds file paths below; reject it first.
         let parsed: linxiv_p2p::ProjectInvite = invite.parse().map_err(net)?;
         if !valid_share_id(parsed.project_id()) {
             return Err(net(format!(
@@ -622,13 +618,11 @@ impl ShareNode {
             )));
         }
         let share_id = beelay.accept_invite(invite).await.map_err(net)?;
-        // Persist the mirror before the first sync so the interval loop
-        // retries this share when that sync fails.
+        // Mirror before the first sync so the interval loop retries on failure.
         if let Some(doc) = beelay.doc(&share_id).await {
-            // Validate the doc-internal share_id (host-controlled) BEFORE the
-            // mirror lands on disk: a prior failed sync can leave a hostile
-            // merge in the in-memory doc, and this write must never persist
-            // it. A fresh adopt is an empty doc — nothing to validate.
+            // Validate the host-controlled doc-internal share_id BEFORE the
+            // mirror lands: a prior failed sync can leave a hostile merge in
+            // the in-memory doc. A fresh adopt is empty — nothing to validate.
             if !doc.get_heads().is_empty() {
                 let doc_id = doc_share_id(&doc)?;
                 if doc_id != share_id {
@@ -643,9 +637,8 @@ impl ShareNode {
                 .await
                 .map_err(net)??;
         }
-        // The host never answered: the adoption is parked, so there is nothing
-        // to fetch and no point failing on a sync against the same dead host.
-        // The placeholder mirror written above is what the interval loop finds.
+        // Host never answered: the adoption is parked, so a sync against the
+        // same dead host is pointless; the interval loop finds the placeholder.
         if beelay.join_pending(&share_id) {
             return Ok(AcceptedInvite {
                 share_id,
@@ -659,10 +652,9 @@ impl ShareNode {
         })
     }
 
-    /// Sync a received e2ee mirror and persist the refreshed doc under
-    /// `e2ee/received/`. A hosted share_id errors — hosted docs are updated
-    /// via [`ShareNode::publish_secure`] only. A host refusal (this device
-    /// was revoked or removed) surfaces as `NotFound`.
+    /// Sync a received e2ee mirror and persist it under `e2ee/received/`. A hosted
+    /// share_id errors (hosted docs update via [`ShareNode::publish_secure`] only);
+    /// a host refusal (revoked/removed) surfaces as `NotFound`.
     pub async fn sync_e2ee(&self, share_id: &str) -> Result<E2eeSyncOutcome> {
         let beelay = self.beelay()?;
         if !valid_share_id(share_id) {
@@ -685,10 +677,9 @@ impl ShareNode {
             .doc(share_id)
             .await
             .ok_or_else(|| net("synced doc missing from beelay registry"))?;
-        // Nothing decrypted into the doc yet — the host was asleep at join time,
-        // or every commit came back no-key (revoked / not yet keyed). There is
-        // nothing to hydrate or mirror; the outcome carries the counts, and a
-        // later pass fills it in. Same empty-doc guard as accept_invite.
+        // Nothing decrypted yet — host asleep at join time, or every commit came
+        // back no-key (revoked / not yet keyed). Nothing to mirror; the outcome
+        // carries the counts and a later pass fills it in, as in accept_invite.
         if doc.get_heads().is_empty() {
             return Ok(outcome);
         }
@@ -707,10 +698,8 @@ impl ShareNode {
         Ok(outcome)
     }
 
-    /// Re-encrypt a hosted e2ee share's whole history under the current epoch.
-    /// Invites do this on their own; this repairs shares invited before that,
-    /// whose members fetch every commit and can decrypt none.
-    /// TODO: Revisit if this should be exposed via the GUI
+    /// Re-encrypt a hosted e2ee share's whole history under the current epoch —
+    /// repairs shares invited before invites did this themselves.
     pub async fn rekey_e2ee(&self, share_id: &str) -> Result<()> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -721,10 +710,9 @@ impl ShareNode {
         self.beelay()?.reseal_project(share_id).await.map_err(net)
     }
 
-    /// Undo a join: drop the beelay registration, its cached doc and any parked
-    /// invite, so a later re-accept of the same invite adopts from scratch
-    /// instead of reusing a doc whose commits never decrypted. Returns whether
-    /// beelay had it registered. The caller deletes the on-disk mirror.
+    /// Undo a join: drop the beelay registration, cached doc, and parked invite
+    /// so a re-accept adopts from scratch. Returns whether beelay had it; the
+    /// caller deletes the on-disk mirror.
     pub async fn forget_e2ee(&self, share_id: &str) -> Result<bool> {
         if !valid_share_id(share_id) {
             return Err(ShareError::NotFound(share_id.to_string()));
@@ -753,6 +741,116 @@ impl ShareNode {
             return Err(ShareError::NotFound(share_id.to_string()));
         }
         load(&e2ee_received_dir(share_dir), share_id)
+    }
+}
+
+// ── distributed admin metadata (co-admin spec) ──────────────────────────────
+// Two root props ride the e2ee doc BESIDE the SharedProject fields (a struct
+// reconcile only touches its own keys, pinned by lib.rs tests), so membership
+// metadata syncs to every member through the ordinary beelay path:
+//  - `admin_member`: THE ADMIN's member id (hex). An automerge LWW register,
+//    so two concurrent admin transfers converge to exactly one THE ADMIN.
+//  - `member_meta`: the shared roster ([`MemberMeta`]), keyed by member id.
+
+#[cfg(feature = "sync-beelay")]
+const ADMIN_PROP: &str = "admin_member";
+#[cfg(feature = "sync-beelay")]
+const MEMBER_META_PROP: &str = "member_meta";
+
+/// The doc's THE-ADMIN marker; `None` on pre-co-admin docs.
+#[cfg(feature = "sync-beelay")]
+pub fn doc_admin_marker(doc: &Automerge) -> Option<String> {
+    autosurgeon::hydrate_path(doc, &automerge::ROOT, [ADMIN_PROP.into()])
+        .ok()
+        .flatten()
+}
+
+/// The doc's shared member roster; empty on pre-co-admin docs.
+#[cfg(feature = "sync-beelay")]
+pub fn doc_member_meta(doc: &Automerge) -> Vec<crate::MemberMeta> {
+    autosurgeon::hydrate_path(doc, &automerge::ROOT, [MEMBER_META_PROP.into()])
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "sync-beelay")]
+fn write_prop<R: autosurgeon::Reconcile>(doc: &mut Automerge, prop: &str, value: R) -> Result<()> {
+    let mut tx = doc.transaction();
+    autosurgeon::reconcile_prop(&mut tx, automerge::ROOT, prop, value).map_err(super::crdt)?;
+    tx.commit();
+    Ok(())
+}
+
+#[cfg(feature = "sync-beelay")]
+impl ShareNode {
+    /// THE ADMIN's member id (hex) from the live beelay doc (hosted or
+    /// adopted). `None` = pre-co-admin doc, where the hoster is THE ADMIN.
+    pub async fn admin_marker(&self, share_id: &str) -> Result<Option<String>> {
+        let doc = self.e2ee_doc(share_id).await?;
+        Ok(doc_admin_marker(&doc))
+    }
+
+    /// Point the THE-ADMIN marker at `member_hex`. The transfer op: powers
+    /// travel with the marker, the old admin keeps keyhive Admin (= co-admin).
+    pub async fn set_admin_marker(&self, share_id: &str, member_hex: &str) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            write_prop(doc, ADMIN_PROP, member_hex.to_owned())
+        })
+        .await
+    }
+
+    /// The shared member roster from the live beelay doc.
+    pub async fn member_meta(&self, share_id: &str) -> Result<Vec<crate::MemberMeta>> {
+        let doc = self.e2ee_doc(share_id).await?;
+        Ok(doc_member_meta(&doc))
+    }
+
+    /// Insert or update `entry` in the shared roster (matched by member id).
+    pub async fn upsert_member_meta(&self, share_id: &str, entry: crate::MemberMeta) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            let mut list = doc_member_meta(doc);
+            match list.iter_mut().find(|m| m.member_id == entry.member_id) {
+                Some(m) => *m = entry,
+                None => list.push(entry),
+            }
+            write_prop(doc, MEMBER_META_PROP, list)
+        })
+        .await
+    }
+
+    /// Drop `member_hex` from the shared roster (revoke/remove bookkeeping).
+    pub async fn remove_member_meta(&self, share_id: &str, member_hex: &str) -> Result<()> {
+        self.with_e2ee_doc(share_id, |doc| {
+            let mut list = doc_member_meta(doc);
+            list.retain(|m| m.member_id != member_hex);
+            write_prop(doc, MEMBER_META_PROP, list)
+        })
+        .await
+    }
+
+    async fn e2ee_doc(&self, share_id: &str) -> Result<Automerge> {
+        if !valid_share_id(share_id) {
+            return Err(ShareError::NotFound(share_id.to_string()));
+        }
+        self.beelay()?
+            .doc(share_id)
+            .await
+            .ok_or_else(|| ShareError::NotFound(share_id.to_string()))
+    }
+
+    async fn with_e2ee_doc(
+        &self,
+        share_id: &str,
+        f: impl FnOnce(&mut Automerge) -> Result<()>,
+    ) -> Result<()> {
+        if !valid_share_id(share_id) {
+            return Err(ShareError::NotFound(share_id.to_string()));
+        }
+        self.beelay()?
+            .with_doc(share_id, f)
+            .await
+            .ok_or_else(|| ShareError::NotFound(share_id.to_string()))?
     }
 }
 
@@ -947,7 +1045,7 @@ mod tests {
     }
 
     // A malicious host serves a doc whose INTERNAL share_id is a traversal path.
-    // fetch() must reject it before save() and write nothing outside received/.
+    // fetch() must reject it before the mirror write, leaving no `evil` file.
     #[tokio::test(flavor = "multi_thread")]
     async fn malicious_share_id_is_rejected_no_write() {
         let a_dir = tempfile::tempdir().unwrap();
@@ -980,6 +1078,75 @@ mod tests {
     }
 
     #[cfg(feature = "sync-beelay")]
+    mod admin_meta {
+        use super::*;
+        use crate::MemberMeta;
+
+        fn meta(id: &str) -> MemberMeta {
+            MemberMeta {
+                member_id: id.into(),
+                name: Some(format!("dev-{id}")),
+                invited_at: "2026-09-13T00:00:00Z".into(),
+                invited_by: None,
+            }
+        }
+
+        // The marker/roster props ride BESIDE the SharedProject fields; a
+        // publish's struct reconcile must not clobber them.
+        #[test]
+        fn admin_props_survive_project_reconcile() {
+            let mut doc = Automerge::new();
+            write_prop(&mut doc, ADMIN_PROP, "aa".repeat(32)).unwrap();
+            write_prop(&mut doc, MEMBER_META_PROP, vec![meta("bb")]).unwrap();
+
+            let mut tx = doc.transaction();
+            autosurgeon::reconcile(&mut tx, sample("7", "P")).unwrap();
+            tx.commit();
+
+            assert_eq!(doc_admin_marker(&doc), Some("aa".repeat(32)));
+            assert_eq!(doc_member_meta(&doc), vec![meta("bb")]);
+            let sp: SharedProject = autosurgeon::hydrate(&doc).unwrap();
+            assert_eq!(sp.name, "P");
+        }
+
+        // Two concurrent transfers are two writes to one LWW register: both
+        // merge orders converge on the SAME single winner.
+        #[test]
+        fn concurrent_transfers_converge_to_one_admin() {
+            let mut a = Automerge::new();
+            write_prop(&mut a, ADMIN_PROP, "aa".to_string()).unwrap();
+            let mut b = a.fork();
+            write_prop(&mut a, ADMIN_PROP, "bb".to_string()).unwrap();
+            write_prop(&mut b, ADMIN_PROP, "cc".to_string()).unwrap();
+
+            a.merge(&mut b).unwrap();
+            b.merge(&mut a).unwrap();
+
+            let winner = doc_admin_marker(&a).unwrap();
+            assert_eq!(doc_admin_marker(&b), Some(winner.clone()));
+            assert!(winner == "bb" || winner == "cc", "winner={winner}");
+        }
+
+        // Concurrent roster edits (two admins inviting different members)
+        // keep both entries — the list is keyed by member id.
+        #[test]
+        fn concurrent_roster_inserts_both_survive() {
+            let mut a = Automerge::new();
+            write_prop(&mut a, MEMBER_META_PROP, vec![meta("host")]).unwrap();
+            let mut b = a.fork();
+            write_prop(&mut a, MEMBER_META_PROP, vec![meta("host"), meta("x")]).unwrap();
+            write_prop(&mut b, MEMBER_META_PROP, vec![meta("host"), meta("y")]).unwrap();
+
+            a.merge(&mut b).unwrap();
+            let ids: std::collections::BTreeSet<String> = doc_member_meta(&a)
+                .into_iter()
+                .map(|m| m.member_id)
+                .collect();
+            assert!(ids.contains("x") && ids.contains("y"), "{ids:?}");
+        }
+    }
+
+    #[cfg(feature = "sync-beelay")]
     mod e2ee {
         use super::*;
 
@@ -1007,11 +1174,10 @@ mod tests {
             member
         }
 
-        // Pasting an invite whose host is asleep is a success, not an error:
-        // the invite is parked and a placeholder mirror lands so the interval
-        // loop retries. The share stays out of the received listing until that
-        // first sync fills it in (list_shared skips a mirror whose hydrated id
-        // does not match its filename).
+        // Pasting an invite whose host is asleep is a success, not an error: the
+        // invite parks and a placeholder mirror lands for the interval loop. It
+        // stays out of the received listing until the first sync fills it in
+        // (list_shared skips a mirror whose hydrated id != its filename).
         #[tokio::test(flavor = "multi_thread")]
         async fn offline_invite_accept_is_pending_not_an_error() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1099,7 +1265,7 @@ mod tests {
             b.shutdown().await.unwrap();
         }
 
-        // §3.3: set_role transitions Read→Edit→Read; query_role is the truth.
+        // §3.4: set_role transitions Read→Edit→Read; query_role is the truth.
         #[tokio::test(flavor = "multi_thread")]
         async fn set_role_upgrades_and_downgrades() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1121,10 +1287,9 @@ mod tests {
             b.shutdown().await.unwrap();
         }
 
-        // §6 validate-before-persist: a host serving a doc whose INTERNAL
-        // share_id mismatches the invite id must never land in the reader's
-        // mirror — neither via the first sync (validated in sync_e2ee) nor
-        // via a re-accept persisting the poisoned in-memory doc.
+        // §6 validate-before-persist: a doc whose INTERNAL share_id mismatches
+        // the invite id must never reach the reader's mirror — not on the first
+        // sync (sync_e2ee validates) nor on a re-accept of the poisoned doc.
         #[tokio::test(flavor = "multi_thread")]
         async fn hostile_share_id_never_persisted_on_accept() {
             let a_dir = tempfile::tempdir().unwrap();
@@ -1164,8 +1329,7 @@ mod tests {
                 matches!(&r2, Err(ShareError::Transport(m)) if m.contains("does not match")),
                 "re-accept must not persist the hostile doc, got {r2:?}"
             );
-            // Whatever is on disk (empty placeholder or nothing), it is
-            // never the hostile doc.
+            // Whatever is on disk, it is never the hostile doc.
             match ShareNode::e2ee_received(b_dir.path(), "7") {
                 Err(_) => {}
                 Ok(mirror) => assert_ne!(mirror.share_id, "8", "hostile doc landed in the mirror"),

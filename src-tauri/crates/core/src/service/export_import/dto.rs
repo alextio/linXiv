@@ -1,5 +1,4 @@
-//! Manifest wire model (mirrors the Python manifest dict) and the archive
-//! PDF-name codec.
+//! Manifest wire model and the archive PDF-name codec.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,7 @@ pub(super) const FORMAT_VERSION: i64 = 1;
 pub enum OnConflict {
     /// Keep the stored paper metadata; just (re)link it to the imported project.
     Merge,
-    /// Re-write stored paper metadata from the archive (`repair_paper`).
+    /// Re-write stored paper metadata from the archive (unvalidated).
     Overwrite,
 }
 
@@ -66,7 +65,7 @@ pub struct ProjectEntry {
     pub share_id: Option<String>,
 }
 
-/// Archive paper record — mirrors `_serialize_paper`/`_deserialize_paper`.
+/// Archive paper record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperEntry {
     pub source_id: String,
@@ -130,8 +129,8 @@ impl PaperEntry {
         }
     }
 
-    /// `_deserialize_paper` — archive record → `PaperMetadata`. Missing `published`
-    /// falls back to today (Python `date.today()`); empty list fields collapse to None.
+    /// Archive record → `PaperMetadata`. Missing `published` falls back to today;
+    /// empty list fields collapse to None.
     pub(super) fn to_metadata(&self) -> PaperMetadata {
         PaperMetadata {
             source_id: self.source_id.clone(),
@@ -194,13 +193,9 @@ pub struct ArchivePdfName {
 }
 
 impl ArchivePdfName {
-    /// Decode an in-zip entry path. Returns `None` for entries the import
-    /// loop skips: non-`.pdf` names and stems without `_v`. (The `pdfs/`
-    /// prefix is filtered at the zip layer; here any directory prefix is
-    /// dropped via the basename.) Splits on the LAST `_v` — the encoded
-    /// `_v{version}` suffix is always the last one, so source_ids that
-    /// themselves contain `_v` round-trip. A non-numeric version falls back
-    /// to 1 (Python import parity).
+    /// Decode an in-zip entry path. `None` for entries the import loop skips:
+    /// non-`.pdf` names and stems without `_v`. Splits on the LAST `_v`, so
+    /// source_ids containing `_v` round-trip; a non-numeric version falls back to 1.
     pub fn parse_entry(archive_name: &str) -> Option<Self> {
         let basename = archive_name.rsplit('/').next().unwrap_or(archive_name);
         let stem = basename.strip_suffix(".pdf")?;
@@ -226,7 +221,7 @@ pub struct ArchivePdf {
     pub bytes: Vec<u8>,
 }
 
-/// `ImportPreview` — what `commit_import` would do, read without touching the DB.
+/// What `commit_import` would do, read without touching the DB.
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct ImportPreview {
     pub project_name: String,
@@ -236,4 +231,34 @@ pub struct ImportPreview {
     pub annotation_count: usize,
     pub has_pdfs: bool,
     pub format_version: i64,
+}
+
+/// `POST /api/projects/import/preview` envelope (route/uploads.rs) — [`ImportPreview`] minus `annotation_count`.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct ImportPreviewResponse {
+    pub project_name: String,
+    pub description: String,
+    pub paper_count: usize,
+    pub note_count: usize,
+    pub has_pdfs: bool,
+    pub format_version: i64,
+}
+
+impl From<ImportPreview> for ImportPreviewResponse {
+    fn from(p: ImportPreview) -> Self {
+        ImportPreviewResponse {
+            project_name: p.project_name,
+            description: p.description,
+            paper_count: p.paper_count,
+            note_count: p.note_count,
+            has_pdfs: p.has_pdfs,
+            format_version: p.format_version,
+        }
+    }
+}
+
+/// `POST /api/projects/import/commit` and MCP `import_project` envelope — the created/merged project id.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+pub struct ImportedProject {
+    pub project_id: i64,
 }

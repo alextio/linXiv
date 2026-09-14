@@ -1,10 +1,10 @@
 // Framing the graph inside the strip the filter panels leave uncovered.
 //
-// cytoscape's own `cy.fit()` frames across the WHOLE canvas, and the panel
-// column sits over its right edge, so a plain fit pushes the rightmost nodes —
-// and their right-hand labels, which stick out further still — underneath the
-// panels on every load, settle and reveal. This is cytoscape's own
-// getFitViewport() math with the width narrowed to the visible strip.
+// `cy.fit()` frames across the WHOLE canvas, and the panel column sits over its
+// right edge, so a plain fit pushes the rightmost nodes — and their labels,
+// which stick out further still — under the panels on every load, settle and
+// reveal. This is cytoscape's own getFitViewport() math with the width narrowed
+// to the visible strip.
 
 export const FIT_PADDING = 40;
 
@@ -24,10 +24,9 @@ export interface Viewport {
 
 /**
  * The viewport that frames `bb` inside a `width`x`height` canvas whose rightmost
- * `gutter` pixels are covered, or `null` when the caller should fall back to
- * cytoscape's own fit (nothing is covered, the strip is too narrow to frame in,
- * or the box is degenerate). Returning null rather than a best effort is what
- * keeps the unfiltered, un-paneled case byte-identical to plain `cy.fit()`.
+ * `gutter` pixels are covered, or `null` to fall back to cytoscape's own fit
+ * (nothing covered, the strip too narrow, or a degenerate box) — which keeps
+ * the un-paneled case byte-identical to plain `cy.fit()`.
  */
 export function fitViewport(
   bb: BoundingBox,
@@ -56,10 +55,10 @@ export function fitViewport(
 }
 
 /**
- * Keep a floating box (the hover inspector) beside `anchor` but inside the
- * canvas and clear of the panel column — the same gutter `fitViewport` frames
- * around. Flips to the other side of the anchor rather than sliding, so the box
- * never covers the node it describes.
+ * Keep a floating box (the hover inspector) beside `anchor`, inside the canvas
+ * and clear of the panel column — the gutter `fitViewport` also frames around.
+ * Flips to the anchor's other side rather than sliding, so the box never covers
+ * the node it describes.
  */
 export function placeFloatingBox(
   anchor: { x: number; y: number },

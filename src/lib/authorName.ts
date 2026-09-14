@@ -7,8 +7,8 @@ const PARTICLES = new Set([
   "la", "le", "los", "las", "st", "st.", "mac", "mc", "bin", "al", "ter", "ten",
 ]);
 
-// Trailing generational/professional suffixes that belong with the last name,
-// not the last name slot alone (e.g. "Smith Jr." not "Jr.").
+// Trailing generational/professional suffixes; they attach to the last name,
+// not fill the slot alone (e.g. "Smith Jr." not "Jr.").
 const SUFFIXES = new Set([
   "jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v", "v.", "phd", "phd.", "md", "md.",
 ]);
@@ -18,8 +18,8 @@ export interface ParsedName {
   last: string;
 }
 
-// Strip one trailing suffix token (Jr., III, PhD, …), keeping ≥1 token. A
-// stacked suffix ("Jr. III") leaves "Jr." for the caller's surname walk.
+// Strip one trailing suffix token (Jr., III, PhD, …), keeping ≥1 token. Only
+// one: "John Smith Jr. III" → last "Jr. III", first "John Smith".
 function stripTrailingSuffixes(tokens: string[]): { rest: string[]; suffix: string } {
   const last = tokens[tokens.length - 1];
   if (tokens.length > 1 && SUFFIXES.has(last.toLowerCase())) {
@@ -34,8 +34,8 @@ export function parseFullName(full: string): ParsedName {
   const name = full.trim();
   if (!name) return { first: "", last: "" };
 
-  // Comma is an explicit "Last, First" marker; suffix handling is skipped,
-  // text after the comma is taken as written.
+  // Comma is an explicit "Last, First" marker; both sides are taken as
+  // written — no suffix strip, no particle walk.
   const comma = name.indexOf(",");
   if (comma !== -1) {
     const last = name.slice(0, comma).trim();
@@ -67,8 +67,8 @@ export function parseFullName(full: string): ParsedName {
 
 export type NameSortBy = "full_name" | "first_name" | "last_name";
 
-// The lowercased string to sort an author by, preferring the stored first/last
-// fields and falling back to the heuristic parse of full_name.
+// The lowercased string to sort an author by: the stored first/last field, else
+// the heuristic parse of full_name, else full_name itself.
 export function nameSortKey(a: Author, by: NameSortBy): string {
   const full = a.full_name ?? "";
   if (by === "full_name") return full.toLowerCase();

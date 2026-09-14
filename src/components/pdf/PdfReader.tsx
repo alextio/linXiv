@@ -22,6 +22,8 @@ import {
   writePdfPosition,
   type PdfPosition,
 } from "../../lib/pdfPosition";
+import { pdfCanvasDpr } from "../../lib/zoom";
+import { useUiStore } from "../../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -29,36 +31,36 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 interface PdfReaderProps {
-  /** Fetchable PDF URL (linxiv:// scheme in Tauri, proxied path in dev). */
+  /** Fetchable PDF URL: custom scheme in the app, proxied path in dev. */
   file: string;
   sourceId: string;
   /** Paper version the rendered PDF belongs to; anchors are scoped to it. */
   version: number;
-  /** When viewed within a project, scope created highlights to it so they
-   *  export/share with the project; null/undefined creates library-scoped ones. */
+  /** Scopes created highlights to this project so they export/share with it;
+   *  null/undefined creates library-scoped ones. */
   projectId?: number | null;
   /** Fallback link shown if the PDF fails to load. */
   errorUrl?: string | null;
 }
 
-// Render the current page plus this many neighbors on each side; the rest are
-// spacers. Neighbors cover scroll momentum before onScroll re-centers the window.
+// Pages this far from the current one render; the rest are spacers. The margin
+// covers scroll momentum before onScroll re-centers the window.
 const PAGE_WINDOW = 4;
 
-// How long resize (ResizeObserver) activity must be quiet before the live
-// scaleX preview is committed as a real react-pdf re-render.
+// Quiet time after the last ResizeObserver tick before the live scaleX preview
+// is committed as a real react-pdf re-render.
 const RESIZE_SETTLE_MS = 120;
 
-// localStorage is synchronous, so cap writes during kinetic scrolling while
-// still committing the final position when the reader closes.
+// localStorage is synchronous, so throttle writes while scrolling; closing the
+// reader still flushes the final position.
 const POSITION_SAVE_INTERVAL_MS = 200;
 
-// Horizontal padding around each rendered page, subtracted from the scroller's
-// measured width to get the actual page width react-pdf renders at.
+// Horizontal padding per page, subtracted from the scroller's measured width
+// to get the width react-pdf renders at.
 const PAGE_INSET = 32;
 
-// Spacer height for unrendered pages, estimated from a letter/A4 aspect ratio so
-// the scrollbar and offsets stay roughly right until the real page mounts.
+// Spacer height for unrendered pages, from a letter aspect ratio, so scroll
+// offsets stay roughly right until the real page mounts.
 function estPageHeight(width: number) {
   return width ? Math.round((width - PAGE_INSET) * 1.3) : 800;
 }
@@ -75,10 +77,9 @@ interface ActivePopup {
   comment: string;
 }
 
-// Saved-PDF reader with Zotero-style text-highlight annotations. Each highlight
-// is an ANNOTATION row carrying an `anchor` (see lib/pdfAnchor) plus an optional
-// written comment; they render as a per-page overlay and round-trip through the
-// annotations API shared with the Annotations tab.
+// Saved-PDF reader with Zotero-style text highlights. Each is an ANNOTATION
+// row with an `anchor` (lib/pdfAnchor) plus an optional comment, drawn as a
+// per-page overlay and round-tripped through the annotations API.
 export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfReaderProps) {
   const qc = useQueryClient();
   const [numPages, setNumPages] = useState(0);
@@ -94,8 +95,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   const rafRef = useRef<number | null>(null);
   const restoreRafRef = useRef<number | null>(null);
   const obsRef = useRef<ResizeObserver | null>(null);
-  // Last width actually committed to react-pdf (vs. the live, uncommitted
-  // ResizeObserver reading) so mid-drag ticks can be scaled instead of reflowed.
+  // Last width committed to react-pdf (vs. the live ResizeObserver reading), so
+  // mid-drag ticks can be scaled instead of reflowed.
   const committedWidthRef = useRef(0);
   const resizeTimerRef = useRef<number | null>(null);
   const positionTimerRef = useRef<number | null>(null);
@@ -107,8 +108,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       const pages = scroller.querySelectorAll<HTMLElement>(".pdf-page-slot");
       if (pages.length === 0) return null;
 
-      // Use the page intersecting the viewport's top edge, then store a
-      // dimensionless offset so restoration survives pane/window resizing.
+      // The page under the viewport's top edge, with a dimensionless offset so
+      // restoring survives a pane/window resize.
       let current = pages[0];
       let currentIndex = 0;
       pages.forEach((candidate, index) => {
@@ -150,7 +151,9 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   );
 
   // Key must match PaperDetailPage's annotations query so the overlay and the
-  // Annotations tab share one cache entry rather than each fetching separately.
+  // Annotations tab share one cache entry.
+  const zoom = useUiStore((s) => s.zoom);
+
   const { data: annData } = useQuery({
     queryKey: ["annotations", sourceId, { allProjects: true }],
     queryFn: () => getAnnotations(sourceId, undefined, true),
@@ -186,8 +189,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       }),
     onSuccess: (data, v) => {
       invalidateAnnotationQueries(qc);
-      // Open the comment popup on the fresh highlight so a comment can be added
-      // right away — a highlight and its comment are one gesture, not two screens.
+      // Popup opens on it: a highlight and its comment are one gesture.
       const pos = clampToViewport(v.left, v.top, 280, 220);
       setDraft("");
       updateMut.reset();
@@ -261,8 +263,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     return () => document.removeEventListener("mousedown", onDocDown);
   }, [selBar, popup]);
 
-  // Stable so React doesn't detach/reattach the ref (re-creating the observer)
-  // on every render — e.g. each setPage during a scroll.
+  // Stable so React doesn't detach/reattach the ref (rebuilding the observer)
+  // on every render, e.g. each setPage during a scroll.
   const attachScroller = useCallback((el: HTMLDivElement | null) => {
     obsRef.current?.disconnect();
     if (resizeTimerRef.current !== null) {
@@ -281,10 +283,9 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
         setWidth(newWidth);
         return;
       }
-      // Mid-drag ticks: cheaply scale the already-rendered pages via CSS instead
-      // of reflowing react-pdf on every tick; commit the real width (and let
-      // react-pdf re-render at full quality) once resizing settles. Pages render
-      // at width-PAGE_INSET, so scale by the inset width, not the outer one;
+      // Mid-drag ticks: scale the rendered pages via CSS instead of reflowing
+      // react-pdf; commit the real width once resizing settles. Pages render at
+      // width-PAGE_INSET, so scale by the inset width, not the outer one;
       // "top center" keeps mx-auto-centered pages from sliding sideways.
       const wrap = pagesWrapRef.current;
       const prevInset = committedWidthRef.current - PAGE_INSET;
@@ -370,8 +371,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     });
   }
 
-  // On mouse up, if there's a real text selection inside a page, surface the
-  // color picker near the selection's end so a click commits the highlight.
+  // On a real text selection inside a page, put the color picker at the
+  // selection's end so one click commits the highlight.
   function onMouseUp() {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
@@ -407,9 +408,9 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     });
   }
 
-  // A click (not a drag-select) is hit-tested against highlight rects on the
-  // clicked page; a hit opens the comment popup. The visual overlay is
-  // pointer-events:none, so this keeps highlighted text fully selectable.
+  // A click (not a drag-select) is hit-tested against the clicked page's
+  // highlight rects; a hit opens the comment popup. Geometric because the
+  // overlay is pointer-events:none, which keeps the text selectable.
   function onClick(e: React.MouseEvent<HTMLDivElement>) {
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim()) return; // was a selection
@@ -443,8 +444,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     });
   }
 
-  // Annotation was deleted, or its server comment moved past the popup's
-  // open-time baseline (popup.comment), while the popup was open elsewhere.
+  // The annotation was deleted, or its server comment moved off the popup's
+  // open-time baseline (popup.comment) while the popup was open.
   const popupStale = popup
     ? !annData?.annotations.some((a) => a.id === popup.id) ||
       (commentById.get(popup.id) ?? "") !== popup.comment
@@ -492,14 +493,12 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
             </div>
           }
         >
-          {/* Only pages within PAGE_WINDOW of the current page mount a canvas;
-              the rest are fixed-height spacers so scroll offsets stay correct.
-              Wrapped so a mid-drag resize can cheaply scaleX this whole group
-              (see attachScroller) instead of reflowing every page. Only the
-              canvas-mounting slots get will-change-transform (compositor
-              layer per visible page, smoother scroll) — promoting the empty
-              spacers too would create hundreds of pointless layers on long
-              PDFs for nothing. */}
+          {/* Only pages within PAGE_WINDOW mount a canvas; the rest are
+              fixed-height spacers that keep scroll offsets correct. The wrapper
+              lets a mid-drag resize scaleX the whole group (see attachScroller)
+              instead of reflowing every page. will-change-transform goes on the
+              canvas slots only — promoting spacers too would make hundreds of
+              pointless layers on a long PDF. */}
           <div ref={pagesWrapRef}>
             {Array.from({ length: numPages }, (_, i) => {
               const pn = i + 1;
@@ -518,6 +517,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
                   <Page
                     pageNumber={pn}
                     width={pageWidth}
+                    devicePixelRatio={pdfCanvasDpr(zoom)}
                     onRenderSuccess={() => restorePosition(pn)}
                     className="shadow-md"
                     renderTextLayer
@@ -538,9 +538,9 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
         <div
           className="fixed z-30 flex items-center gap-1.5 rounded-full bg-panel border border-border shadow-card px-2 py-1.5"
           style={{ top: selBar.top, left: selBar.left }}
-          // preventDefault keeps the text selection alive for commitHighlight;
+          // preventDefault keeps the selection alive for commitHighlight;
           // stopPropagation keeps the container's mousedown/up from clearing or
-          // re-opening this toolbar mid-click (which would cancel the swatch click).
+          // re-opening this toolbar mid-click, cancelling the swatch click.
           onMouseDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -626,8 +626,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   );
 }
 
-// Keep a fixed-positioned floater (toolbar/popup) on-screen near the right/bottom
-// edges; w/h are the floater's approximate size.
+// Keep a fixed floater (toolbar/popup) on-screen near the right/bottom edges;
+// w/h are its approximate size.
 function clampToViewport(left: number, top: number, w: number, h: number) {
   return {
     left: Math.max(8, Math.min(left, window.innerWidth - w)),

@@ -10,10 +10,9 @@ use crate::error::Result;
 use crate::models::{PaperDetails, NO_PUBLISHED_DATE};
 use crate::storage::db::{bool_from_sql, date_from_sql, list_from_sql};
 
-// Every read selects `PAPER_COLUMNS_NO_TEXT` from the `papers` /
-// `latest_papers` views (same column set), so one row->model mapper serves all.
-// LIST/DATE/BOOL columns go through the storage::db decltype converters — no
-// inline re-parsing.
+// Every `PaperDetails` read selects `PAPER_COLUMNS_NO_TEXT` from the `papers` /
+// `latest_papers` views (same column set), so one mapper serves all. LIST/DATE/
+// BOOL columns go through the storage::db decltype converters — no re-parsing.
 pub(in crate::storage::queries) fn row_to_paper(row: &Row) -> Result<PaperDetails> {
     // LIST column (JSON TEXT) -> Vec<String>; NULL -> empty (model default).
     let list = |name: &str| -> Result<Vec<String>> {
@@ -54,17 +53,14 @@ pub(in crate::storage::queries) fn row_to_paper(row: &Row) -> Result<PaperDetail
     })
 }
 
-/// `storage/db.py::get_paper` — a specific version, or the latest if `None`.
-/// `conn` is an opened storage::db connection (FK PRAGMA already ON).
-/// Reads the list column set (FULL_TEXT blanked) like every other paper read:
-/// nothing consumes the body through `PaperDetails`, and the fts module's
-/// `has_full_text` answers the one stored-body question without hauling it.
+/// A specific version, or the latest if `None`. No FULL_TEXT —
+/// `has_full_text` answers the one stored-body question.
 pub fn get_paper(
     conn: &Connection,
     source_id: &str,
     version: Option<i64>,
 ) -> Result<Option<PaperDetails>> {
-    // Python `if version:` treats 0 as falsy too -> fall through to latest.
+    // A version of 0 is treated as unset -> fall through to latest.
     let (sql, params): (String, Vec<Value>) = match version.filter(|v| *v != 0) {
         Some(v) => (
             format!(
@@ -85,10 +81,8 @@ pub fn get_paper(
     }
 }
 
-/// `storage/db.py::get_paper_by_id` — one exact PAPER version by PK. Reads the
-/// list column set (FULL_TEXT blanked): paper_id callers never saw the body
-/// when this was composed from `list_papers`, and keeping it out means the
-/// lookup never hauls a full TeX corpus row into memory.
+/// One exact PAPER version by PK. No FULL_TEXT, so the lookup never hauls a
+/// TeX corpus row into memory.
 pub fn get_paper_by_id(conn: &Connection, paper_id: i64) -> Result<Option<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM papers WHERE paper_id = ?"
@@ -100,17 +94,9 @@ pub fn get_paper_by_id(conn: &Connection, paper_id: i64) -> Result<Option<PaperD
     }
 }
 
-/// The `papers`/`latest_papers` column list with FULL_TEXT blanked out — every
-/// column `row_to_paper` reads, in the view's order. `PaperDetails` callers see
-/// no difference; the CLI's raw-row `linxiv library list`, which dumps whatever
-/// columns come back, now reports `full_text` as null instead of the body.
-///
-/// Every `PaperDetails` read uses this instead of `SELECT *`. Nothing consumes
-/// the body through the struct (`full_text` is not serialized; the empty-refetch
-/// clobber guard reads one column via `has_full_text`), and with the background
-/// indexer filling the column for a whole library, `SELECT *` would make every
-/// read haul a multi-MB TeX body into memory under the connection lock and drop
-/// it again.
+/// The `papers`/`latest_papers` column list in view order, FULL_TEXT blanked.
+/// Every `PaperDetails` read uses this instead of `SELECT *`: nothing reads the
+/// body through the struct, and `SELECT *` would haul a multi-MB TeX body.
 pub const PAPER_COLUMNS_NO_TEXT: &str = "paper_id, source_id, source_fk, version, title, url, \
      published, updated, category, categories, doi, journal_ref, comment, summary, authors, tags, \
      has_pdf, source, pdf_path, NULL AS full_text, downloaded_source, created_at, updated_at";
@@ -123,11 +109,9 @@ pub enum PaperSort {
     /// Publication date — the historical default.
     #[default]
     Published,
-    /// When the paper entered the library. Keyed on `source_fk`, the root row's
-    /// AUTOINCREMENT id — ids are handed out in insertion order, so fk order is
-    /// add order without `created_at`'s one-second ties. NOT the per-version
-    /// `created_at`, which jumps forward on every new version. Re-adding a
-    /// trashed paper reactivates its root, so it returns to its old position.
+    /// When the paper entered the library — keyed on `source_fk` (AUTOINCREMENT
+    /// = insertion order, no one-second ties), NOT the per-version `created_at`,
+    /// which jumps on every new version. A re-added paper keeps its old position.
     Added,
     /// Title, case-insensitively.
     Title,
@@ -150,13 +134,9 @@ impl PaperSort {
         self != Self::Title
     }
 
-    /// `paper_id` breaks ties so paging is stable — shared publish dates and
-    /// same-title papers are both common.
-    ///
-    /// Oldest-first leads with an extra term so undated papers sink instead of
-    /// heading the list. `idx_paper_meta_published_dated` indexes that exact
-    /// expression, in this column order and direction — change one and the other
-    /// must follow, or the ordering falls back to sorting the whole library.
+    /// `paper_id` breaks ties so paging is stable. Oldest-first leads with an
+    /// extra term so undated papers sink; `idx_paper_meta_published_dated`
+    /// indexes that exact expression — change one and the other must follow.
     fn order_by(self, desc: bool) -> String {
         let dir = if desc { "DESC" } else { "ASC" };
         let col = match self {
@@ -178,6 +158,7 @@ fn list_papers_sql(
     limit: Option<i64>,
     offset: i64,
     category: Option<&str>,
+    project: Option<i64>,
     sort: PaperSort,
     desc: bool,
 ) -> (String, Vec<Value>) {
@@ -188,9 +169,18 @@ fn list_papers_sql(
     };
     let mut sql = format!("SELECT {PAPER_COLUMNS_NO_TEXT} FROM {view}");
     let mut params: Vec<Value> = Vec::new();
+    let mut wheres: Vec<&str> = Vec::new();
     if let Some(cat) = category {
-        sql.push_str(" WHERE category = ?");
+        wheres.push("category = ?");
         params.push(Value::Text(cat.to_string()));
+    }
+    if let Some(pid) = project {
+        wheres.push("source_fk IN (SELECT SOURCE_FK FROM PROJECT_TO_PAPER WHERE PROJECT_FK = ?)");
+        params.push(Value::Integer(pid));
+    }
+    if !wheres.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&wheres.join(" AND "));
     }
     sql.push_str(&sort.order_by(desc));
     match limit {
@@ -209,7 +199,6 @@ fn list_papers_sql(
     (sql, params)
 }
 
-/// `storage/db.py::list_papers` — latest version per paper by default.
 /// Optional exact-category filter; limit/offset apply to the filtered result.
 pub fn list_papers(
     conn: &Connection,
@@ -224,22 +213,26 @@ pub fn list_papers(
         limit,
         offset,
         category,
+        None,
         PaperSort::default(),
         true,
     )
 }
 
-/// `list_papers` under a caller-chosen ordering.
+/// `list_papers` under a caller-chosen ordering. `project` narrows to papers
+/// linked to that project (PROJECT_TO_PAPER), filtered in SQL so a >200-paper
+/// library never needs a client-side window.
 pub fn list_papers_sorted(
     conn: &Connection,
     latest_only: bool,
     limit: Option<i64>,
     offset: i64,
     category: Option<&str>,
+    project: Option<i64>,
     sort: PaperSort,
     desc: bool,
 ) -> Result<Vec<PaperDetails>> {
-    let (sql, params) = list_papers_sql(latest_only, limit, offset, category, sort, desc);
+    let (sql, params) = list_papers_sql(latest_only, limit, offset, category, project, sort, desc);
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params_from_iter(&params))?;
     let mut out = Vec::new();
@@ -249,8 +242,8 @@ pub fn list_papers_sorted(
     Ok(out)
 }
 
-/// Latest-version papers whose PDF flag is set — backs `GET /api/pdfs`. Filters
-/// in SQL so the whole library is never materialized to find the PDF subset.
+/// Latest-version papers whose PDF flag is set — the source rows for every
+/// saved-PDF listing. Filters in SQL so the whole library is never scanned.
 pub fn list_pdf_papers(conn: &Connection) -> Result<Vec<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM latest_papers WHERE has_pdf = 1"
@@ -263,11 +256,10 @@ pub fn list_pdf_papers(conn: &Connection) -> Result<Vec<PaperDetails>> {
     Ok(out)
 }
 
-/// Latest-version rows for the given paper roots, filtered in SQL so project
-/// export/share never materializes the whole library. Empty input → empty
-/// output. Chunked to stay under SQLite's bound-variable limit, then sorted in
-/// Rust to the `list_papers` default order (published DESC undated-last,
-/// paper_id DESC) since chunking would scramble a SQL ORDER BY across chunks.
+/// Latest-version rows for the given roots, filtered in SQL so export/share
+/// never materializes the whole library. Chunked under SQLite's bound-variable
+/// limit, then sorted in Rust to the `list_papers` default order (chunking
+/// would scramble a SQL ORDER BY).
 pub fn get_papers_by_source_fks(
     conn: &Connection,
     source_fks: &[i64],
@@ -285,7 +277,7 @@ pub fn get_papers_by_source_fks(
             out.push(row_to_paper(row)?);
         }
     }
-    // Option<NaiveDate> reversed = DESC with None (undated) last, like SQL DESC.
+    // Reversed cmp = SQL DESC: NULLs and the undated sentinel both sink.
     out.sort_by(|a, b| {
         b.published
             .cmp(&a.published)
@@ -294,9 +286,8 @@ pub fn get_papers_by_source_fks(
     Ok(out)
 }
 
-/// `storage/db.py::get_categories` — distinct primary categories across latest
-/// active papers, NULLs excluded, ascending. BINARY collation (the default) is
-/// byte order — the same ordering the service's old BTreeSet<String> produced.
+/// Distinct primary categories across latest active papers, NULLs excluded,
+/// ascending in BINARY (byte-order) collation.
 pub fn get_categories(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT category FROM latest_papers \
@@ -306,15 +297,10 @@ pub fn get_categories(conn: &Connection) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `storage/db.py::get_papers_by_json_tag` — latest papers whose JSON TAGS list
-/// holds `label`, matched whole and case-insensitively (NOCASE folds ASCII
-/// only, same rule as the service's old `eq_ignore_ascii_case` filter).
-///
-/// Matches the JSON column, not PAPER_TO_TAG: the relational half is
-/// code-synced (no triggers), skips empty labels, and folds label case into a
-/// shared TAG row — the JSON list is what the old in-Rust filter read.
-/// `published DESC` puts NULL dates last, exactly where `Option<NaiveDate>`
-/// descending put them; `paper_id DESC` breaks same-date ties.
+/// Latest papers whose JSON TAGS list holds `label`, matched whole and
+/// case-insensitively (NOCASE folds ASCII only). Matches the JSON column, not
+/// PAPER_TO_TAG — the relational half skips empty labels and case-folds into a
+/// shared TAG row. `published DESC` (NULL dates last), `paper_id DESC` ties.
 pub fn get_papers_by_json_tag(conn: &Connection, label: &str) -> Result<Vec<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM latest_papers WHERE tags IS NOT NULL \
@@ -353,7 +339,7 @@ pub fn existing_source_ids(conn: &Connection, source_ids: &[String]) -> Result<V
     Ok(out)
 }
 
-/// `get_all_versions` — every stored (active) version, oldest-first.
+/// Every stored (active) version, oldest-first.
 pub fn get_all_versions(conn: &Connection, source_id: &str) -> Result<Vec<PaperDetails>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {PAPER_COLUMNS_NO_TEXT} FROM papers WHERE source_id = ? ORDER BY version ASC"
@@ -367,7 +353,7 @@ pub fn get_all_versions(conn: &Connection, source_id: &str) -> Result<Vec<PaperD
 }
 
 /// One `version_meta` row: the four scalars the versions listing needs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct PaperVersionMeta {
     pub version: i64,
     pub published: Option<NaiveDate>,
@@ -375,8 +361,8 @@ pub struct PaperVersionMeta {
     pub has_pdf: bool,
 }
 
-/// `version_meta` — [`get_all_versions`] minus the per-version full-row
-/// hydration: every stored (active) version's four listing scalars, oldest-first.
+/// [`get_all_versions`] minus the full-row hydration: every stored (active)
+/// version's four listing scalars, oldest-first.
 pub fn version_meta(conn: &Connection, source_id: &str) -> Result<Vec<PaperVersionMeta>> {
     let mut stmt = conn.prepare(
         "SELECT version, published, updated, has_pdf FROM papers \
@@ -405,7 +391,6 @@ pub fn version_meta(conn: &Connection, source_id: &str) -> Result<Vec<PaperVersi
 
 /// Another paper root sharing this root's DOI — same underlying work resolved
 /// independently by a different source (e.g. arXiv vs OpenAlex/Crossref).
-/// Local struct (no model; models.rs out of scope this phase).
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 pub struct DoiVersionCandidate {
     pub source_fk: i64,
@@ -534,6 +519,93 @@ mod tests {
         );
     }
 
+    /// The `project` filter narrows to PROJECT_TO_PAPER members in SQL —
+    /// membership, not a client-side window over the first N rows.
+    #[test]
+    fn list_papers_project_filter_returns_only_members() {
+        let conn = open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        seed(&conn); // arxiv:2204.12985
+        conn.execute(
+            "INSERT INTO PAPER_ROOTS (SOURCE_ID) VALUES ('arxiv:outside')",
+            [],
+        )
+        .unwrap();
+        let outside_fk = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO PAPER (SOURCE_ID, VERSION, TITLE, SOURCE_FK) \
+             VALUES ('arxiv:outside', 1, 'Outside', ?1)",
+            [outside_fk],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO PAPER_META (PAPER_ID) VALUES (?1)",
+            [conn.last_insert_rowid()],
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO PROJECT (NAME) VALUES ('RL')", [])
+            .unwrap();
+        let project_fk = conn.last_insert_rowid();
+        let member_fk: i64 = conn
+            .query_row(
+                "SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = 'arxiv:2204.12985'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO PROJECT_TO_PAPER (PROJECT_FK, SOURCE_FK) VALUES (?1, ?2)",
+            params![project_fk, member_fk],
+        )
+        .unwrap();
+
+        let member = list_papers_sorted(
+            &conn,
+            true,
+            None,
+            0,
+            None,
+            Some(project_fk),
+            PaperSort::Published,
+            true,
+        )
+        .unwrap();
+        assert_eq!(member.len(), 1);
+        assert_eq!(member[0].source_id, "arxiv:2204.12985");
+        assert_eq!(member[0].version, 2); // latest_only still applies
+
+        // Unknown project matches nothing; no filter returns both papers.
+        assert!(list_papers_sorted(
+            &conn,
+            true,
+            None,
+            0,
+            None,
+            Some(9999),
+            PaperSort::Published,
+            true
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(list_papers(&conn, true, None, 0, None).unwrap().len(), 2);
+
+        // Composes with the category filter (WHERE ... AND ...): the member
+        // paper is cs.LG, so a mismatched category empties the result.
+        assert!(list_papers_sorted(
+            &conn,
+            true,
+            None,
+            0,
+            Some("nope"),
+            Some(project_fk),
+            PaperSort::Published,
+            true
+        )
+        .unwrap()
+        .is_empty());
+    }
+
     /// Pins `list_pdf_papers` ≡ `list_papers(latest_only)` filtered on has_pdf —
     /// the SQL-side filter must not change what the old scan-then-filter saw.
     #[test]
@@ -569,8 +641,7 @@ mod tests {
             .into_iter()
             .map(|p| (p.source_id, p.version))
             .collect();
-        // The new query carries no ORDER BY (its one caller re-sorts by file
-        // size); compare as sets.
+        // No ORDER BY (callers re-sort in saved_pdf_sizes); compare as sets.
         got.sort();
         let mut expected_sorted = expected.clone();
         expected_sorted.sort();
@@ -610,7 +681,7 @@ mod tests {
             .unwrap();
         }
 
-        // The oldest-added paper gains a v2 today. Ordering by the version row's
+        // arxiv:a gains a v2 today. Ordering by the version row's
         // timestamp would make it the "most recently added" paper.
         let apple_fk: i64 = conn
             .query_row(
@@ -651,7 +722,7 @@ mod tests {
         .unwrap();
 
         let titles = |sort, desc| {
-            list_papers_sorted(&conn, true, None, 0, None, sort, desc)
+            list_papers_sorted(&conn, true, None, 0, None, None, sort, desc)
                 .unwrap()
                 .into_iter()
                 .map(|p| p.title)
@@ -703,7 +774,7 @@ mod tests {
         init_db(&conn).unwrap();
 
         let plan = |sort, desc| -> Vec<String> {
-            let (sql, _) = list_papers_sql(true, None, 0, None, sort, desc);
+            let (sql, _) = list_papers_sql(true, None, 0, None, None, sort, desc);
             conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
                 .unwrap()
                 .query_map([], |r| r.get::<_, String>(3))
@@ -732,8 +803,8 @@ mod tests {
             false,
             "idx_paper_meta_published_dated",
         );
-        uses(PaperSort::Added, true, "idx_paper_source_fk");
-        uses(PaperSort::Added, false, "idx_paper_source_fk");
+        uses(PaperSort::Added, true, "idx_paper_source_fk_version");
+        uses(PaperSort::Added, false, "idx_paper_source_fk_version");
         uses(PaperSort::Title, false, "idx_paper_title_nocase");
         uses(PaperSort::Title, true, "idx_paper_title_nocase");
     }
