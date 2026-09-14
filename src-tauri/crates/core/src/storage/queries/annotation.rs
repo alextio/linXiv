@@ -97,13 +97,24 @@ pub fn create_annotation(
     Ok(conn.last_insert_rowid())
 }
 
-/// Update the comment (the only user-editable field); false if no row matched.
-pub fn patch_annotation(conn: &Connection, annotation_id: i64, comment: &str) -> Result<bool> {
+/// Update the comment, and the anchor when given; false if no row matched.
+pub fn patch_annotation(
+    conn: &Connection,
+    annotation_id: i64,
+    comment: &str,
+    anchor: Option<&str>,
+) -> Result<bool> {
     let now = timestamp_to_sql(Utc::now().naive_utc());
-    let n = conn.execute(
-        "UPDATE ANNOTATION SET COMMENT = ?1, UPDATED_AT = ?2 WHERE ANNOTATION_SK = ?3",
-        params![comment, now, annotation_id],
-    )?;
+    let n = match anchor {
+        Some(anchor) => conn.execute(
+            "UPDATE ANNOTATION SET COMMENT = ?1, ANCHOR = ?2, UPDATED_AT = ?3 WHERE ANNOTATION_SK = ?4",
+            params![comment, anchor, now, annotation_id],
+        )?,
+        None => conn.execute(
+            "UPDATE ANNOTATION SET COMMENT = ?1, UPDATED_AT = ?2 WHERE ANNOTATION_SK = ?3",
+            params![comment, now, annotation_id],
+        )?,
+    };
     Ok(n > 0)
 }
 
@@ -194,14 +205,14 @@ mod tests {
         assert!(got.created_at.is_some());
 
         // patch edits the comment.
-        assert!(patch_annotation(&conn, id, "edited").unwrap());
+        assert!(patch_annotation(&conn, id, "edited", None).unwrap());
         assert_eq!(
             get_annotation(&conn, id).unwrap().unwrap().comment,
             "edited"
         );
 
         // patch/delete of an absent row report false.
-        assert!(!patch_annotation(&conn, 999, "x").unwrap());
+        assert!(!patch_annotation(&conn, 999, "x", None).unwrap());
         assert!(!delete_annotation(&conn, 999).unwrap());
 
         assert!(delete_annotation(&conn, id).unwrap());

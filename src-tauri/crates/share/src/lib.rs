@@ -519,6 +519,7 @@ pub fn apply_content(
                     &AnnotationUpdateIn {
                         annotation_id: e.annotation_id,
                         comment,
+                        anchor: None,
                     },
                 )?;
             }

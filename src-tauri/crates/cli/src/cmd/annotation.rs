@@ -88,6 +88,7 @@ pub async fn run(cmd: AnnotationCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 &AnnotationUpdateIn {
                     annotation_id,
                     comment,
+                    anchor: None,
                 },
             )? {
                 fail(format!("Annotation {annotation_id} not found"));
