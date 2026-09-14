@@ -158,7 +158,9 @@ pub async fn route(state: &AppState, req: ApiRequest) -> Result<Value, ApiError>
     let res = route_inner(state, &req).await;
     match &res {
         Ok(_) if nudges_share_sync(&req) => crate::share_sync::nudge(),
-        Err(e) if e.status >= 500 => {
+        // Annotation errors log at any status: their 4xxs (anchor/source_id
+        // validation) are UI-flow bugs, not user typos.
+        Err(e) if e.status >= 500 || req.path.starts_with("/api/annotations") => {
             eprintln!(
                 "[linxiv] {} {} -> {}: {}",
                 req.method, req.path, e.status, e.detail
