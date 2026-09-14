@@ -126,6 +126,7 @@ impl Server {
                 &AnnotationUpdateIn {
                     annotation_id: p.annotation_id,
                     comment: p.comment.clone(),
+                    anchor: None,
                 },
             )
             .map_err(core_err)?;
