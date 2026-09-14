@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router";
 import { AppearanceSection } from "../components/settings/AppearanceSection";
 // import { ApiKeysSection } from "../components/settings/ApiKeysSection";
 import { StorageSection } from "../components/settings/StorageSection";
+import { ArxivSection } from "../components/settings/ArxivSection";
 import { CrossRefSection } from "../components/settings/CrossRefSection";
 import { OpenAlexSection } from "../components/settings/OpenAlexSection";
 import { OrcidBackfillSection } from "../components/settings/OrcidBackfillSection";
@@ -70,6 +71,7 @@ const GROUPS: SettingsGroup[] = [
         {/* Hidden until something reads GEMINI_API_KEY / OPENAI_API_KEY — the
             form saves keys no feature consumes yet.
         <ApiKeysSection /> */}
+        <ArxivSection />
         <CrossRefSection />
         <OpenAlexSection />
         <OrcidBackfillSection />

@@ -68,6 +68,11 @@ pub fn crossref_mailto() -> String {
     mailto_setting("CROSSREF_MAILTO")
 }
 
+/// arXiv contact address (`ARXIV_MAILTO`), sent in the User-Agent.
+pub fn arxiv_mailto() -> String {
+    mailto_setting("ARXIV_MAILTO")
+}
+
 /// Env var wins, user settings the fallback — the CLI and MCP server are separate
 /// processes, never seeing `PATCH /api/env`. `polite_user_agent` keeps printable ASCII.
 fn mailto_setting(key: &str) -> String {

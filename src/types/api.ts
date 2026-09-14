@@ -207,6 +207,7 @@ export interface Settings {
   /** Overlaid from the process env; set via `PATCH /api/env`. */
   CROSSREF_MAILTO?: string;
   OPENALEX_MAILTO?: string;
+  ARXIV_MAILTO?: string;
   /** Self-hosted iroh relay override; empty keeps n0's public relays. */
   p2p_relay_url?: string;
   p2p_relay_auth_token?: string;
