@@ -7,7 +7,8 @@ use crate::error::Result;
 use crate::models::{ARXIV_ID_PREFIX, ARXIV_PDF_MARKER};
 use crate::storage::db::transaction;
 
-// papers_fts.paper_id holds the SOURCE_ID *string*, not the int PAPER_ID.
+// papers_fts is keyed by rowid == SOURCE_FK; paper_id holds the SOURCE_ID
+// *string* (UNINDEXED, display/join only), not the int PAPER_ID.
 // init_db always creates papers_fts, so a DELETE/INSERT against it cannot miss.
 
 /// Rows the backfill works on: latest-version active papers with no TeX source
@@ -48,10 +49,14 @@ pub fn full_text_backfill_count(conn: &Connection) -> Result<i64> {
 /// paths can't disagree. Only for writes no trigger sees: a SOURCE_ID rename,
 /// an undelete, a merge; FULL_TEXT writers are covered by trigger already.
 pub(super) fn refresh_fts(tx: &Transaction, source_id: &str) -> Result<()> {
-    tx.execute("DELETE FROM papers_fts WHERE paper_id = ?", [source_id])?;
     tx.execute(
-        "INSERT INTO papers_fts(paper_id, full_text) \
-         SELECT source_id, full_text FROM paper_index_text WHERE source_id = ?",
+        "DELETE FROM papers_fts \
+         WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+        [source_id],
+    )?;
+    tx.execute(
+        "INSERT INTO papers_fts(rowid, paper_id, full_text) \
+         SELECT source_fk, source_id, full_text FROM paper_index_text WHERE source_id = ?",
         [source_id],
     )?;
     Ok(())

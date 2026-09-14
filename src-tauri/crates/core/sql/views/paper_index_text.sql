@@ -3,9 +3,9 @@
 -- index equal to it.
 --
 -- `paper_index_text` is the ONE definition of "the body a paper is searchable
--- by": the newest version that has any text, keyed by SOURCE_ID (papers_fts's
--- key, not PAPER_ID) and gated on the root still being active — inherited from
--- `papers`, so a soft-deleted paper yields no row and cannot be indexed. Rust's
+-- by": the newest version that has any text, keyed by SOURCE_FK (papers_fts's
+-- rowid) and gated on the root still being active — inherited from `papers`,
+-- so a soft-deleted paper yields no row and cannot be indexed. Rust's
 -- `refresh_fts` runs the same two statements against the same view, so the
 -- automatic path and the hand-called one cannot disagree.
 --
@@ -18,6 +18,7 @@ DROP VIEW IF EXISTS paper_index_text;
 
 CREATE VIEW paper_index_text AS
 SELECT
+    v.source_fk AS source_fk,
     v.source_id AS source_id,
     v.full_text AS full_text
 FROM papers v
@@ -40,10 +41,10 @@ CREATE TRIGGER papers_fts_meta_ai AFTER INSERT ON PAPER_META
     WHEN COALESCE(new.FULL_TEXT, '') != ''
 BEGIN
     DELETE FROM papers_fts
-     WHERE paper_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
-    INSERT INTO papers_fts (paper_id, full_text)
-    SELECT source_id, full_text FROM paper_index_text
-     WHERE source_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+    INSERT INTO papers_fts (rowid, paper_id, full_text)
+    SELECT source_fk, source_id, full_text FROM paper_index_text
+     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
 END;
 
 DROP TRIGGER IF EXISTS papers_fts_meta_au;
@@ -51,10 +52,10 @@ CREATE TRIGGER papers_fts_meta_au AFTER UPDATE OF FULL_TEXT ON PAPER_META
     WHEN old.FULL_TEXT IS NOT new.FULL_TEXT
 BEGIN
     DELETE FROM papers_fts
-     WHERE paper_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
-    INSERT INTO papers_fts (paper_id, full_text)
-    SELECT source_id, full_text FROM paper_index_text
-     WHERE source_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+    INSERT INTO papers_fts (rowid, paper_id, full_text)
+    SELECT source_fk, source_id, full_text FROM paper_index_text
+     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
 END;
 
 -- Dropping a version's meta row changes which body is newest, so the index has
@@ -66,8 +67,8 @@ CREATE TRIGGER papers_fts_meta_ad AFTER DELETE ON PAPER_META
     WHEN COALESCE(old.FULL_TEXT, '') != ''
 BEGIN
     DELETE FROM papers_fts
-     WHERE paper_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
-    INSERT INTO papers_fts (paper_id, full_text)
-    SELECT source_id, full_text FROM paper_index_text
-     WHERE source_id = (SELECT SOURCE_ID FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
+     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
+    INSERT INTO papers_fts (rowid, paper_id, full_text)
+    SELECT source_fk, source_id, full_text FROM paper_index_text
+     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
 END;
