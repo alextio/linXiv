@@ -42,7 +42,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/shared", label: "Shared", icon: <Share2 size={16} />, pageKey: "shared" },
   { to: "/graph", label: "Graph", icon: <Network size={16} />, pageKey: "graph" },
   { to: "/search", label: "Search", icon: <Search size={16} />, pageKey: "search" },
-  { to: "/doi", label: "DOI", icon: <Link2 size={16} />, pageKey: "doi" },
+  { to: "/doi", label: "Add Paper", icon: <Link2 size={16} />, pageKey: "doi" },
   { to: "/tags", label: "Tags", icon: <Tag size={16} />, pageKey: "tags" },
   { to: "/authors", label: "Authors", icon: <Users size={16} /> },
   // The editor takes the Notes slot: editor projects ARE frontmatter-flagged
