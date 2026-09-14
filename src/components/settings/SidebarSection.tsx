@@ -5,7 +5,7 @@ import { SettingGroup, SettingGroupLabel, SettingRow } from "./SettingRow";
 const SIDEBAR_PAGE_OPTIONS: { key: SidebarPageKey; label: string; description: string }[] = [
   { key: "graph",  label: "Graph",      description: "Citation graph explorer" },
   { key: "search", label: "Search",     description: "arXiv / OpenAlex search" },
-  { key: "doi",    label: "DOI Lookup", description: "Resolve papers by DOI" },
+  { key: "doi",    label: "Add Paper",  description: "Add papers by link, DOI, or arXiv ID" },
   { key: "tags",   label: "Tags",       description: "Tag browser" },
   { key: "notes",  label: "Editor (Notes)", description: "LaTeX editor (TeXbrain)" },
   { key: "shared", label: "Shared",     description: "P2P shared projects" },

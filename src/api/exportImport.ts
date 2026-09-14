@@ -7,12 +7,15 @@ import type {
   ImportBibtexBody,
   ImportCommitBody,
   ImportPdfBody,
+  ImportPdfUrlBody,
   ImportPreviewBody,
   ImportPreviewResponse,
   ImportedProject,
   OkReceipt,
   PaperImportResult,
   ProjectExportBody,
+  RecognizeBody,
+  RecognizedInput,
 } from "../types/api";
 
 export type { ImportPreviewResponse };
@@ -142,6 +145,29 @@ export async function exportObsidian(projectId: number, projectName?: string): P
   }
   const { blob } = await fetchBlob(`${BASE_URL}/api/projects/${projectId}/export/obsidian`);
   triggerDownload(blob, slug);
+}
+
+/** Classify a pasted string (arXiv link/id, DOI, direct PDF URL). Pure, no network on the backend. */
+export async function recognizePaperInput(input: string): Promise<RecognizedInput> {
+  const body: RecognizeBody = { input };
+  return libraryFetch<RecognizedInput>("/api/papers/import/recognize", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Fetch a direct PDF URL server-side (SSRF/size guarded) and import it. */
+export async function importPdfUrl(
+  url: string,
+  projectId?: number
+): Promise<PaperImportResult> {
+  const body: ImportPdfUrlBody = projectId
+    ? { url, project_id: projectId }
+    : { url };
+  return libraryFetch<PaperImportResult>("/api/papers/import/pdf-url", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function importBibtex(
