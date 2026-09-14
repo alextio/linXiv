@@ -207,6 +207,9 @@ pub(crate) fn render() -> String {
     out.push_str(&decl::<crate::route::versions::VersionsAckBody>());
     out.push_str(&decl::<crate::route::uploads::UploadPdfBody>());
     out.push_str(&decl::<crate::route::uploads::ImportPdfBody>());
+    out.push_str(&decl::<crate::route::uploads::RecognizeBody>());
+    out.push_str(&decl::<crate::route::uploads::ImportPdfUrlBody>());
+    out.push_str(&decl::<linxiv_core::recognize::RecognizedInput>());
     out.push_str(&decl::<crate::route::uploads::ImportBibtexBody>());
     out.push_str(&decl::<crate::route::uploads::ImportPreviewBody>());
     out.push_str(&decl::<crate::route::uploads::ImportCommitBody>());
