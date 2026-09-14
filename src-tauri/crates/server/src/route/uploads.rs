@@ -27,6 +27,8 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
     match (ctx.method, ctx.segs) {
         ("PUT", ["api", "papers", id, "pdf"]) => Some(attach_pdf(state, id, ctx)),
         ("POST", ["api", "papers", "import", "pdf"]) => Some(import_pdf(state, ctx).await),
+        ("POST", ["api", "papers", "import", "recognize"]) => Some(recognize_input(ctx)),
+        ("POST", ["api", "papers", "import", "pdf-url"]) => Some(import_pdf_url(state, ctx).await),
         ("POST", ["api", "papers", "import", "bibtex"]) => Some(import_bibtex(state, ctx)),
         ("POST", ["api", "projects", "import", "preview"]) => Some(import_preview(ctx)),
         ("POST", ["api", "projects", "import", "commit"]) => Some(import_commit(state, ctx)),
@@ -137,6 +139,73 @@ async fn import_pdf(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiErro
             &pdf_dir,
             &content,
             project_id,
+            max_pdf_bytes,
+            resolved,
+        )
+    })?;
+    crate::route::to_value(&result)
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct RecognizeBody {
+    pub input: String,
+}
+
+/// `POST /api/papers/import/recognize` — pure classify of a pasted string, no network.
+fn recognize_input(ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let b: RecognizeBody = ctx.parse_body()?;
+    crate::route::to_value(&linxiv_core::recognize::recognize(&b.input))
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
+pub struct ImportPdfUrlBody {
+    pub url: String,
+    pub project_id: Option<i64>,
+}
+
+/// `POST /api/papers/import/pdf-url` — SSRF/size-guarded fetch of a direct PDF
+/// URL, then the same two-phase import as `/import/pdf`.
+async fn import_pdf_url(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let b: ImportPdfUrlBody = ctx.parse_body()?;
+    let url = b.url.trim();
+    if url.is_empty() {
+        return Err(ApiError::new(422, "url must not be empty"));
+    }
+    let pdf_dir = state.pdf_dir.clone();
+    let max_pdf_bytes = config::UserSettings::load()?.pdf_save_limit_bytes();
+    // Fail-fast: a bad project_id is rejected before any network fetch; the
+    // commit lock re-checks (project can vanish in between).
+    state.with_conn(|conn| paper_import::precheck_import_pdf(conn, b.project_id))?;
+
+    // Guarded download to a temp file; the bytes then ride the standard import
+    // path. The downloader's cap is whatever the storage quota has left.
+    let remaining =
+        max_pdf_bytes.saturating_sub(linxiv_core::service::files::pdf_storage_bytes(&pdf_dir));
+    let tmp = std::env::temp_dir().join(format!(
+        "linxiv_urlpdf_{}_{}.pdf",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    linxiv_core::sources::download::download_pdf(&tmp, url, remaining).await?;
+    let content = std::fs::read(&tmp).map_err(|e| ApiError::new(500, e.to_string()));
+    let _ = std::fs::remove_file(&tmp);
+    let content = content?;
+    if !content.starts_with(b"%PDF") {
+        return Err(ApiError::new(400, "URL did not return a PDF"));
+    }
+    let resolved =
+        paper_import::resolve_import_pdf(&pdf_dir, &content, max_pdf_bytes, &config::data_dir())
+            .await?;
+    let result = state.with_conn(|conn| {
+        paper_import::commit_import_pdf(
+            conn,
+            &pdf_dir,
+            &content,
+            b.project_id,
             max_pdf_bytes,
             resolved,
         )
@@ -403,6 +472,69 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.status, 400);
+    }
+
+    #[tokio::test]
+    async fn recognize_classifies_without_network() {
+        let st = state();
+        for (input, want) in [
+            (
+                "https://arxiv.org/pdf/2204.12985v4.pdf",
+                json!({ "kind": "arxiv_id", "value": "2204.12985v4" }),
+            ),
+            (
+                "https://doi.org/10.1000/xyz",
+                json!({ "kind": "doi", "value": "10.1000/xyz" }),
+            ),
+            (
+                "https://example.com/foo.pdf",
+                json!({ "kind": "direct_pdf_url", "value": "https://example.com/foo.pdf" }),
+            ),
+            ("gibberish", json!({ "kind": "unrecognized" })),
+        ] {
+            let out = post(
+                &st,
+                "/api/papers/import/recognize",
+                json!({ "input": input }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out, want, "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn import_pdf_url_rejects_empty_and_private_urls_offline() {
+        let st = state();
+        let err = post(&st, "/api/papers/import/pdf-url", json!({ "url": "  " }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 422);
+        // The SSRF guard vetoes an IP-literal private host before any request.
+        let err = post(
+            &st,
+            "/api/papers/import/pdf-url",
+            json!({ "url": "http://169.254.169.254/x.pdf" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 422);
+        assert!(err.detail.contains("disallowed"), "{}", err.detail);
+    }
+
+    #[tokio::test]
+    async fn import_pdf_url_unknown_project_fails_before_fetch() {
+        // A bad project_id must 404 without touching the network (private-host
+        // URL would otherwise be vetoed with a different error).
+        let err = post(
+            &state(),
+            "/api/papers/import/pdf-url",
+            json!({ "url": "http://127.0.0.1/x.pdf", "project_id": 9999 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "Project 9999 not found");
     }
 
     #[tokio::test]

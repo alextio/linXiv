@@ -757,6 +757,22 @@ export type ImportPdfBody = {
   filename?: string | null,
 };
 
+export type RecognizeBody = {
+  input: string,
+};
+
+export type ImportPdfUrlBody = {
+  url: string,
+  project_id?: number | null,
+};
+
+export type RecognizedInput = {
+  "kind": "arxiv_id",
+  "value": string } | { "kind": "doi",
+  "value": string } | { "kind": "direct_pdf_url",
+  "value": string } | { "kind": "unrecognized"
+};
+
 export type ImportBibtexBody = {
   file_b64: string,
   project_id?: number | null,
