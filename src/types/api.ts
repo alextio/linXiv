@@ -61,6 +61,7 @@ export type {
   SavedPdfListing,
   DeletedPdf,
   BackupInfo,
+  PreMigrationBackup,
   DeletedPaperDetails,
   TrashedProjectRow,
   RestoredPaper,
