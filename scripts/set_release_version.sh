@@ -30,8 +30,15 @@ for file in src-tauri/Cargo.toml src-tauri/crates/*/Cargo.toml; do
 done
 
 # Sync the lock's workspace-crate versions, or CI's `cargo fetch --locked`
-# rejects the bump (npm version already does this for package-lock.json).
-cargo update --workspace --manifest-path src-tauri/Cargo.toml
+# rejects a committed bump (npm version already does this for
+# package-lock.json). Only when a toolchain is usable: release jobs run this
+# before rustup has a default (the shim exists but errors), stamp
+# ephemerally, and never gate on --locked — their builds resync the lock.
+if cargo --version >/dev/null 2>&1; then
+  cargo update --workspace --manifest-path src-tauri/Cargo.toml
+else
+  echo "warning: no usable cargo; skipping Cargo.lock sync" >&2
+fi
 
 # PKGBUILD reserves hyphens as separators between pkgver, pkgrel and arch.
 arch_ver="${ver//-/_}"
