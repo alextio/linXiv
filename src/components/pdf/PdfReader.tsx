@@ -83,6 +83,8 @@ type LoadedPdf = Parameters<NonNullable<DocumentProps["onLoadSuccess"]>>[0];
 interface SelToolbar {
   top: number;
   left: number;
+  /** Captured at mouseup — the live selection may collapse before the click. */
+  anchor: Anchor;
 }
 interface ActivePopup {
   id: number;
@@ -544,25 +546,32 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     const rects = range.getClientRects();
     const last = rects[rects.length - 1];
     if (!last) return;
-    setSelBar(clampToViewport(last.left, last.bottom + 6, 120, 40));
+    // Capture NOW: the webview can collapse the selection before the button
+    // click (observed on WebKitGTK), so the click commits this snapshot.
+    const anchor = selectionToAnchor(version, HIGHLIGHT_COLORS[0]);
+    if (!anchor) {
+      console.error("[linxiv] selection capture failed", {
+        page,
+        quote: sel.toString().trim().slice(0, 80),
+      });
+      setSelError(true);
+      return;
+    }
+    setSelError(false);
+    setSelBar({ ...clampToViewport(last.left, last.bottom + 6, 120, 40), anchor });
   }
 
   // Creates immediately with the default color; the popup that opens after is
   // where the color/comment can be changed, so the happy path is one click.
   function commitHighlight() {
-    const anchor = selectionToAnchor(version, HIGHLIGHT_COLORS[0]);
     const bar = selBar;
+    if (!bar) return;
     setSelBar(null);
     window.getSelection()?.removeAllRanges();
-    if (!anchor) {
-      setSelError(true);
-      return;
-    }
-    setSelError(false);
     createMut.mutate({
-      anchor,
-      top: bar?.top ?? 120,
-      left: bar?.left ?? 120,
+      anchor: bar.anchor,
+      top: bar.top,
+      left: bar.left,
     });
   }
 
