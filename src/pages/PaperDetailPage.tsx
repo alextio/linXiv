@@ -45,6 +45,7 @@ import { remotePdfPath } from "../api/remote";
 import { libraryFetch, useBackendStore } from "../stores/backend";
 import { errText } from "../lib/errText";
 import { pdfCanvasDpr } from "../lib/zoom";
+import { pdfDocumentOptions } from "../lib/pdfOptions";
 import { useUiStore } from "../stores/ui";
 
 const LATEST_VERSION_KEY = "latest" as const;
@@ -1266,6 +1267,7 @@ function PdfPane({
                 >
                   <Document
                     file={getPdfProxyUrl(paper.url)}
+                    options={pdfDocumentOptions}
                     onLoadSuccess={(pdf) => {
                       setPreviewNumPages(pdf.numPages);
                       pdfPreviewDocRef.current = pdf;
