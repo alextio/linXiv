@@ -29,6 +29,10 @@ for file in src-tauri/Cargo.toml src-tauri/crates/*/Cargo.toml; do
   rm -f "$file.bak"
 done
 
+# Sync the lock's workspace-crate versions, or CI's `cargo fetch --locked`
+# rejects the bump (npm version already does this for package-lock.json).
+cargo update --workspace --manifest-path src-tauri/Cargo.toml
+
 # PKGBUILD reserves hyphens as separators between pkgver, pkgrel and arch.
 arch_ver="${ver//-/_}"
 sed -i.bak "s/^pkgver=.*/pkgver=$arch_ver/" packaging/arch/PKGBUILD
