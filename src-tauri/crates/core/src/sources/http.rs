@@ -18,6 +18,9 @@ pub const GCS_HOSTS: &[&str] = &["storage.googleapis.com"];
 const DOWNLOAD_DOMAIN: &str = "export.arxiv.org";
 /// Cool-down after a 429.
 const RATELIMIT_WAIT: Duration = Duration::from_secs(60);
+/// Back-off before re-probing arXiv after a 403 User-Agent block.
+/// ponytail: fixed 60 min ceiling; a block that outlives it re-probes hourly.
+const UA_BLOCK_WAIT: Duration = Duration::from_secs(60 * 60);
 /// Minimum spacing between successive arXiv requests. Plan §5.4 pins 7 s to
 /// avoid an arXiv ban-risk regression.
 const MIN_SPACING: Duration = Duration::from_secs(7);
@@ -153,9 +156,11 @@ pub async fn get_guarded_with(
 
 /// Shared redirect-follow GET: `check` guards the initial URL and every hop
 /// before the request is sent. `arxiv_pace = Some(data_dir)` makes arXiv-host
-/// hops honour the cool-down + `MIN_SPACING`; a 429 on such a hop records the
-/// cool-down and returns `ratelimit_error` (outage vs. per-client wording)
-/// instead of the response. Un-paced hops still return 429s as-is.
+/// hops honour the cool-down + `MIN_SPACING` and fail fast during a UA-block
+/// back-off; a 429 on such a hop records the cool-down and returns
+/// `ratelimit_error` (outage vs. per-client wording), and a 403 records the
+/// UA block and returns the typed block error. Un-paced hops return non-3xx
+/// as-is.
 pub(crate) async fn get_checked<F, Fut>(
     url: &str,
     headers: &[(&str, &str)],
@@ -172,6 +177,9 @@ where
         check(current.clone()).await?;
         let pace_dir = arxiv_pace.filter(|_| is_arxiv_url(&current));
         if let Some(dir) = pace_dir {
+            if ua_block_remaining(dir, Utc::now()).is_some() {
+                return Err(ua_block_error());
+            }
             if let Some(remaining) = cooldown_remaining(dir, Utc::now()) {
                 tokio::time::sleep(remaining).await;
             }
@@ -193,6 +201,12 @@ where
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             if let Some(dir) = pace_dir {
                 return Err(paced_ratelimit(dir, resp).await);
+            }
+        }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            if let Some(dir) = pace_dir {
+                record_ua_block(dir);
+                return Err(ua_block_error());
             }
         }
         if resp.status().is_redirection() {
@@ -218,13 +232,20 @@ where
 }
 
 /// Consume a paced arXiv 429: record the cool-down under `data_dir`, then read
-/// the body to pick the `ratelimit_error` wording (service-wide vs. per-client).
-async fn paced_ratelimit(data_dir: &Path, resp: reqwest::Response) -> CoreError {
-    if let Err(e) = record_ratelimit(data_dir) {
-        return e;
+/// at most 1 KiB of the body to pick the `ratelimit_error` wording ("Rate
+/// exceeded" sits at the front; an arbitrarily large body must not be buffered
+/// just to build an error string).
+async fn paced_ratelimit(data_dir: &Path, mut resp: reqwest::Response) -> CoreError {
+    record_ratelimit(data_dir);
+    let mut buf = Vec::new();
+    while buf.len() < 1024 {
+        match resp.chunk().await {
+            Ok(Some(c)) => buf.extend_from_slice(&c),
+            _ => break,
+        }
     }
-    let body = resp.text().await.unwrap_or_default();
-    ratelimit_error(&body)
+    buf.truncate(1024);
+    ratelimit_error(&String::from_utf8_lossy(&buf))
 }
 
 /// Per arXiv's guidance, a 429 whose body says "Rate exceeded" means the API is
@@ -233,11 +254,11 @@ fn ratelimit_error(body: &str) -> CoreError {
     const NUDGE: &str = "Setting your arXiv contact email in Settings helps arXiv \
          tell botted traffic from real users; optional, but encouraged.";
     if body.contains("Rate exceeded") {
-        CoreError::Upstream(format!(
+        CoreError::ArxivRatelimit(format!(
             "arXiv API is temporarily unavailable for all users, retry later. {NUDGE}"
         ))
     } else {
-        CoreError::Upstream(format!(
+        CoreError::ArxivRatelimit(format!(
             "arXiv returned 429, rate limited; retry in 60s. {NUDGE}"
         ))
     }
@@ -288,10 +309,35 @@ fn record_request(data_dir: &Path) {
 }
 
 /// Record "rate-limited now" so a later process honours the cool-down.
-fn record_ratelimit(data_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(data_dir)
-        .and_then(|_| std::fs::write(data_dir.join(".arxiv_ratelimit"), Utc::now().to_rfc3339()))
-        .map_err(|e| CoreError::Internal(format!("write .arxiv_ratelimit: {e}")))
+/// Best-effort: an unwritable stamp must not mask the rate-limit outcome.
+fn record_ratelimit(data_dir: &Path) {
+    let _ = std::fs::create_dir_all(data_dir)
+        .and_then(|_| std::fs::write(data_dir.join(".arxiv_ratelimit"), Utc::now().to_rfc3339()));
+}
+
+/// Remaining back-off if `.arxiv_ua_block` under `data_dir` was written within
+/// `UA_BLOCK_WAIT` of `now`; `None` otherwise. Pure (clock injected) for tests.
+fn ua_block_remaining(data_dir: &Path, now: DateTime<Utc>) -> Option<Duration> {
+    stamp_remaining(&data_dir.join(".arxiv_ua_block"), UA_BLOCK_WAIT, now)
+}
+
+/// Record "UA-blocked now" so later requests fail fast instead of re-learning
+/// the block per request. Best-effort: an unwritable stamp must not mask the
+/// block outcome (the fail-fast then degrades to per-request 403s).
+fn record_ua_block(data_dir: &Path) {
+    let _ = std::fs::create_dir_all(data_dir)
+        .and_then(|_| std::fs::write(data_dir.join(".arxiv_ua_block"), Utc::now().to_rfc3339()));
+}
+
+/// A 403 from arXiv is a deliberate block on this client's User-Agent string;
+/// retrying only deepens it.
+fn ua_block_error() -> CoreError {
+    CoreError::ArxivUaBlocked(
+        "arXiv is refusing this app's User-Agent (HTTP 403). Set your arXiv \
+         contact email in Settings; if this persists, contact arXiv support at \
+         http://arxiv.org/support/general_help"
+            .into(),
+    )
 }
 
 /// Block until at least `MIN_SPACING` has elapsed since the previous arXiv GET.
@@ -322,22 +368,33 @@ fn claim_slot(next: &mut Option<Instant>, now: Instant) -> Instant {
     slot
 }
 
-/// arXiv GET: honour the cool-down + spacing under `data_dir`, substitute the
-/// polite `export.arxiv.org` mirror, then `get_guarded`; records the cool-down on 429.
+/// arXiv GET: substitute the polite `export.arxiv.org` mirror, then the paced
+/// `get_checked` (per-hop cool-down, spacing, UA-block fail-fast, typed 429/403
+/// errors — redirect hops pace too). Transport errors are retried; the typed
+/// 429/403 outcomes are not.
 pub async fn arxiv_get(url: &str, data_dir: &Path) -> Result<reqwest::Response> {
-    if let Some(remaining) = cooldown_remaining(data_dir, Utc::now()) {
-        tokio::time::sleep(remaining).await;
-    }
+    // Stored arXiv metadata still carries http:// links; going https directly
+    // saves a paced redirect hop per request.
     let target = substitute_domain(url, DOWNLOAD_DOMAIN)?;
+    let target = match target.strip_prefix("http://") {
+        Some(rest) => format!("https://{rest}"),
+        None => target,
+    };
 
     let mut last_err = None;
     for _ in 0..=NUM_RETRIES {
-        enforce_spacing(data_dir).await;
-        match get_guarded(&target, ARXIV_HOSTS).await {
-            Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                return Err(paced_ratelimit(data_dir, resp).await);
-            }
+        match get_checked(
+            &target,
+            &[],
+            |u| async move { assert_host_allowed(&u, ARXIV_HOSTS) },
+            Some(data_dir),
+        )
+        .await
+        {
             Ok(resp) => return Ok(resp),
+            Err(e @ (CoreError::ArxivUaBlocked(_) | CoreError::ArxivRatelimit(_))) => {
+                return Err(e)
+            }
             Err(e) => last_err = Some(e),
         }
     }
@@ -484,7 +541,7 @@ mod tests {
         // No file yet → no cool-down.
         assert!(cooldown_remaining(dir.path(), Utc::now()).is_none());
 
-        record_ratelimit(dir.path()).unwrap();
+        record_ratelimit(dir.path());
         let now = Utc::now();
         // Just recorded → ~60s remaining (allow a little slack for test wall-time).
         let remaining = cooldown_remaining(dir.path(), now).expect("fresh cool-down present");
@@ -516,6 +573,36 @@ mod tests {
         // A corrupt stamp degrades to no floor (per-process behaviour), not an error.
         std::fs::write(dir.path().join(".arxiv_last_request"), "not a date").unwrap();
         assert!(spacing_remaining(dir.path(), Utc::now()).is_none());
+    }
+
+    #[test]
+    fn ua_block_recorded_then_elapses() {
+        let dir = tempfile::tempdir().unwrap();
+        // No marker yet → no back-off.
+        assert!(ua_block_remaining(dir.path(), Utc::now()).is_none());
+
+        record_ua_block(dir.path());
+        let now = Utc::now();
+        // Just recorded → ~60min remaining (allow a little slack for test wall-time).
+        let remaining = ua_block_remaining(dir.path(), now).expect("fresh block present");
+        assert!(
+            remaining > Duration::from_secs(3540) && remaining <= UA_BLOCK_WAIT,
+            "remaining was {remaining:?}"
+        );
+        // A clock 61min later → back-off has elapsed.
+        assert!(ua_block_remaining(dir.path(), now + chrono::Duration::seconds(3660)).is_none());
+    }
+
+    /// A fresh block marker must short-circuit before any network or spacing wait.
+    #[tokio::test]
+    async fn arxiv_get_fails_fast_while_ua_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        record_ua_block(dir.path());
+        let err = arxiv_get("https://arxiv.org/abs/1234.5678", dir.path())
+            .await
+            .expect_err("fresh UA block must fail fast");
+        assert!(err.to_string().contains("User-Agent"), "got {err}");
+        assert!(err.to_string().contains("arxiv.org/support"), "got {err}");
     }
 
     #[tokio::test]
@@ -600,6 +687,23 @@ mod tests {
 
         let resp = client()
             .get(format!("{}/throttled", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let err = paced_ratelimit(dir.path(), resp).await;
+        assert!(err.to_string().contains("retry in 60s"), "got {err}");
+
+        // The body read is capped at 1 KiB: a marker buried past the cap is
+        // not scanned for (and a huge body is never buffered).
+        Mock::given(method("GET"))
+            .and(path("/huge"))
+            .respond_with(
+                ResponseTemplate::new(429).set_body_string("x".repeat(4096) + "Rate exceeded"),
+            )
+            .mount(&server)
+            .await;
+        let resp = client()
+            .get(format!("{}/huge", server.uri()))
             .send()
             .await
             .unwrap();

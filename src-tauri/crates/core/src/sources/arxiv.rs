@@ -242,7 +242,7 @@ pub fn parse_atom(xml: &[u8]) -> Result<Vec<PaperMetadata>> {
 // Network fetch
 // ---------------------------------------------------------------------------
 
-const QUERY_URL: &str = "http://export.arxiv.org/api/query";
+const QUERY_URL: &str = "https://export.arxiv.org/api/query";
 
 /// (sortBy, sortOrder) for the public sort keys.
 fn sort_params(sort: &str) -> Result<(&'static str, &'static str)> {

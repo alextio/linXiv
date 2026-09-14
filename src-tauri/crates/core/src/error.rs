@@ -27,6 +27,12 @@ pub enum CoreError {
     /// 404.
     #[error("{0}")]
     ArxivNotFound(String),
+    /// arXiv deliberately blocked this client's User-Agent (upstream 403). 502.
+    #[error("{0}")]
+    ArxivUaBlocked(String),
+    /// arXiv 429, own throttling or the service-wide limit. 502.
+    #[error("{0}")]
+    ArxivRatelimit(String),
     /// 404.
     #[error("{0}")]
     OpenAlexNotFound(String),
@@ -68,7 +74,7 @@ impl CoreError {
             Conflict(_) => 409,
             PdfTooLarge(_) => 413,
             PdfImport(_) | ProjectImport(_) | Validation(_) => 422,
-            OpenAlexHttp(_) | Upstream(_) => 502,
+            OpenAlexHttp(_) | ArxivUaBlocked(_) | ArxivRatelimit(_) | Upstream(_) => 502,
             Internal(_) => 500,
         }
     }
@@ -109,6 +115,8 @@ mod tests {
         assert_eq!(CoreError::PaperLink("x".into()).http_status(), 400);
         assert_eq!(CoreError::PdfTooLarge("big".into()).http_status(), 413);
         assert_eq!(CoreError::OpenAlexHttp("502".into()).http_status(), 502);
+        assert_eq!(CoreError::ArxivUaBlocked("ua".into()).http_status(), 502);
+        assert_eq!(CoreError::ArxivRatelimit("429".into()).http_status(), 502);
         assert_eq!(CoreError::Conflict("dup".into()).http_status(), 409);
         assert_eq!(CoreError::Internal("boom".into()).http_status(), 500);
     }
