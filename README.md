@@ -36,14 +36,14 @@ Upload your PDFs, create projects, manage notes, tags, and annotations to organi
 
 ## Install
 
-Prebuilt installers for Linux, macOS, and Windows are on the [releases page](https://github.com/linxiv-dev/linXiv/releases/latest):
+Prebuilt installers for Linux, macOS, and Windows are on the [releases page](https://github.com/linxiv-dev/linXiv/releases/latest) — latest release: [v0.5.1](https://github.com/linxiv-dev/linXiv/releases/tag/v0.5.1):
 
 | Platform | Download |
 | --- | --- |
-| Linux | `.deb`, `.rpm`, or `.AppImage` |
-| macOS (Apple silicon) | `.dmg` (arm64) |
-| macOS (Intel) | `.dmg` (x86_64) |
-| Windows | `.exe` (NSIS) or `.msi` |
+| Linux | [`.deb`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv_0.5.1_amd64.deb), [`.rpm`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv-0.5.1-1.x86_64.rpm), or [`.AppImage`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv_0.5.1_amd64.AppImage) |
+| macOS (Apple silicon) | [`.dmg`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv_0.5.1_aarch64.dmg) (arm64) |
+| macOS (Intel) | [raw app binary](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/raw-linxiv-app-x86_64-apple-darwin) (x86_64, no `.dmg`) |
+| Windows | [`.exe`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv_0.5.1_x64-setup.exe) (NSIS) or [`.msi`](https://github.com/linxiv-dev/linXiv/releases/download/v0.5.1/linXiv_0.5.1_x64_en-US.msi) |
 
 The macOS and Windows builds are unsigned.
 
