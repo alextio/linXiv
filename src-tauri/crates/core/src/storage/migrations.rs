@@ -41,6 +41,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     paper_to_author_unique(conn)?;
     integrity_quarantine_table(conn)?;
     paper_repairs_table(conn)?;
+    schema_migration_events_table(conn)?;
     Ok(())
 }
 
@@ -450,6 +451,16 @@ fn paper_repairs_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ── 24. SCHEMA_MIGRATION_EVENTS table (migration audit log) ─────────────────
+
+/// One row per version transition `init_db` runs: from/target version, status,
+/// path of the pre-migration copy. Also called FIRST in `init_db` (before any
+/// other DDL) so a failing legacy upgrade still gets its row.
+pub fn schema_migration_events_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../sql/tables/SCHEMA_MIGRATION_EVENTS.sql"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +511,7 @@ mod tests {
             "RSS_CACHE_ENTRY",
             "INTEGRITY_QUARANTINE",
             "PAPER_REPAIRS",
+            "SCHEMA_MIGRATION_EVENTS",
         ] {
             let n: i64 = conn
                 .query_row(
