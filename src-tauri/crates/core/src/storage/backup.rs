@@ -43,6 +43,82 @@ pub fn backup(conn: &Connection, dest: &Path) -> Result<BackupInfo> {
     })
 }
 
+/// How many pre-migration copies to keep in `backups/`.
+const PRE_MIGRATION_KEEP: usize = 5;
+
+/// One pre-migration copy in `backups/`; `modified_at` is ISO-8601 UTC.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+pub struct PreMigrationBackup {
+    pub name: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub modified_at: String,
+}
+
+/// The `backups/` directory beside the DB file.
+fn backups_dir(db_path: &Path) -> PathBuf {
+    db_path.parent().unwrap_or(Path::new(".")).join("backups")
+}
+
+/// List the pre-migration copies beside `db_path`, newest first. Missing
+/// `backups/` (no upgrade has run) is an empty list, not an error.
+/// ponytail: list-only v1 — a restore flow should reuse `restore` plus a
+/// picker UI over these paths once someone actually needs it.
+pub fn list_pre_migration_backups(db_path: &Path) -> Result<Vec<PreMigrationBackup>> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(backups_dir(db_path)) else {
+        return Ok(out);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("papers-pre-") && name.ends_with(".db")) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        out.push(PreMigrationBackup {
+            name,
+            path: entry.path(),
+            bytes: meta.len(),
+            modified_at: chrono::DateTime::<chrono::Utc>::from(modified)
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+        });
+    }
+    // Fixed-width ISO strings sort chronologically; newest first.
+    out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    Ok(out)
+}
+
+/// Snapshot the DB into `backups/papers-pre-<from>-<stamp>.db` before a version
+/// transition migrates it (`VACUUM INTO` via `backup`: atomic and WAL-safe,
+/// unlike a raw copy of a live DB), then prune to `PRE_MIGRATION_KEEP` copies.
+pub fn pre_migration_backup(
+    conn: &Connection,
+    db_path: &Path,
+    from_version: &str,
+) -> Result<BackupInfo> {
+    let dir = backups_dir(db_path);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        CoreError::Internal(format!(
+            "cannot create pre-migration backups dir {}: {e}",
+            dir.display()
+        ))
+    })?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let info = backup(
+        conn,
+        &dir.join(format!("papers-pre-{from_version}-{stamp}.db")),
+    )?;
+    for old in list_pre_migration_backups(db_path)?
+        .iter()
+        .skip(PRE_MIGRATION_KEEP)
+    {
+        let _ = std::fs::remove_file(&old.path);
+    }
+    Ok(info)
+}
+
 /// `p` with `suffix` appended to its file name (e.g. `db.sqlite` → `db.sqlite-wal`).
 fn sidecar(p: &Path, suffix: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
@@ -262,6 +338,53 @@ mod tests {
             "CREATE TABLE PAPER (id INTEGER PRIMARY KEY); INSERT INTO PAPER (id) VALUES (1);",
         )
         .unwrap();
+    }
+
+    /// The retention cap: seed `backups/` past the cap with older files, take a
+    /// fresh copy, and only the newest `PRE_MIGRATION_KEEP` survive.
+    #[test]
+    fn pre_migration_backup_prunes_to_the_cap_keeping_newest() {
+        let dir = std::env::temp_dir().join(format!("linxiv-premig-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("papers.db");
+        make_linxiv_like_db(&db_path);
+        let conn = crate::storage::db::open(&db_path).unwrap();
+
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        for i in 0..PRE_MIGRATION_KEEP {
+            let p = backups.join(format!("papers-pre-0.0.{i}-20200101-00000{i}.db"));
+            std::fs::write(&p, b"old copy").unwrap();
+            // Backdate so the fresh copy below is unambiguously newest.
+            std::fs::File::open(&p)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(3600 - i as u64),
+                )
+                .unwrap();
+        }
+        std::fs::write(backups.join("unrelated.txt"), b"keep me").unwrap();
+
+        let info = pre_migration_backup(&conn, &db_path, "0.1.2").unwrap();
+        assert!(info.path.exists());
+
+        let listed = list_pre_migration_backups(&db_path).unwrap();
+        assert_eq!(listed.len(), PRE_MIGRATION_KEEP, "pruned to the cap");
+        assert_eq!(listed[0].path, info.path, "newest-first, fresh copy on top");
+        assert!(listed
+            .iter()
+            .all(|b| b.bytes > 0 && !b.modified_at.is_empty()));
+        assert!(
+            !backups.join("papers-pre-0.0.0-20200101-000000.db").exists(),
+            "the oldest copy is the one pruned"
+        );
+        assert!(
+            backups.join("unrelated.txt").exists(),
+            "prune only touches papers-pre-*.db"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
