@@ -19,6 +19,7 @@ import { apiFetch, bytesToBase64, isTauri } from "../api/client";
 import type { Note, Paper, Annotation, UploadPdfBody } from "../types/api";
 import { PdfReader } from "../components/pdf/PdfReader";
 import { PagePill } from "../components/pdf/PagePill";
+import { ColorSwatches } from "../components/pdf/ColorSwatches";
 import { parseAnchor } from "../lib/pdfAnchor";
 import {
   invalidateAnnotationQueries,
@@ -896,9 +897,9 @@ export default function PaperDetailPage() {
 }
 
 // One annotation in the Annotations tab: a color chip + quoted highlight + the
-// written comment. The quote expands to full text, and the comment is editable
-// inline (add/edit/remove) so a highlight can carry a comment without opening the
-// reader popup. All edits invalidate the shared cache, keeping the reader in sync.
+// written comment. The quote expands to full text; comment and color are editable
+// inline, mirroring the reader popup. All edits invalidate the shared cache,
+// keeping the reader in sync.
 function AnnotationCard({
   annotation,
   onDelete,
@@ -913,18 +914,36 @@ function AnnotationCard({
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(annotation.comment);
-  // Comment as seen when editing opened; diverges if another surface saves first.
+  const [draftColor, setDraftColor] = useState(anchor?.color ?? "");
+  // Comment/color as seen when editing opened; diverge if another surface saves first.
   const [baseComment, setBaseComment] = useState(annotation.comment);
-  const stale = baseComment !== annotation.comment;
+  const [baseColor, setBaseColor] = useState(anchor?.color ?? "");
+  const stale =
+    baseComment !== annotation.comment || baseColor !== (anchor?.color ?? "");
+  const unchanged = draft === annotation.comment && draftColor === (anchor?.color ?? "");
 
   const updateMutation = useMutation({
-    mutationFn: (comment: string) => updateAnnotation(annotation.id, comment),
-    onSuccess: (_data, comment) => {
-      setBaseComment(comment);
+    mutationFn: (v: { comment: string; anchor?: string }) =>
+      updateAnnotation(annotation.id, v.comment, v.anchor),
+    onSuccess: (_data, v) => {
+      setBaseComment(v.comment);
+      setBaseColor(draftColor);
       invalidateAnnotationQueries(queryClient);
       setEditing(false);
     },
   });
+
+  function saveEdit() {
+    if (updateMutation.isPending || unchanged || stale) return;
+    updateMutation.mutate({
+      comment: draft,
+      // Only ship a new anchor when the color actually changed.
+      anchor:
+        anchor && draftColor !== anchor.color
+          ? JSON.stringify({ ...anchor, color: draftColor })
+          : undefined,
+    });
+  }
 
   // Long quotes clamp to 3 lines; offer the toggle only when there's plausibly
   // more to show (length heuristic, not exact overflow measurement).
@@ -963,19 +982,17 @@ function AnnotationCard({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={submitOnCtrlEnter(() => {
-                  if (!(updateMutation.isPending || draft === annotation.comment || stale))
-                    updateMutation.mutate(draft);
-                })}
+                onKeyDown={submitOnCtrlEnter(saveEdit)}
                 placeholder="Add a comment…"
                 rows={3}
                 autoFocus
                 className="w-full resize-none rounded border border-border bg-surface2 px-2 py-1.5 text-sm text-text focus:outline-none focus:border-accent"
               />
+              {anchor && <ColorSwatches value={draftColor} onChange={setDraftColor} />}
               <div className="flex items-center gap-3 text-xs">
                 <button
-                  disabled={updateMutation.isPending || draft === annotation.comment || stale}
-                  onClick={() => updateMutation.mutate(draft)}
+                  disabled={updateMutation.isPending || unchanged || stale}
+                  onClick={saveEdit}
                   className="font-medium text-accent hover:underline disabled:opacity-40"
                 >
                   {updateMutation.isPending ? "Saving…" : "Save"}
@@ -983,6 +1000,7 @@ function AnnotationCard({
                 <button
                   onClick={() => {
                     setDraft(annotation.comment);
+                    setDraftColor(anchor?.color ?? "");
                     updateMutation.reset();
                     setEditing(false);
                   }}
@@ -992,7 +1010,7 @@ function AnnotationCard({
                 </button>
                 {stale ? (
                   <span style={{ color: "var(--color-danger)" }}>
-                    Comment was updated elsewhere. Cancel to reload before saving.
+                    Annotation was updated elsewhere. Cancel to reload before saving.
                   </span>
                 ) : (
                   updateMutation.isError && (
@@ -1017,13 +1035,15 @@ function AnnotationCard({
               <button
                 onClick={() => {
                   setDraft(annotation.comment);
+                  setDraftColor(anchor?.color ?? "");
                   setBaseComment(annotation.comment);
+                  setBaseColor(anchor?.color ?? "");
                   updateMutation.reset();
                   setEditing(true);
                 }}
                 className="font-medium text-accent hover:underline"
               >
-                {annotation.comment ? "Edit comment" : "Add comment"}
+                {annotation.comment ? "Edit" : "Add comment"}
               </button>
             )}
             <button
