@@ -6,6 +6,7 @@ import {
   effectiveMatch,
   findConflict,
   hasBindableModifier,
+  isTypingTarget,
 } from "./shortcuts.ts";
 
 const keyEvent = (overrides: Partial<KeyboardEvent>): KeyboardEvent =>
@@ -86,4 +87,29 @@ test("effectiveMatch prefers a user override over the shortcut's default", () =>
 test("effectiveMatch falls back to the shortcut's default with no override", () => {
   const s = SHORTCUTS.find((s) => s.id === "zoom-in")!;
   assert.equal(effectiveMatch(s, {}), s.match);
+});
+
+test("pdf-find matches Ctrl/Cmd+F only", () => {
+  const match = shortcut("pdf-find");
+  assert.equal(match(keyEvent({ ctrlKey: true, key: "f" })), true);
+  assert.equal(match(keyEvent({ metaKey: true, key: "F" })), true);
+  assert.equal(match(keyEvent({ ctrlKey: true, altKey: true, key: "f" })), false);
+  assert.equal(match(keyEvent({ key: "f" })), false);
+});
+
+test("pdf-find-slash matches a bare slash and skips while typing", () => {
+  const s = SHORTCUTS.find((s) => s.id === "pdf-find-slash")!;
+  assert.equal(s.skipWhenTyping, true);
+  assert.equal(s.match!(keyEvent({ key: "/" })), true);
+  assert.equal(s.match!(keyEvent({ ctrlKey: true, key: "/" })), false);
+  assert.equal(s.match!(keyEvent({ key: "?" })), false);
+
+  assert.equal(isTypingTarget({ tagName: "INPUT" } as unknown as EventTarget), true);
+  assert.equal(isTypingTarget({ tagName: "TEXTAREA" } as unknown as EventTarget), true);
+  assert.equal(
+    isTypingTarget({ tagName: "DIV", isContentEditable: true } as unknown as EventTarget),
+    true
+  );
+  assert.equal(isTypingTarget({ tagName: "DIV" } as unknown as EventTarget), false);
+  assert.equal(isTypingTarget(null), false);
 });
