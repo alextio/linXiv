@@ -15,6 +15,7 @@ import { MathText } from "../lib/tex";
 import { invalidatePaperMutationQueries } from "../lib/paperMutations";
 import { errText } from "../lib/errText";
 import { pdfCanvasDpr } from "../lib/zoom";
+import { pdfDocumentOptions } from "../lib/pdfOptions";
 import { useUiStore } from "../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -176,6 +177,7 @@ export default function PdfPreviewPage() {
         <div ref={containerRef} className="flex-1 overflow-y-auto bg-[#525659]">
           <Document
             file={pdfSrc}
+            options={pdfDocumentOptions}
             onLoadSuccess={(pdf) => { setNumPages(pdf.numPages); pdfDocRef.current = pdf; }}
             loading={
               <div className="flex items-center justify-center gap-2 py-16 text-white/60 text-sm">
