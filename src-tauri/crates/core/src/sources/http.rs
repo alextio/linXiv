@@ -173,7 +173,7 @@ where
             if let Some(remaining) = cooldown_remaining(dir, Utc::now()) {
                 tokio::time::sleep(remaining).await;
             }
-            enforce_spacing().await;
+            enforce_spacing(dir).await;
         }
         let mut req = client.get(&current);
         if is_arxiv_url(&current) {
@@ -241,15 +241,38 @@ fn substitute_domain(url: &str, domain: &str) -> Result<String> {
     Ok(parsed.into())
 }
 
-/// Remaining cool-down if `.arxiv_ratelimit` under `data_dir` was written within
-/// `RATELIMIT_WAIT` of `now`; `None` otherwise. Pure (clock injected) for tests.
-fn cooldown_remaining(data_dir: &Path, now: DateTime<Utc>) -> Option<Duration> {
-    let contents = std::fs::read_to_string(data_dir.join(".arxiv_ratelimit")).ok()?;
+/// Remaining wait if the rfc3339 stamp in `file` was written within `wait` of
+/// `now`; `None` otherwise (including unreadable/garbage stamps). Pure for tests.
+fn stamp_remaining(file: &Path, wait: Duration, now: DateTime<Utc>) -> Option<Duration> {
+    let contents = std::fs::read_to_string(file).ok()?;
     let last = DateTime::parse_from_rfc3339(contents.trim())
         .ok()?
         .with_timezone(&Utc);
     let elapsed = now.signed_duration_since(last).to_std().ok()?;
-    RATELIMIT_WAIT.checked_sub(elapsed)
+    wait.checked_sub(elapsed)
+}
+
+/// Remaining cool-down if `.arxiv_ratelimit` under `data_dir` was written within
+/// `RATELIMIT_WAIT` of `now`; `None` otherwise. Pure (clock injected) for tests.
+fn cooldown_remaining(data_dir: &Path, now: DateTime<Utc>) -> Option<Duration> {
+    stamp_remaining(&data_dir.join(".arxiv_ratelimit"), RATELIMIT_WAIT, now)
+}
+
+/// Remaining cross-process spacing if `.arxiv_last_request` under `data_dir`
+/// was written within `MIN_SPACING` of `now`; `None` otherwise.
+fn spacing_remaining(data_dir: &Path, now: DateTime<Utc>) -> Option<Duration> {
+    stamp_remaining(&data_dir.join(".arxiv_last_request"), MIN_SPACING, now)
+}
+
+/// Record "arXiv request sent now" so a concurrent process spaces off it.
+/// Best-effort: an FS error degrades to per-process spacing, never fails the GET.
+fn record_request(data_dir: &Path) {
+    let _ = std::fs::create_dir_all(data_dir).and_then(|_| {
+        std::fs::write(
+            data_dir.join(".arxiv_last_request"),
+            Utc::now().to_rfc3339(),
+        )
+    });
 }
 
 /// Record "rate-limited now" so a later process honours the cool-down.
@@ -261,14 +284,22 @@ fn record_ratelimit(data_dir: &Path) -> Result<()> {
 
 /// Block until at least `MIN_SPACING` has elapsed since the previous arXiv GET.
 /// Callers claim their slot while still holding the lock, so concurrent callers
-/// queue at 7 s intervals instead of firing together.
-async fn enforce_spacing() {
+/// queue at 7 s intervals instead of firing together. The `.arxiv_last_request`
+/// stamp under `data_dir` adds a cross-process floor on top: the app, CLI, and
+/// MCP server divide the budget instead of multiplying it.
+async fn enforce_spacing(data_dir: &Path) {
     static NEXT: Mutex<Option<Instant>> = Mutex::new(None);
     let now = Instant::now();
     let slot = claim_slot(&mut NEXT.lock().unwrap(), now);
     if let Some(w) = slot.checked_duration_since(now) {
         tokio::time::sleep(w).await;
     }
+    // ponytail: read-then-send race — two processes can both see the window as
+    // clear and fire together once; advisory file lock (flock) if it ever matters.
+    if let Some(w) = spacing_remaining(data_dir, Utc::now()) {
+        tokio::time::sleep(w).await;
+    }
+    record_request(data_dir);
 }
 
 /// Take the next free slot and reserve the one after it. Pure (state + clock
@@ -289,7 +320,7 @@ pub async fn arxiv_get(url: &str, data_dir: &Path) -> Result<reqwest::Response> 
 
     let mut last_err = None;
     for _ in 0..=NUM_RETRIES {
-        enforce_spacing().await;
+        enforce_spacing(data_dir).await;
         match get_guarded(&target, ARXIV_HOSTS).await {
             Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 record_ratelimit(data_dir)?;
@@ -453,6 +484,28 @@ mod tests {
         );
         // A clock 61s later → cool-down has elapsed.
         assert!(cooldown_remaining(dir.path(), now + chrono::Duration::seconds(61)).is_none());
+    }
+
+    #[test]
+    fn cross_process_spacing_recorded_then_elapses() {
+        let dir = tempfile::tempdir().unwrap();
+        // No stamp yet → no cross-process floor.
+        assert!(spacing_remaining(dir.path(), Utc::now()).is_none());
+
+        record_request(dir.path());
+        let now = Utc::now();
+        // Just recorded → ~7s remaining (allow a little slack for test wall-time).
+        let remaining = spacing_remaining(dir.path(), now).expect("fresh stamp present");
+        assert!(
+            remaining > Duration::from_secs(5) && remaining <= MIN_SPACING,
+            "remaining was {remaining:?}"
+        );
+        // A clock 8s later → the other process's window has elapsed.
+        assert!(spacing_remaining(dir.path(), now + chrono::Duration::seconds(8)).is_none());
+
+        // A corrupt stamp degrades to no floor (per-process behaviour), not an error.
+        std::fs::write(dir.path().join(".arxiv_last_request"), "not a date").unwrap();
+        assert!(spacing_remaining(dir.path(), Utc::now()).is_none());
     }
 
     #[tokio::test]
