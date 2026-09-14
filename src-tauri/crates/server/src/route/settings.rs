@@ -1,5 +1,5 @@
-//! `/api/settings` + `PATCH /api/env`. GET: the flat settings object with
-//! CROSSREF_MAILTO/OPENALEX_MAILTO overlaid (no wrapper key); PATCH: batch `set`.
+//! `/api/settings` + `PATCH /api/env`. GET: the flat settings object with the
+//! mailto env keys overlaid (no wrapper key); PATCH: batch `set`.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -11,12 +11,13 @@ use crate::route::{to_value, ApiError, ReqCtx};
 use crate::state::AppState;
 
 /// Env values merged into the GET body.
-const SETTINGS_ENV_KEYS: [&str; 2] = ["CROSSREF_MAILTO", "OPENALEX_MAILTO"];
+const SETTINGS_ENV_KEYS: [&str; 3] = ["CROSSREF_MAILTO", "OPENALEX_MAILTO", "ARXIV_MAILTO"];
 
 /// The only keys `PATCH /api/env` may set.
-const ALLOWED_ENV_KEYS: [&str; 4] = [
+const ALLOWED_ENV_KEYS: [&str; 5] = [
     "CROSSREF_MAILTO",
     "OPENALEX_MAILTO",
+    "ARXIV_MAILTO",
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
 ];
