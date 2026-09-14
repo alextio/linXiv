@@ -1,10 +1,13 @@
--- FTS5 index over PAPER_META.FULL_TEXT. `paper_id` holds the SOURCE_ID *string*
--- (search hydrates its hits from `latest_papers` by source_id), so there is at
--- most one row per paper, not one per version.
+-- FTS5 index over PAPER_META.FULL_TEXT, one row per paper: rowid == SOURCE_FK
+-- (AUTOINCREMENT, so VACUUM-stable), mirroring notes_fts (rowid == NOTE_SK), so
+-- every trigger/refresh delete is a rowid lookup instead of a full FTS scan.
+-- `paper_id` still carries the SOURCE_ID *string* (search hydrates its hits
+-- from `latest_papers` by source_id) but is UNINDEXED: display/join only.
 --
 -- The index is DERIVED, never hand-maintained: triggers on PAPER_META re-derive
 -- it from `paper_index_text` on every write to FULL_TEXT, so a writer that
 -- stores text and forgets the index cannot desync search — there is nothing left
 -- to forget. The view and those triggers live in views/paper_index_text.sql,
--- applied after the migrations for the reason that file gives.
-CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(paper_id, full_text);
+-- applied after the migrations for the reason that file gives. Existing installs
+-- get this shape from the papers_fts_rowid_key migration, which rebuilds.
+CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(paper_id UNINDEXED, full_text);

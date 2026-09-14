@@ -390,9 +390,8 @@ pub fn repair_paper(
         let Some((pid, ver)) = row else { return Ok(()) };
 
         if renamed {
-            // The FTS row's key IS the source_id, so a rename is a delete under
-            // the old id plus a rebuild under the new one.
-            tx.execute("DELETE FROM papers_fts WHERE paper_id = ?", [&old_id])?;
+            // The FTS key (rowid == SOURCE_FK) survives the rename; re-derive
+            // so the row's stored paper_id string picks up the new id.
             refresh_fts(tx, new_id)?;
         }
 
