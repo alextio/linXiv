@@ -122,6 +122,7 @@ pub(crate) fn render() -> String {
     out.push_str(&decl::<linxiv_core::storage::queries::author::OrcidCandidate>());
     out.push_str(&decl::<linxiv_core::service::export_import::ImportPreview>());
     out.push_str(&decl::<linxiv_core::storage::backup::BackupInfo>());
+    out.push_str(&decl::<linxiv_core::storage::backup::PreMigrationBackup>());
     out.push_str(&decl::<linxiv_core::service::paper::DeletedPaperDetails>());
     out.push_str(&decl::<linxiv_core::service::trash::TrashedProjectRow>());
     out.push_str(&decl::<linxiv_core::service::trash::RestoredPaper>());
