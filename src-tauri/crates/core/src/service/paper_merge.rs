@@ -362,6 +362,23 @@ mod tests {
         assert_eq!(row(1), (expect("arxiv_Wv1.pdf"), true));
         assert_eq!(row(2), (expect("arxiv_Wv2.pdf"), true));
         assert_eq!(row(3), (expect("arxiv_Wv3.pdf"), true));
+
+        // The merge left its PAPER_REPAIRS trail row: loser -> winner.
+        let trail: (String, String, String) = conn
+            .query_row(
+                "SELECT OLD_SOURCE_ID, NEW_SOURCE_ID, ACTOR FROM PAPER_REPAIRS",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            trail,
+            (
+                "local:L".to_string(),
+                "arxiv:W".to_string(),
+                "merge".to_string()
+            )
+        );
     }
 
     /// The rename must move the storage-cache entry with the file: a phantom entry
