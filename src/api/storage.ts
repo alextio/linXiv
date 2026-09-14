@@ -2,11 +2,17 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { apiFetch } from "./client";
 import type {
   BackupInfo,
+  PreMigrationBackup,
   StorageBackupBody,
   StorageRestoreBody,
 } from "../types/api";
 
-export type { BackupInfo };
+export type { BackupInfo, PreMigrationBackup };
+
+/** List the copies init takes before a schema upgrade, newest first. */
+export function listPreMigrationBackups(): Promise<PreMigrationBackup[]> {
+  return apiFetch<PreMigrationBackup[]>("/api/storage/pre-migration-backups");
+}
 
 /** Pick a destination with the OS save dialog and snapshot the DB there.
  *  Returns null when the user cancels the dialog. */

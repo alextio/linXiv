@@ -16,8 +16,15 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
     match (ctx.method, ctx.segs) {
         ("POST", ["api", "storage", "backup"]) => Some(backup(state, ctx)),
         ("POST", ["api", "storage", "restore"]) => Some(restore(state, ctx)),
+        ("GET", ["api", "storage", "pre-migration-backups"]) => Some(list_pre_migration_backups()),
         _ => None,
     }
+}
+
+/// `GET /api/storage/pre-migration-backups` → `PreMigrationBackup[]`, the
+/// copies init takes before a schema upgrade, newest first.
+fn list_pre_migration_backups() -> Result<Value, ApiError> {
+    to_value(&db_admin::list_pre_migration_backups()?)
 }
 
 #[derive(Deserialize, ts_rs::TS)]

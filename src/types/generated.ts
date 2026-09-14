@@ -418,6 +418,13 @@ export type BackupInfo = {
   bytes: number,
 };
 
+export type PreMigrationBackup = {
+  name: string,
+  path: string,
+  bytes: number,
+  modified_at: string,
+};
+
 export type DeletedPaperDetails = {
   source_fk: number,
   source_id: string,

@@ -13,7 +13,10 @@ use rusqlite::Connection;
 
 use crate::config;
 use crate::error::{CoreError, Result};
-use crate::storage::{self, backup::BackupInfo};
+use crate::storage::{
+    self,
+    backup::{BackupInfo, PreMigrationBackup},
+};
 
 /// Open the app database at its configured path with the schema applied.
 pub fn open_app_db() -> Result<Connection> {
@@ -60,6 +63,11 @@ pub fn reject_live_db(path: &Path, field: &str, role: &str) -> Result<()> {
 /// Snapshot the live DB to `dest` (must not exist). See `storage::backup`.
 pub fn backup(conn: &Connection, dest: &Path) -> Result<BackupInfo> {
     storage::backup(conn, dest)
+}
+
+/// List the pre-migration copies beside the live DB, newest first.
+pub fn list_pre_migration_backups() -> Result<Vec<PreMigrationBackup>> {
+    storage::backup::list_pre_migration_backups(&config::db_path())
 }
 
 /// Reject a restore source that is not a usable linXiv snapshot. Callers run this
