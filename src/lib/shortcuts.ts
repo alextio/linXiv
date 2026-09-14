@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useUiStore } from "../stores/ui.ts";
 import { useShortcutsStore, type ShortcutOverride } from "../stores/shortcuts.ts";
 import { ZOOM_STEP, DEFAULT_ZOOM } from "./zoom.ts";
+import { PDF_FIND_EVENT } from "./pdfFind.ts";
 
 // Central inventory of the app's keyboard shortcuts, and the single source of
 // truth: the Settings "Shortcuts" view renders it, useGlobalShortcuts() binds
@@ -25,6 +26,25 @@ export interface Shortcut {
   /** Present only for window-bound shortcuts dispatched by useGlobalShortcuts. */
   match?: (e: KeyboardEvent) => boolean;
   run?: () => void;
+  /** Skip dispatch while an input/textarea/contenteditable is focused. Lets a
+   * default binding be a bare printable key (e.g. "/") without swallowing
+   * typing; rebinds still require a modifier (hasBindableModifier). */
+  skipWhenTyping?: boolean;
+}
+
+/** True when `t` is an element that consumes ordinary keystrokes. Duck-typed
+ * (tagName/isContentEditable) so it stays testable without a DOM. */
+export function isTypingTarget(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName;
+  return (
+    tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!el.isContentEditable
+  );
+}
+
+function openPdfFind() {
+  window.dispatchEvent(new Event(PDF_FIND_EVENT));
 }
 
 // Ctrl (Win/Linux) or Cmd (macOS), but not Alt — the zoom modifier.
@@ -62,6 +82,25 @@ export const SHORTCUTS: Shortcut[] = [
     run: () => useUiStore.getState().setZoom(DEFAULT_ZOOM),
   },
   {
+    id: "pdf-find",
+    keys: ["Ctrl/Cmd", "F"],
+    description: "Find text in the open PDF",
+    scope: "global",
+    // Also claims the webview's native find, so the reflex keystroke opens
+    // our bar instead of silently doing nothing.
+    match: (e) => (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f",
+    run: openPdfFind,
+  },
+  {
+    id: "pdf-find-slash",
+    keys: ["/"],
+    description: "Find text in the open PDF (quick key)",
+    scope: "global",
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && e.key === "/",
+    run: openPdfFind,
+    skipWhenTyping: true,
+  },
+  {
     id: "submit",
     keys: ["Ctrl/Cmd", "Enter"],
     description: "Submit the focused form or dialog",
@@ -93,11 +132,11 @@ export function useGlobalShortcuts(): void {
       }
       const { overrides } = useShortcutsStore.getState();
       for (const s of SHORTCUTS) {
-        if (s.run && effectiveMatch(s, overrides)?.(e)) {
-          e.preventDefault();
-          s.run();
-          return;
-        }
+        if (!s.run || !effectiveMatch(s, overrides)?.(e)) continue;
+        if (s.skipWhenTyping && isTypingTarget(e.target)) continue;
+        e.preventDefault();
+        s.run();
+        return;
       }
     }
     function onKeyUp(e: KeyboardEvent) {
@@ -165,7 +204,8 @@ export function findConflict(
 
 /** A rebind must carry a real modifier (Ctrl/Cmd/Alt), never a bare printable
  * key or Shift+key: useGlobalShortcuts listens on window with no input/textarea
- * exclusion, so either would swallow ordinary typing app-wide. */
+ * exclusion, so either would swallow ordinary typing app-wide. (Shipped
+ * defaults can opt out per shortcut via skipWhenTyping; rebinds cannot.) */
 export function hasBindableModifier(e: KeyboardEvent): boolean {
   return e.ctrlKey || e.metaKey || e.altKey;
 }
