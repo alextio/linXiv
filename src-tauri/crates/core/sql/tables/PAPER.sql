@@ -11,3 +11,9 @@ CREATE TABLE IF NOT EXISTS PAPER(
     UNIQUE (SOURCE_ID, VERSION),
     FOREIGN KEY (SOURCE_FK) REFERENCES PAPER_ROOTS(SOURCE_FK) ON DELETE CASCADE
 );
+
+-- Parent side of NOTE's composite same-lineage FK. In the base file, not a
+-- migration: apply_tables re-runs this on every open, and the index must exist
+-- before any NOTE DML on both fresh and legacy installs. PAPER_ID leads so the
+-- planner never prefers it over idx_paper_source_fk_version for SOURCE_FK scans.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_lineage_unique ON PAPER (PAPER_ID, SOURCE_FK);
