@@ -446,10 +446,7 @@ pub fn merge_paper_roots(
         )?;
 
         // 8 + 9. FTS, then the loser root (cascade collapses its leftover rows).
-        tx.execute(
-            "DELETE FROM papers_fts WHERE paper_id = ?",
-            [&plan.loser_id],
-        )?;
+        tx.execute("DELETE FROM papers_fts WHERE rowid = ?", [l])?;
         tx.execute("DELETE FROM PAPER_ROOTS WHERE SOURCE_FK = ?", [l])?;
         refresh_fts(tx, &plan.winner_id)?;
         tx.execute(

@@ -28,7 +28,11 @@ fn latest_pdf_path(tx: &Transaction, source_id: &str) -> Result<Option<String>> 
 pub fn soft_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
         let path = latest_pdf_path(tx, source_id)?;
-        tx.execute("DELETE FROM papers_fts WHERE paper_id = ?", [source_id])?;
+        tx.execute(
+            "DELETE FROM papers_fts \
+             WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+            [source_id],
+        )?;
         tx.execute(
             "UPDATE PAPER_ROOTS SET STATUS = 'deleted', DELETED_AT = datetime('now'), \
              UPDATED_AT = datetime('now') WHERE SOURCE_ID = ?",
@@ -66,7 +70,12 @@ pub fn restore_paper(conn: &mut Connection, source_id: &str) -> Result<Option<St
 pub fn hard_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
         let path = latest_pdf_path(tx, source_id)?;
-        tx.execute("DELETE FROM papers_fts WHERE paper_id = ?", [source_id])?;
+        // Before the root goes: the FTS delete keys off its SOURCE_FK.
+        tx.execute(
+            "DELETE FROM papers_fts \
+             WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+            [source_id],
+        )?;
         tx.execute("DELETE FROM PAPER_ROOTS WHERE SOURCE_ID = ?", [source_id])?;
         Ok(path)
     })

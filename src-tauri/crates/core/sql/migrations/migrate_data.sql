@@ -280,18 +280,24 @@ SELECT COUNT(*) AS n FROM old.notes WHERE paper_id IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- 12. Rebuild papers_fts from PAPER_META.FULL_TEXT
---     paper_id column holds the namespaced SOURCE_ID: search_full_text
---     looks its FTS hits up in latest_papers by source_id.
+--     rowid == SOURCE_FK, one row per paper (newest version with text);
+--     paper_id carries the namespaced SOURCE_ID: search_full_text looks its
+--     FTS hits up in latest_papers by source_id.
 -- ---------------------------------------------------------------------------
 
 INSERT INTO papers_fts (rowid, paper_id, full_text)
 SELECT
-    pm.PAPER_ID,
+    p.SOURCE_FK,
     p.SOURCE_ID,
     pm.FULL_TEXT
 FROM PAPER_META pm
 JOIN PAPER p ON p.PAPER_ID = pm.PAPER_ID
-WHERE pm.FULL_TEXT IS NOT NULL AND pm.FULL_TEXT <> '';
+WHERE pm.FULL_TEXT IS NOT NULL AND pm.FULL_TEXT <> ''
+  AND p.VERSION = (
+      SELECT MAX(x.VERSION) FROM PAPER x
+      JOIN PAPER_META y ON y.PAPER_ID = x.PAPER_ID
+      WHERE x.SOURCE_FK = p.SOURCE_FK AND COALESCE(y.FULL_TEXT, '') <> ''
+  );
 
 -- ---------------------------------------------------------------------------
 -- Cleanup
