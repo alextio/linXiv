@@ -254,17 +254,18 @@ fn not_found_as_paper<T>(r: Result<T>, source_id: &str) -> Result<T> {
 /// Normalizes/validates so route, CLI and MCP reject the same input; archive
 /// import bypasses via [`repair_paper_unvalidated`].
 pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata) -> Result<()> {
-    store::repair_paper(conn, source_fk, &validate_repair(meta)?)
+    store::repair_paper(conn, source_fk, &validate_repair(meta)?, Some("repair"))
 }
 
 /// [`repair_paper`] minus normalization/validation — archive import replays
-/// already-stored metadata not held to the front-door input rules.
+/// already-stored metadata not held to the front-door input rules. No
+/// PAPER_REPAIRS trail: a row per imported paper would drown the ledger.
 pub fn repair_paper_unvalidated(
     conn: &mut Connection,
     source_fk: i64,
     meta: &PaperMetadata,
 ) -> Result<()> {
-    store::repair_paper(conn, source_fk, meta)
+    store::repair_paper(conn, source_fk, meta, None)
 }
 
 /// Parse a user-supplied `published` date for Paper Repair.
@@ -1725,6 +1726,24 @@ mod tests {
         repair_paper(&mut conn, fk, &dupes).unwrap();
         let got = get(&conn, &PaperRef::SourceFk(fk)).unwrap().unwrap();
         assert_eq!(got.title, "Fixed");
+
+        // The successful repair (and only it) left a PAPER_REPAIRS trail row.
+        let trail: Vec<(String, String, String)> = conn
+            .prepare("SELECT OLD_SOURCE_ID, NEW_SOURCE_ID, ACTOR FROM PAPER_REPAIRS")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            trail,
+            vec![(
+                "arxiv:R".to_string(),
+                "arxiv:R".to_string(),
+                "repair".to_string()
+            )],
+            "rejected repairs must not write trail rows"
+        );
         assert_eq!(got.authors, vec!["Ada".to_string(), "Bo".to_string()]);
         assert_eq!(got.tags, vec!["nlp".to_string()]);
 

@@ -344,7 +344,12 @@ pub fn remove_paper_tags(
 /// In-place metadata repair keyed by the stable SOURCE_FK, migrating SOURCE_ID
 /// if the full id changed. FK checks are deferred to commit so the renames can
 /// land in any order; the FTS rebuild must follow them — it reads the new id.
-pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata) -> Result<()> {
+pub fn repair_paper(
+    conn: &mut Connection,
+    source_fk: i64,
+    meta: &PaperMetadata,
+    actor: Option<&str>,
+) -> Result<()> {
     transaction(conn, |tx| {
         // Defer FK checks to commit: immediate FK rejects a parent-key rename
         // (PAPER.SOURCE_ID) while child rows (PAPER_TO_TAG) still reference the
@@ -412,6 +417,14 @@ pub fn repair_paper(conn: &mut Connection, source_fk: i64, meta: &PaperMetadata)
         )?;
         sync_paper_authors(tx, pid, &meta.authors, meta.author_orcids.as_deref())?;
         sync_paper_tags(tx, pid, new_id, ver, meta.tags.as_deref())?;
+        // `actor` = Some: leave a PAPER_REPAIRS trail row (None = import replay).
+        if let Some(actor) = actor {
+            tx.execute(
+                "INSERT INTO PAPER_REPAIRS (OLD_SOURCE_ID, NEW_SOURCE_ID, ACTOR) \
+                 VALUES (?1, ?2, ?3)",
+                params![old_id, new_id, actor],
+            )?;
+        }
         Ok(())
     })
 }
@@ -552,7 +565,7 @@ mod tests {
         // Re-save with both names respelled: old spellings become paperless.
         let mut m2 = meta("arxiv:X", 1);
         m2.authors = vec!["Alicia".into(), "Robert".into()];
-        repair_paper(&mut conn, source_fk, &m2).unwrap();
+        repair_paper(&mut conn, source_fk, &m2, None).unwrap();
 
         // Alice's row holds a manually-set ORCID -> exempt from GC.
         let kept: i64 = conn
@@ -631,7 +644,7 @@ mod tests {
         m2.title = "Repaired".into();
         m2.tags = Some(vec!["t1".into(), "t2".into()]);
         m2.authors = vec!["Carol".into()];
-        repair_paper(&mut conn, source_fk, &m2).unwrap();
+        repair_paper(&mut conn, source_fk, &m2, None).unwrap();
 
         // SOURCE_ID migrated across PAPER_ROOTS, PAPER, PAPER_TO_TAG.
         assert!(get_paper(&conn, "arxiv:OLD", None).unwrap().is_none());

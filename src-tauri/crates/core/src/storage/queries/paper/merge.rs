@@ -438,6 +438,13 @@ pub fn merge_paper_roots(
             }
         }
 
+        // Ledger trail: the loser id's disappearance is findable afterwards.
+        tx.execute(
+            "INSERT INTO PAPER_REPAIRS (OLD_SOURCE_ID, NEW_SOURCE_ID, ACTOR) \
+             VALUES (?1, ?2, 'merge')",
+            params![plan.loser_id, plan.winner_id],
+        )?;
+
         // 8 + 9. FTS, then the loser root (cascade collapses its leftover rows).
         tx.execute(
             "DELETE FROM papers_fts WHERE paper_id = ?",
