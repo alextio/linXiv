@@ -523,7 +523,9 @@ pub async fn fetch_feed(url: &str, data_dir: &Path) -> Result<Feed> {
 }
 
 /// GET via the shared redirect-follow helper (guards re-checked per hop; arXiv hops
-/// honour cool-down + spacing), then stream the body under a cap (Content-Length may lie).
+/// honour cool-down + spacing, and an arXiv 429 surfaces as the typed rate-limit
+/// error — outage vs. per-client — never as a status here), then stream the body
+/// under a cap (Content-Length may lie).
 async fn fetch_body(url: &str, data_dir: &Path) -> Result<Vec<u8>> {
     let mut resp = http::get_checked(
         url,

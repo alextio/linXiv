@@ -153,7 +153,9 @@ pub async fn get_guarded_with(
 
 /// Shared redirect-follow GET: `check` guards the initial URL and every hop
 /// before the request is sent. `arxiv_pace = Some(data_dir)` makes arXiv-host
-/// hops honour the cool-down + `MIN_SPACING` and record 429s.
+/// hops honour the cool-down + `MIN_SPACING`; a 429 on such a hop records the
+/// cool-down and returns `ratelimit_error` (outage vs. per-client wording)
+/// instead of the response. Un-paced hops still return 429s as-is.
 pub(crate) async fn get_checked<F, Fut>(
     url: &str,
     headers: &[(&str, &str)],
@@ -190,7 +192,7 @@ where
             .map_err(|e| CoreError::Upstream(format!("GET {current:?} failed: {e}")))?;
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             if let Some(dir) = pace_dir {
-                record_ratelimit(dir)?;
+                return Err(paced_ratelimit(dir, resp).await);
             }
         }
         if resp.status().is_redirection() {
@@ -213,6 +215,16 @@ where
     Err(CoreError::Upstream(format!(
         "too many redirects (>{MAX_REDIRECTS}) starting at {url:?}"
     )))
+}
+
+/// Consume a paced arXiv 429: record the cool-down under `data_dir`, then read
+/// the body to pick the `ratelimit_error` wording (service-wide vs. per-client).
+async fn paced_ratelimit(data_dir: &Path, resp: reqwest::Response) -> CoreError {
+    if let Err(e) = record_ratelimit(data_dir) {
+        return e;
+    }
+    let body = resp.text().await.unwrap_or_default();
+    ratelimit_error(&body)
 }
 
 /// Per arXiv's guidance, a 429 whose body says "Rate exceeded" means the API is
@@ -323,9 +335,7 @@ pub async fn arxiv_get(url: &str, data_dir: &Path) -> Result<reqwest::Response> 
         enforce_spacing(data_dir).await;
         match get_guarded(&target, ARXIV_HOSTS).await {
             Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                record_ratelimit(data_dir)?;
-                let body = resp.text().await.unwrap_or_default();
-                return Err(ratelimit_error(&body));
+                return Err(paced_ratelimit(data_dir, resp).await);
             }
             Ok(resp) => return Ok(resp),
             Err(e) => last_err = Some(e),
@@ -560,5 +570,40 @@ mod tests {
             .await
             .expect("429 is returned, not an error");
         assert_eq!(resp.status(), 429);
+    }
+
+    /// The paced 429 path (get_checked with arxiv_pace / arxiv_get) records the
+    /// cool-down and picks the error wording from the body.
+    #[tokio::test]
+    async fn paced_429_records_cooldown_and_reads_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/outage"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Rate exceeded"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/throttled"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let resp = client()
+            .get(format!("{}/outage", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let err = paced_ratelimit(dir.path(), resp).await;
+        assert!(err.to_string().contains("all users"), "got {err}");
+        assert!(cooldown_remaining(dir.path(), Utc::now()).is_some());
+
+        let resp = client()
+            .get(format!("{}/throttled", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        let err = paced_ratelimit(dir.path(), resp).await;
+        assert!(err.to_string().contains("retry in 60s"), "got {err}");
     }
 }
