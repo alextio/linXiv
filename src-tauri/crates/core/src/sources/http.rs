@@ -29,7 +29,7 @@ const MAX_REDIRECTS: usize = 10;
 pub(crate) const USER_AGENT: &str =
     "linXiv/0.2 (+https://github.com/jakeuribe/linXiv; mailto:jake.uribe@gmail.com)";
 
-/// Base UA for the polite pools (OpenAlex and CrossRef both key off the mailto).
+/// Base UA for the polite pools (OpenAlex, CrossRef, and arXiv key off a mailto).
 const POLITE_USER_AGENT: &str = "linXiv/1.0";
 
 /// Polite-pool UA: `linXiv/1.0 (mailto:<addr>)`, or the bare UA when no address.
@@ -46,6 +46,21 @@ pub(crate) fn polite_user_agent(mailto: &str) -> String {
         POLITE_USER_AGENT.to_string()
     } else {
         format!("{POLITE_USER_AGENT} (mailto:{addr})")
+    }
+}
+
+/// UA for an arXiv hop: `ARXIV_MAILTO` in the polite-pool shape. `None` — keep
+/// the client-level default UA — when no mailto is set or the caller already
+/// supplied a User-Agent (reqwest appends rather than replaces, so injecting a
+/// second one would send a duplicated header).
+fn arxiv_ua(mailto: &str, headers: &[(&str, &str)]) -> Option<String> {
+    let caller_has_ua = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"));
+    if mailto.trim().is_empty() || caller_has_ua {
+        None
+    } else {
+        Some(polite_user_agent(mailto))
     }
 }
 
@@ -158,6 +173,11 @@ where
             enforce_spacing().await;
         }
         let mut req = client.get(&current);
+        if is_arxiv_url(&current) {
+            if let Some(ua) = arxiv_ua(&crate::config::arxiv_mailto(), headers) {
+                req = req.header("User-Agent", ua);
+            }
+        }
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
@@ -190,6 +210,18 @@ where
     Err(CoreError::Upstream(format!(
         "too many redirects (>{MAX_REDIRECTS}) starting at {url:?}"
     )))
+}
+
+/// Per arXiv's guidance, a 429 whose body says "Rate exceeded" means the API is
+/// down for everyone, not that this client tripped its own limit.
+fn ratelimit_error(body: &str) -> CoreError {
+    if body.contains("Rate exceeded") {
+        CoreError::Upstream(
+            "arXiv API is temporarily unavailable for all users — retry later".into(),
+        )
+    } else {
+        CoreError::Upstream("arXiv returned 429 — rate limited; retry in 60s".into())
+    }
 }
 
 /// Replace a URL's host, preserving scheme/path/query.
@@ -254,9 +286,8 @@ pub async fn arxiv_get(url: &str, data_dir: &Path) -> Result<reqwest::Response> 
         match get_guarded(&target, ARXIV_HOSTS).await {
             Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 record_ratelimit(data_dir)?;
-                return Err(CoreError::Upstream(
-                    "arXiv returned 429 — rate limited; retry in 60s".into(),
-                ));
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ratelimit_error(&body));
             }
             Ok(resp) => return Ok(resp),
             Err(e) => last_err = Some(e),
@@ -313,6 +344,31 @@ mod tests {
         );
         // Nothing usable left -> bare UA, not a mangled empty mailto.
         assert_eq!(polite_user_agent("\u{00A0}\u{00A0}"), "linXiv/1.0");
+    }
+
+    #[test]
+    fn ratelimit_error_distinguishes_service_wide_outage() {
+        assert!(ratelimit_error("Rate exceeded")
+            .to_string()
+            .contains("all users"));
+        assert!(ratelimit_error("<html>slow down</html>")
+            .to_string()
+            .contains("retry in 60s"));
+        assert!(ratelimit_error("").to_string().contains("retry in 60s"));
+    }
+
+    #[test]
+    fn arxiv_ua_applies_only_with_mailto_and_no_caller_ua() {
+        assert_eq!(
+            arxiv_ua("me@x.io", &[]).as_deref(),
+            Some("linXiv/1.0 (mailto:me@x.io)")
+        );
+        // Unset (or whitespace) mailto → keep the client-level default UA.
+        assert_eq!(arxiv_ua("", &[]), None);
+        assert_eq!(arxiv_ua("  ", &[]), None);
+        // A caller-supplied UA wins — never send a duplicated header.
+        assert_eq!(arxiv_ua("me@x.io", &[("user-agent", "custom")]), None);
+        assert_eq!(arxiv_ua("me@x.io", &[("User-Agent", "custom")]), None);
     }
 
     #[test]
