@@ -589,12 +589,14 @@ pub struct AnnotationIn {
     pub uuid: Option<String>,
 }
 
-/// PATCH DTO. Only the written comment is mutable — the anchor (geometry/quote)
-/// is immutable; re-highlighting creates a new annotation.
+/// PATCH DTO. `anchor: None` keeps the stored anchor; `Some` replaces it
+/// (validated), so the UI can recolor a highlight in place.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnnotationUpdateIn {
     pub annotation_id: i64,
     pub comment: String,
+    #[serde(default)]
+    pub anchor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

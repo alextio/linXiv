@@ -899,6 +899,10 @@ export type AnnotationCreateBody = {
 
 export type AnnotationUpdateBody = {
   comment: string,
+  /**
+   * Omitted/null keeps the stored anchor; set to recolor a highlight.
+   */
+  anchor?: string | null,
 };
 
 export type ReadingStatusPutBody = {

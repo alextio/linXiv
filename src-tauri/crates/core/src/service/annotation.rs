@@ -112,9 +112,12 @@ pub fn delete(conn: &Connection, id: i64) -> Result<bool> {
     q::delete_annotation(conn, id)
 }
 
-/// Update the written comment. `false` if no row matched. The anchor is immutable.
+/// Update the comment, and the anchor when given (validated). `false` if no row matched.
 pub fn update(conn: &Connection, ann: &AnnotationUpdateIn) -> Result<bool> {
-    q::patch_annotation(conn, ann.annotation_id, &ann.comment)
+    if let Some(anchor) = &ann.anchor {
+        validate_anchor(anchor).map_err(|m| CoreError::Validation(m.into()))?;
+    }
+    q::patch_annotation(conn, ann.annotation_id, &ann.comment, ann.anchor.as_deref())
 }
 
 #[cfg(test)]
@@ -163,6 +166,7 @@ mod tests {
             &AnnotationUpdateIn {
                 annotation_id: id,
                 comment: "hello".into(),
+                anchor: None,
             },
         )
         .unwrap());

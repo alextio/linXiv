@@ -83,11 +83,16 @@ fn create(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
 }
 
 #[derive(Deserialize, ts_rs::TS)]
+#[ts(optional_fields = nullable)]
 pub struct AnnotationUpdateBody {
     pub comment: String,
+    /// Omitted/null keeps the stored anchor; set to recolor a highlight.
+    #[serde(default)]
+    pub anchor: Option<String>,
 }
 
-/// `PATCH /api/annotations/{id}` — edit the written comment. 404 if no row matched.
+/// `PATCH /api/annotations/{id}` — edit the comment and optionally the anchor.
+/// 404 if no row matched.
 fn update(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let annotation_id = path_i64(id)?;
     let b: AnnotationUpdateBody = ctx.parse_body()?;
@@ -97,6 +102,7 @@ fn update(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiErro
             &AnnotationUpdateIn {
                 annotation_id,
                 comment: b.comment,
+                anchor: b.anchor,
             },
         )? {
             return Err(ApiError::new(404, "Annotation not found"));
@@ -180,6 +186,21 @@ mod tests {
             .unwrap();
         assert_eq!(listed["annotations"][0]["comment"], "note");
 
+        // Recoloring: PATCH with an anchor replaces it; without one it sticks.
+        let recolored = ANCHOR.replace("#ffd400", "#ff6b5e");
+        req(
+            &st,
+            "PATCH",
+            "/api/annotations/1",
+            Some(json!({ "comment": "note", "anchor": recolored })),
+        )
+        .await
+        .unwrap();
+        let listed = req(&st, "GET", "/api/annotations?source_id=arxiv:1", None)
+            .await
+            .unwrap();
+        assert_eq!(listed["annotations"][0]["anchor"], recolored);
+
         req(&st, "DELETE", "/api/annotations/1", None)
             .await
             .unwrap();
@@ -252,6 +273,30 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status, 404);
+    }
+
+    #[tokio::test]
+    async fn update_empty_anchor_is_422() {
+        let st = state();
+        st.with_conn(|conn| svc_paper::ensure_paper_root(conn, "arxiv:1"))
+            .unwrap();
+        req(
+            &st,
+            "POST",
+            "/api/annotations",
+            Some(json!({ "source_id": "arxiv:1", "anchor": ANCHOR })),
+        )
+        .await
+        .unwrap();
+        let err = req(
+            &st,
+            "PATCH",
+            "/api/annotations/1",
+            Some(json!({ "comment": "x", "anchor": " " })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 422);
     }
 
     #[tokio::test]
