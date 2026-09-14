@@ -37,9 +37,10 @@ export async function createAnnotation(
 
 export async function updateAnnotation(
   id: number,
-  comment: string
+  comment: string,
+  anchor?: string
 ): Promise<OkReceipt> {
-  const body: AnnotationUpdateBody = { comment };
+  const body: AnnotationUpdateBody = { comment, anchor: anchor ?? null };
   return libraryFetch(`/api/annotations/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
