@@ -36,6 +36,7 @@ import {
   type HighlightRange,
   type PageIndex,
 } from "../../lib/pdfFind";
+import { pdfDocumentOptions } from "../../lib/pdfOptions";
 import { useUiStore } from "../../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -725,6 +726,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       >
         <Document
           file={file}
+          options={pdfDocumentOptions}
           onLoadSuccess={onDocumentLoad}
           loading={
             <div className="flex items-center justify-center gap-2 py-16 text-white/60 text-sm">
