@@ -550,9 +550,50 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     };
   }, [findOpen, pageIndexes, findRangesByPage]);
 
+  // Right-drag = highlight gesture: the browser only drag-selects with the
+  // left button, so we build the selection ourselves from caret positions and
+  // commit it (default color) on release. Start caret captured at mousedown.
+  const rightDragRef = useRef<{ node: Node; offset: number } | null>(null);
+
+  function onRightDragMove(e: React.MouseEvent<HTMLDivElement>) {
+    const start = rightDragRef.current;
+    if (!start || !(e.buttons & 2)) return;
+    const focus = caretAt(e.clientX, e.clientY);
+    if (!focus) return;
+    window.getSelection()?.setBaseAndExtent(
+      start.node,
+      start.offset,
+      focus.node,
+      focus.offset,
+    );
+  }
+
+  function commitRightDrag(e: React.MouseEvent<HTMLDivElement>) {
+    if (!rightDragRef.current) return;
+    rightDragRef.current = null;
+    const sel = window.getSelection();
+    // No drag happened (plain right-click): nothing to commit.
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+    const anchor = selectionToAnchor(version, HIGHLIGHT_COLORS[0]);
+    sel.removeAllRanges();
+    if (!anchor) {
+      setSelError(true);
+      return;
+    }
+    setSelError(false);
+    createMut.mutate({
+      anchor,
+      ...clampToViewport(e.clientX, e.clientY + 6, 280, 240),
+    });
+  }
+
   // On a real text selection inside a page, put the Highlight button at the
   // selection's end so one click commits the highlight (default color).
-  function onMouseUp() {
+  function onMouseUp(e: React.MouseEvent<HTMLDivElement>) {
+    if (e.button === 2) {
+      commitRightDrag(e);
+      return;
+    }
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
     if (!sel.toString().trim()) return;
@@ -663,14 +704,23 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       <div
         ref={attachScroller}
         onScroll={onScroll}
-        onMouseDown={() => {
+        onMouseDown={(e) => {
           // starting a new gesture dismisses any open chrome
           if (selBar) setSelBar(null);
           if (popup) setPopup(null);
           if (selError) setSelError(false);
+          if (
+            e.button === 2 &&
+            (e.target as Element).closest?.(".react-pdf__Page")
+          ) {
+            rightDragRef.current = caretAt(e.clientX, e.clientY);
+          }
         }}
+        onMouseMove={onRightDragMove}
         onMouseUp={onMouseUp}
         onClick={onClick}
+        // Right button is the highlight gesture inside the reader.
+        onContextMenu={(e) => e.preventDefault()}
         className="w-full h-full overflow-y-auto bg-[#525659]"
       >
         <Document
@@ -888,6 +938,23 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       )}
     </div>
   );
+}
+
+// Caret (text position) under a viewport point. WebKit/Chromium expose
+// caretRangeFromPoint; Firefox only caretPositionFromPoint.
+function caretAt(x: number, y: number): { node: Node; offset: number } | null {
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    return r ? { node: r.startContainer, offset: r.startOffset } : null;
+  }
+  const doc = document as Document & {
+    caretPositionFromPoint?: (
+      x: number,
+      y: number,
+    ) => { offsetNode: Node; offset: number } | null;
+  };
+  const p = doc.caretPositionFromPoint?.(x, y);
+  return p ? { node: p.offsetNode, offset: p.offset } : null;
 }
 
 // Keep a fixed floater (toolbar/popup) on-screen near the right/bottom edges;
