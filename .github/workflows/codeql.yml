@@ -21,13 +21,20 @@ on:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    # PRs to main always scan; PRs to dev skip for trusted authors.
-    # TRUSTED_AUTHORS is a repo Actions variable holding a JSON array of
-    # GitHub usernames, e.g. ["jakeuribe"]. Unset/empty means trust no one.
-    if: >-
-      github.base_ref == 'main' ||
-      !contains(fromJSON(vars.TRUSTED_AUTHORS || '[]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
+    env:
+      # PRs to main always scan; PRs to dev skip the scan for trusted
+      # authors. TRUSTED_AUTHORS is a repo Actions variable holding a JSON
+      # array of GitHub usernames, e.g. ["jakeuribe"]. Unset/empty means
+      # trust no one. The skip is per-step, not a job-level `if`: skipped
+      # legs upload an empty SARIF under the same job id and category, so
+      # code scanning still finds the configurations refs/heads/main has
+      # and can compute the PR alert delta — a job-level skip made it warn
+      # "1 configuration present on refs/heads/main was not found" on
+      # every trusted dev PR push (seen on PR #285).
+      SCAN: >-
+        ${{ github.base_ref == 'main' ||
+        !contains(fromJSON(vars.TRUSTED_AUTHORS || '[]'), github.event.pull_request.user.login) }}
     permissions:
       security-events: write
       contents: read
@@ -44,15 +51,17 @@ jobs:
             # Required: crates/p2p is a workspace member living in a submodule.
             submodules: "recursive"
     steps:
+      # Unconditional: the waiver upload below also wants a checkout for
+      # the codeql-action's git provenance probing.
       - uses: actions/checkout@v7
         with:
           submodules: ${{ matrix.submodules }}
 
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.language == 'rust'
+        if: env.SCAN == 'true' && matrix.language == 'rust'
 
       - uses: Swatinem/rust-cache@v2
-        if: matrix.language == 'rust'
+        if: env.SCAN == 'true' && matrix.language == 'rust'
         with:
           workspaces: src-tauri
 
@@ -61,11 +70,12 @@ jobs:
       # dependency graph. Populating ~/.cargo up front keeps that resolution off
       # the network and well inside the extractor's patience.
       - name: cargo fetch
-        if: matrix.language == 'rust'
+        if: env.SCAN == 'true' && matrix.language == 'rust'
         working-directory: src-tauri
         run: cargo fetch --locked
 
       - uses: github/codeql-action/init@v4
+        if: env.SCAN == 'true'
         with:
           languages: ${{ matrix.language }}
           # No compilation: `build-mode: none` matches what default setup used,
@@ -76,5 +86,22 @@ jobs:
           # query suite; the threat model likewise defaults to "remote".
 
       - uses: github/codeql-action/analyze@v4
+        if: env.SCAN == 'true'
         with:
+          category: "/language:${{ matrix.language }}"
+
+      # Trusted-author dev PRs: register the configuration without scanning.
+      # An empty result set is truthful here — the merge gate for this code
+      # is the PR to main, which always runs the real scan.
+      - name: Write waiver SARIF
+        if: env.SCAN != 'true'
+        run: >-
+          printf '%s'
+          '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"}},"results":[]}]}'
+          > waiver.sarif
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: env.SCAN != 'true'
+        with:
+          sarif_file: waiver.sarif
           category: "/language:${{ matrix.language }}"
