@@ -401,16 +401,16 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automerge"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09b78abcbba93428b9465b26cb2816a5b4654cce507f099a84a8c1b311cb3633"
+checksum = "c1b59cbd9e7685a1ac6bf6046ddcd8acb550fa5bf03c09f6c1056728a742b40d"
 dependencies = [
  "cfg-if",
  "flate2",
  "getrandom 0.4.2",
  "hex",
  "hexane",
- "itertools 0.14.0",
+ "itertools",
  "leb128",
  "rand 0.10.1",
  "rustc-hash",
@@ -425,26 +425,26 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b3e9830fb43a71ecbcce339e6ccb0bde5456a3f18d5b810a744870e4a50d832"
+checksum = "4f752152713595c654d109c4d53bebee0d71883447d5c629580c575fbe9569c7"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
  "similar",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "963860d91f829d5c4b3f8581989cdcfcfcc4c4af92182a7b03075180d8973795"
+checksum = "05d40c14f9a45c5dc3ddb857728ecc9d84a0756b65803d4bf25604caa8ad05cb"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2781,9 +2781,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexane"
-version = "0.2.1"
+version = "1.0.0-alpha.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4ecba0bb4e14df997df7cab6d1b584c6432d8865cf2adfced814706d715a7b"
+checksum = "81df830f11babb0eee9a082e09135ef0a7d8791f3fe9b279bb9485bf7eaf23e0"
 dependencies = [
  "leb128",
  "thiserror 2.0.18",
@@ -3596,15 +3596,6 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -5188,7 +5179,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "image",
- "itertools 0.15.0",
+ "itertools",
  "js-sys",
  "libloading",
  "log",

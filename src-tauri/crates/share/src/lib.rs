@@ -798,7 +798,7 @@ pub fn doc_history(dir: &Path, doc_id: &str) -> Result<Vec<DocChange>> {
             hash: c.hash().to_string(),
             actor: c.actor_id().to_hex_string(),
             time: c.timestamp(),
-            message: c.message().cloned(),
+            message: c.message().map(str::to_string),
             deps: c.deps().iter().map(|d| d.to_string()).collect(),
         })
         .collect())
