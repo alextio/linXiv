@@ -39,6 +39,8 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     link_table_indexes(conn)?;
     paper_source_fk_index(conn)?;
     paper_to_author_unique(conn)?;
+    integrity_quarantine_table(conn)?;
+    paper_repairs_table(conn)?;
     Ok(())
 }
 
@@ -116,6 +118,7 @@ fn search_state_sort_json(conn: &Connection) -> Result<()> {
 
 /// Collapse case-variant duplicate tags onto the canonical (lowest-TAG_FK) row,
 /// remap the bridge tables, then enforce `UNIQUE (TAG COLLATE NOCASE)`.
+/// Deleted loser TAG rows are quarantined in INTEGRITY_QUARANTINE first.
 fn tag_label_unique_index(conn: &Connection) -> Result<()> {
     if index_exists(conn, "idx_tag_label_unique")? {
         return Ok(());
@@ -139,7 +142,14 @@ fn tag_label_unique_index(conn: &Connection) -> Result<()> {
         let Some(t) = tag else { continue };
         let canon = canonical[&t.to_lowercase()];
         if canon != *fk {
+            if !remapped {
+                integrity_quarantine_table(conn)?;
+            }
             remapped = true;
+            conn.execute(
+                include_str!("../../sql/migrations/04_tag_label_quarantine_tag.sql"),
+                [*fk, canon],
+            )?;
             // UPDATE OR IGNORE absorbs the link onto the canonical FK; the DELETE
             // sweeps any link that could not move (canonical link already existed).
             conn.execute(
@@ -284,6 +294,8 @@ fn paper_to_reading_cascade_fk(conn: &Connection) -> Result<()> {
     if paper_to_reading_has_cascade_fk(conn)? {
         return Ok(());
     }
+    // The rebuild quarantines its orphan drops; the table must already exist.
+    integrity_quarantine_table(conn)?;
     conn.execute_batch(include_str!(
         "../../sql/migrations/12_paper_to_reading_cascade_fk.sql"
     ))?;
@@ -421,6 +433,23 @@ fn paper_to_author_unique(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ── 22. INTEGRITY_QUARANTINE table (rows destructive migrations drop) ───────
+
+/// Also the shared create-if-missing guard `tag_label_unique_index` and
+/// `paper_to_reading_cascade_fk` call before quarantining: on a legacy upgrade
+/// they run before this reaches the end of `run_migrations`.
+fn integrity_quarantine_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../sql/tables/INTEGRITY_QUARANTINE.sql"))?;
+    Ok(())
+}
+
+// ── 23. PAPER_REPAIRS table (repair/merge identity trail) ───────────────────
+
+fn paper_repairs_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("../../sql/tables/PAPER_REPAIRS.sql"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +498,8 @@ mod tests {
             "RSS_PAPER",
             "RSS_FILTER_RULE",
             "RSS_CACHE_ENTRY",
+            "INTEGRITY_QUARANTINE",
+            "PAPER_REPAIRS",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -1034,6 +1065,21 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(ptag, vec![(100, 1), (200, 3)]);
+
+        // The deleted loser must land in quarantine, payload intact.
+        let (n, src_table, src_key, reason, payload): (i64, String, String, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), SOURCE_TABLE, SOURCE_KEY, REASON, PAYLOAD_JSON \
+                 FROM INTEGRITY_QUARANTINE",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly the one case-fold loser is quarantined");
+        assert_eq!(src_table, "TAG");
+        assert_eq!(src_key, "2");
+        assert!(reason.contains("TAG_FK 1"), "{reason}");
+        assert!(payload.contains("\"TAG\":\"ml\""), "{payload}");
     }
 
     /// Duplicate (PROJECT_FK, TAG_FK) rows independent of any tag-label remap,
@@ -1186,6 +1232,19 @@ mod tests {
             "the orphaned (2,20) row must be dropped by the rebuild's JOIN, and the \
              valid row's STATUS/UPDATED_AT must survive the copy untouched"
         );
+
+        // The dropped orphan must land in quarantine, payload intact.
+        let (n, src_key, payload): (i64, String, String) = conn
+            .query_row(
+                "SELECT COUNT(*), SOURCE_KEY, PAYLOAD_JSON FROM INTEGRITY_QUARANTINE \
+                 WHERE SOURCE_TABLE = 'PAPER_TO_READING'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly the one orphan is quarantined");
+        assert_eq!(src_key, "2:20");
+        assert!(payload.contains("\"STATUS\":\"read\""), "{payload}");
 
         // The migration's actual point: going forward, removing a paper from a
         // project must cascade-drop its reading status, not just clean up
