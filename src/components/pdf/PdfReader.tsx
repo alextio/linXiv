@@ -13,7 +13,9 @@ import {
   HIGHLIGHT_COLORS,
   parseAnchor,
   selectionToAnchor,
+  type Anchor,
 } from "../../lib/pdfAnchor";
+import { ColorSwatches } from "./ColorSwatches";
 import { HighlightLayer, type PageHighlight } from "./HighlightLayer";
 import { PagePill } from "./PagePill";
 import { submitOnCtrlEnter } from "../../lib/submitShortcut";
@@ -86,8 +88,10 @@ interface ActivePopup {
   id: number;
   top: number;
   left: number;
-  quote: string;
+  anchor: Anchor;
+  // Server comment/color as of popup open, the baseline drafts diff against.
   comment: string;
+  color: string;
 }
 
 // Saved-PDF reader with Zotero-style text highlights. Each is an ANNOTATION
@@ -101,6 +105,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
   const [selBar, setSelBar] = useState<SelToolbar | null>(null);
   const [popup, setPopup] = useState<ActivePopup | null>(null);
   const [draft, setDraft] = useState("");
+  const [draftColor, setDraftColor] = useState<string>(HIGHLIGHT_COLORS[0]);
   const [selError, setSelError] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -195,33 +200,43 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     return byPage;
   }, [annData, version]);
 
-  // id → written comment, for populating the popup when a highlight is clicked.
-  const commentById = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const a of annData?.annotations ?? []) m.set(a.id, a.comment);
+  // id → server comment/color, for populating the popup and staleness checks.
+  const metaById = useMemo(() => {
+    const m = new Map<number, { comment: string; color: string | null }>();
+    for (const a of annData?.annotations ?? [])
+      m.set(a.id, { comment: a.comment, color: parseAnchor(a.anchor)?.color ?? null });
     return m;
   }, [annData]);
 
   const createMut = useMutation({
-    mutationFn: (v: { anchorJson: string; quote: string; top: number; left: number }) =>
+    mutationFn: (v: { anchor: Anchor; top: number; left: number }) =>
       createAnnotation({
         source_id: sourceId,
-        anchor: v.anchorJson,
+        anchor: JSON.stringify(v.anchor),
         project_id: projectId ?? null,
       }),
     onSuccess: (data, v) => {
       invalidateAnnotationQueries(qc);
-      // Popup opens on it: a highlight and its comment are one gesture.
-      const pos = clampToViewport(v.left, v.top, 280, 220);
+      // Popup opens on it: comment and color tweaks are one gesture, but the
+      // highlight already exists, so dismissing keeps it.
+      const pos = clampToViewport(v.left, v.top, 280, 240);
       setDraft("");
+      setDraftColor(v.anchor.color);
       updateMut.reset();
       deleteMut.reset();
-      setPopup({ id: data.id, top: pos.top, left: pos.left, quote: v.quote, comment: "" });
+      setPopup({
+        id: data.id,
+        top: pos.top,
+        left: pos.left,
+        anchor: v.anchor,
+        comment: "",
+        color: v.anchor.color,
+      });
     },
   });
   const updateMut = useMutation({
-    mutationFn: (v: { id: number; comment: string }) =>
-      updateAnnotation(v.id, v.comment),
+    mutationFn: (v: { id: number; comment: string; anchor?: string }) =>
+      updateAnnotation(v.id, v.comment, v.anchor),
     onSuccess: (_data, v) => {
       invalidateAnnotationQueries(qc);
       // close only the popup we edited, never one reopened mid-flight
@@ -513,8 +528,8 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     };
   }, [findOpen, pageIndexes, findRangesByPage]);
 
-  // On a real text selection inside a page, put the color picker at the
-  // selection's end so one click commits the highlight.
+  // On a real text selection inside a page, put the Highlight button at the
+  // selection's end so one click commits the highlight (default color).
   function onMouseUp() {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
@@ -529,11 +544,13 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     const rects = range.getClientRects();
     const last = rects[rects.length - 1];
     if (!last) return;
-    setSelBar(clampToViewport(last.left, last.bottom + 6, 170, 40));
+    setSelBar(clampToViewport(last.left, last.bottom + 6, 120, 40));
   }
 
-  function commitHighlight(color: string) {
-    const anchor = selectionToAnchor(version, color);
+  // Creates immediately with the default color; the popup that opens after is
+  // where the color/comment can be changed, so the happy path is one click.
+  function commitHighlight() {
+    const anchor = selectionToAnchor(version, HIGHLIGHT_COLORS[0]);
     const bar = selBar;
     setSelBar(null);
     window.getSelection()?.removeAllRanges();
@@ -543,8 +560,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
     }
     setSelError(false);
     createMut.mutate({
-      anchorJson: JSON.stringify(anchor),
-      quote: anchor.quote,
+      anchor,
       top: bar?.top ?? 120,
       left: bar?.left ?? 120,
     });
@@ -572,29 +588,46 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
       ),
     );
     if (!hit) return;
-    const pos = clampToViewport(e.clientX, e.clientY + 6, 280, 220);
-    const comment = commentById.get(hit.id) ?? "";
+    const pos = clampToViewport(e.clientX, e.clientY + 6, 280, 240);
+    const comment = metaById.get(hit.id)?.comment ?? "";
     setDraft(comment);
+    setDraftColor(hit.anchor.color);
     updateMut.reset();
     deleteMut.reset();
     setPopup({
       id: hit.id,
       top: pos.top,
       left: pos.left,
-      quote: hit.anchor.quote,
+      anchor: hit.anchor,
       comment,
+      color: hit.anchor.color,
     });
   }
 
-  // The annotation was deleted, or its server comment moved off the popup's
-  // open-time baseline (popup.comment) while the popup was open.
+  // The annotation was deleted, or its server comment/color moved off the
+  // popup's open-time baseline while the popup was open.
+  const popupMeta = popup ? metaById.get(popup.id) : undefined;
   const popupStale = popup
-    ? !annData?.annotations.some((a) => a.id === popup.id) ||
-      (commentById.get(popup.id) ?? "") !== popup.comment
+    ? !popupMeta || popupMeta.comment !== popup.comment || popupMeta.color !== popup.color
     : false;
-  const canSaveComment = popup
-    ? !updateMut.isPending && draft !== popup.comment && !popupStale
+  const canSave = popup
+    ? !updateMut.isPending &&
+      !popupStale &&
+      (draft !== popup.comment || draftColor !== popup.color)
     : false;
+
+  function savePopup() {
+    if (!popup || !canSave) return;
+    updateMut.mutate({
+      id: popup.id,
+      comment: draft,
+      // Only ship a new anchor when the color actually changed.
+      anchor:
+        draftColor !== popup.color
+          ? JSON.stringify({ ...popup.anchor, color: draftColor })
+          : undefined,
+    });
+  }
 
   return (
     <div className="relative w-full h-full min-h-0 flex flex-col">
@@ -748,15 +781,17 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
           }}
           onMouseUp={(e) => e.stopPropagation()}
         >
-          {HIGHLIGHT_COLORS.map((c) => (
-            <button
-              key={c}
-              aria-label={`Highlight ${c}`}
-              onClick={() => commitHighlight(c)}
-              className="w-4 h-4 rounded-full border border-black/20 hover:scale-110 transition-transform"
-              style={{ backgroundColor: c }}
+          <button
+            onClick={commitHighlight}
+            className="flex items-center gap-1.5 text-xs font-medium text-text hover:text-accent"
+          >
+            <span
+              className="w-3 h-3 rounded-full border border-black/20"
+              style={{ backgroundColor: HIGHLIGHT_COLORS[0] }}
+              aria-hidden
             />
-          ))}
+            Highlight
+          </button>
         </div>
       )}
 
@@ -766,15 +801,11 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
           style={{ top: popup.top, left: popup.left }}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
-          onKeyDown={submitOnCtrlEnter(() => {
-            if (canSaveComment) {
-              updateMut.mutate({ id: popup.id, comment: draft });
-            }
-          })}
+          onKeyDown={submitOnCtrlEnter(savePopup)}
         >
-          {popup.quote && (
+          {popup.anchor.quote && (
             <p className="text-xs text-muted line-clamp-3 italic">
-              “{popup.quote}”
+              “{popup.anchor.quote}”
             </p>
           )}
           <textarea
@@ -786,24 +817,27 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
             className="w-full resize-none rounded border border-border bg-surface2 px-2 py-1.5 text-xs text-text focus:outline-none focus:border-accent"
           />
           <div className="flex items-center justify-between">
-            <button
-              disabled={deleteMut.isPending || updateMut.isPending}
-              onClick={() => deleteMut.mutate(popup.id)}
-              className="text-xs font-medium text-[var(--color-danger)] hover:underline disabled:opacity-50"
-            >
-              {deleteMut.isPending ? "Deleting…" : "Delete"}
-            </button>
-            <button
-              disabled={!canSaveComment}
-              onClick={() => updateMut.mutate({ id: popup.id, comment: draft })}
-              className="text-xs font-medium text-accent hover:underline disabled:opacity-40"
-            >
-              {updateMut.isPending ? "Saving…" : "Save"}
-            </button>
+            <ColorSwatches value={draftColor} onChange={setDraftColor} />
+            <div className="flex items-center gap-3">
+              <button
+                disabled={deleteMut.isPending || updateMut.isPending}
+                onClick={() => deleteMut.mutate(popup.id)}
+                className="text-xs font-medium text-[var(--color-danger)] hover:underline disabled:opacity-50"
+              >
+                {deleteMut.isPending ? "Deleting…" : "Delete"}
+              </button>
+              <button
+                disabled={!canSave}
+                onClick={savePopup}
+                className="text-xs font-medium text-accent hover:underline disabled:opacity-40"
+              >
+                {updateMut.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
           </div>
           {popupStale && (
             <p className="text-xs" style={{ color: "var(--color-danger)" }}>
-              Comment was updated elsewhere. Cancel to reload before saving.
+              Annotation was updated elsewhere. Reopen it before saving.
             </p>
           )}
         </div>
@@ -819,7 +853,7 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
             : createMut.isError
               ? "Couldn't save highlight. Try again."
               : updateMut.isError
-                ? "Couldn't save comment. Try again."
+                ? "Couldn't save annotation. Try again."
                 : "Couldn't delete highlight. Try again."}
         </div>
       )}
