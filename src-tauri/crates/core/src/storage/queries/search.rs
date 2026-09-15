@@ -6,13 +6,14 @@ use crate::error::Result;
 use crate::models::PaperDetails;
 
 /// FTS5 over TeX source AND note content: the latest version of each matching
-/// paper, ranked by bm25 (lower = better); a paper matched both ways takes its
-/// best score.
+/// paper, ranked by bm25 (lower = better); a paper matched both ways (or on
+/// several versions' bodies) takes its best score.
 ///
-/// FTS misnomer: `papers_fts.paper_id` holds the SOURCE_ID *string* (NOT the
-/// int PAPER_ID) that `latest_papers` is then read by; notes_fts carries
-/// SOURCE_FK, joined back through PAPER_ROOTS. `match_expr` turns raw input
-/// into FTS5 syntax; an unqueryable index yields no hits, not an error.
+/// `papers_fts.source_id` is the lineage string that `latest_papers` is then
+/// read by — a hit on an older version's body still surfaces the paper as its
+/// latest version; notes_fts carries SOURCE_FK, joined back through
+/// PAPER_ROOTS. `match_expr` turns raw input into FTS5 syntax; an unqueryable
+/// index yields no hits, not an error.
 pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Vec<PaperDetails>> {
     let limit = limit.clamp(0, 1000);
     let Some(expr) = match_expr(query) else {
@@ -21,16 +22,20 @@ pub fn search_full_text(conn: &Connection, query: &str, limit: i64) -> Result<Ve
     // Each branch keeps only its own top-`limit` (bm25 ascending = best first),
     // so a whole-library match ("the" over a TeX corpus) never crosses the FFI.
     // Sound for the min-merge below: a paper outside both branch top-`limit`s is
-    // beaten by `limit` papers whose merged score is at least as good. The notes
-    // branch is one row per NOTE, so it groups to per-paper best before limiting
-    // — a row-limit could crowd a distinct paper out behind one many-note paper.
+    // beaten by `limit` papers whose merged score is at least as good. Both
+    // branches are many rows per paper (one per version body / per NOTE), so
+    // each groups to per-paper best before limiting — a row-limit could crowd a
+    // distinct paper out behind one many-version or many-note paper.
     // MATERIALIZED is load-bearing: flattened, bm25() would land inside min(),
-    // which FTS5 refuses.
+    // which FTS5 refuses. No STATUS gate on the papers branch: papers_fts only
+    // ever holds active roots' rows (delete sites + triggers drop the rest).
     let mut best: HashMap<String, f64> = HashMap::new();
     for (sid, score) in fts_matches(
         conn,
-        "SELECT fts.paper_id, bm25(papers_fts) FROM papers_fts fts \
-         WHERE papers_fts MATCH ?1 ORDER BY 2 LIMIT ?2",
+        "WITH p AS MATERIALIZED (SELECT source_id, bm25(papers_fts) AS score \
+             FROM papers_fts WHERE papers_fts MATCH ?1) \
+         SELECT source_id, min(score) FROM p \
+         GROUP BY source_id ORDER BY 2 LIMIT ?2",
         &expr,
         limit,
     )
@@ -261,6 +266,72 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    /// Per-version indexing's user-visible delta: a term only in an OLDER
+    /// version's body still surfaces the paper, hydrated as its latest version
+    /// — exactly how notes-branch hits already behave.
+    #[test]
+    fn old_version_only_match_surfaces_the_paper_as_latest() {
+        let conn = db::open_in_memory().unwrap();
+        storage::init_db(&conn).unwrap();
+        seed(
+            &conn,
+            "arxiv:2204.12985",
+            "the vanished appendix on kelpie dynamics",
+        );
+        conn.execute_batch(
+            "INSERT INTO PAPER (SOURCE_ID, VERSION, TITLE, CATEGORY, HAS_PDF, SOURCE_FK)
+             SELECT SOURCE_ID, 2, 'A Title', CATEGORY, HAS_PDF, SOURCE_FK
+             FROM PAPER WHERE SOURCE_ID = 'arxiv:2204.12985';
+             INSERT INTO PAPER_META (PAPER_ID, PUBLISHED, AUTHORS, TAGS, SUMMARY, FULL_TEXT)
+             SELECT PAPER_ID, '2024-04-01', '[\"Ada\"]', '[\"ml\"]', 'sum', 'a rewritten second version'
+             FROM PAPER WHERE SOURCE_ID = 'arxiv:2204.12985' AND VERSION = 2;",
+        )
+        .unwrap();
+
+        // Only v1's body has the term; the hit hydrates as the latest version.
+        let hits = search_full_text(&conn, "kelpie", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_id, "arxiv:2204.12985");
+        assert_eq!(hits[0].version, 2);
+
+        // A term both versions share still yields one result, not two.
+        let hits = search_full_text(&conn, "version OR dynamics", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// The papers branch limits distinct PAPERS, not FTS rows: one paper with
+    /// many matching version bodies must not crowd another paper out of the cap.
+    #[test]
+    fn many_version_paper_does_not_crowd_out_another_within_limit() {
+        let conn = db::open_in_memory().unwrap();
+        storage::init_db(&conn).unwrap();
+        seed(&conn, "arxiv:1", "ocelot ocelot ocelot");
+        seed(
+            &conn,
+            "arxiv:2",
+            "one ocelot in a longer digression elsewhere",
+        );
+        for v in 2..=4 {
+            conn.execute_batch(&format!(
+                "INSERT INTO PAPER (SOURCE_ID, VERSION, TITLE, CATEGORY, HAS_PDF, SOURCE_FK)
+                 SELECT SOURCE_ID, {v}, TITLE, CATEGORY, HAS_PDF, SOURCE_FK
+                 FROM PAPER WHERE SOURCE_ID = 'arxiv:1' AND VERSION = 1;
+                 INSERT INTO PAPER_META (PAPER_ID, PUBLISHED, AUTHORS, TAGS, SUMMARY, FULL_TEXT)
+                 SELECT PAPER_ID, '2024-03-05', '[\"Ada\"]', '[\"ml\"]', 'sum', 'ocelot ocelot ocelot v{v}'
+                 FROM PAPER WHERE SOURCE_ID = 'arxiv:1' AND VERSION = {v};"
+            ))
+            .unwrap();
+        }
+
+        let mut sids: Vec<String> = search_full_text(&conn, "ocelot", 2)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.source_id)
+            .collect();
+        sids.sort();
+        assert_eq!(sids, ["arxiv:1", "arxiv:2"]);
     }
 
     #[test]

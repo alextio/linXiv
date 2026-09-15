@@ -42,7 +42,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     integrity_quarantine_table(conn)?;
     paper_repairs_table(conn)?;
     schema_migration_events_table(conn)?;
-    papers_fts_rowid_key(conn)?;
+    papers_fts_per_version(conn)?;
     note_lineage_fk(conn)?;
     Ok(())
 }
@@ -477,13 +477,15 @@ pub fn schema_migration_events_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-// ── 25. papers_fts keyed by rowid == SOURCE_FK ───────────────────────────────
+// ── 25. papers_fts one row per version, keyed by rowid == PAPER_ID ───────────
 
-/// Rebuild + repopulate papers_fts with `paper_id` UNINDEXED and rowid ==
-/// SOURCE_FK so deletes are rowid lookups, not full FTS scans. Guarded on the
-/// stored DDL: only the pre-rowid shape lacks UNINDEXED. Fresh installs get
-/// the new shape from TABLE_DDL and skip.
-fn papers_fts_rowid_key(conn: &Connection) -> Result<()> {
+/// Rebuild + repopulate papers_fts with one row per version with text, keyed
+/// by rowid == PAPER_ID, so every stored body is searchable and every keyed
+/// delete is a rowid lookup. Guarded on the stored DDL: both legacy shapes
+/// (v0.2.0's indexed paper_id and the dev-only rowid == SOURCE_FK rekey this
+/// migration absorbed) lack the `version` column. Fresh installs get the new
+/// shape from TABLE_DDL and skip.
+fn papers_fts_per_version(conn: &Connection) -> Result<()> {
     let ddl: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'papers_fts'",
@@ -492,14 +494,14 @@ fn papers_fts_rowid_key(conn: &Connection) -> Result<()> {
         )
         .optional()?;
     match ddl {
-        Some(sql) if !sql.contains("UNINDEXED") => Ok(conn.execute_batch(include_str!(
-            "../../sql/migrations/25_papers_fts_rowid_key.sql"
+        Some(sql) if !sql.contains("version") => Ok(conn.execute_batch(include_str!(
+            "../../sql/migrations/25_papers_fts_per_version.sql"
         ))?),
         _ => Ok(()),
     }
 }
 
-// ── 25. NOTE composite same-lineage FK ───────────────────────────────────────
+// ── 26. NOTE composite same-lineage FK ───────────────────────────────────────
 
 /// Rebuild NOTE with a deferred composite (SOURCE_FK, PAPER_ID_FK) FK to PAPER
 /// so a version pin from another lineage is DDL-refused (SQLite cannot ADD a
@@ -511,7 +513,7 @@ fn note_lineage_fk(conn: &Connection) -> Result<()> {
         return Ok(());
     }
     conn.execute_batch(include_str!(
-        "../../sql/migrations/25_note_composite_lineage_fk.sql"
+        "../../sql/migrations/26_note_composite_lineage_fk.sql"
     ))?;
     Ok(conn.execute_batch(include_str!("../../sql/tables/notes_fts.sql"))?)
 }
@@ -997,11 +999,12 @@ mod tests {
         assert_eq!(hits, 1);
     }
 
-    /// Old-shape papers_fts (indexed paper_id, per-version rowids) is rebuilt
-    /// keyed by rowid == SOURCE_FK, one row per active root with the newest
-    /// body, DDL-identical to a fresh install's shape.
+    /// Both legacy papers_fts shapes — v0.2.0's (indexed paper_id) and the
+    /// dev-only one-row-per-lineage rekey (rowid == SOURCE_FK) — are rebuilt to
+    /// one row per version keyed by rowid == PAPER_ID, DDL-identical to a
+    /// fresh install.
     #[test]
-    fn papers_fts_rowid_key_rebuilds_legacy_index() {
+    fn papers_fts_legacy_shapes_rebuild_to_per_version() {
         let shape = |c: &Connection| -> String {
             c.query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'papers_fts'",
@@ -1013,58 +1016,69 @@ mod tests {
         let fresh = crate::storage::db::open_in_memory().unwrap();
         crate::storage::init_db(&fresh).unwrap();
 
-        let conn = crate::storage::db::open_in_memory().unwrap();
-        crate::storage::init_db(&conn).unwrap();
-        conn.execute_batch(
-            "INSERT INTO PAPER_ROOTS (SOURCE_FK, SOURCE_ID) VALUES (1, 'arxiv:a'), (2, 'arxiv:gone');
+        let seed = "INSERT INTO PAPER_ROOTS (SOURCE_FK, SOURCE_ID) VALUES (1, 'arxiv:a'), (2, 'arxiv:gone');
              UPDATE PAPER_ROOTS SET STATUS = 'deleted' WHERE SOURCE_FK = 2;
              INSERT INTO PAPER (PAPER_ID, SOURCE_ID, VERSION, TITLE, SOURCE_FK) VALUES
                  (10, 'arxiv:a', 1, 't', 1), (11, 'arxiv:a', 2, 't', 1), (20, 'arxiv:gone', 1, 't', 2);
              INSERT INTO PAPER_META (PAPER_ID, FULL_TEXT) VALUES
                  (10, 'old body'), (11, 'new body'), (20, 'ghost body');
-             -- Regress to the v0.2.0 shape: indexed paper_id, one row per version.
-             DROP TABLE papers_fts;
-             CREATE VIRTUAL TABLE papers_fts USING fts5(paper_id, full_text);
+             DROP TABLE papers_fts;";
+        // v0.2.0: indexed paper_id, rowid == PAPER_ID. Dev-only rekey:
+        // paper_id UNINDEXED, rowid == SOURCE_FK, newest body only.
+        let legacies = [
+            "CREATE VIRTUAL TABLE papers_fts USING fts5(paper_id, full_text);
              INSERT INTO papers_fts (rowid, paper_id, full_text)
              SELECT m.PAPER_ID, p.SOURCE_ID, m.FULL_TEXT
              FROM PAPER_META m JOIN PAPER p USING (PAPER_ID)
              WHERE COALESCE(m.FULL_TEXT, '') != '';",
-        )
-        .unwrap();
+            "CREATE VIRTUAL TABLE papers_fts USING fts5(paper_id UNINDEXED, full_text);
+             INSERT INTO papers_fts (rowid, paper_id, full_text)
+             VALUES (1, 'arxiv:a', 'new body');",
+        ];
+        for legacy in legacies {
+            let conn = crate::storage::db::open_in_memory().unwrap();
+            crate::storage::init_db(&conn).unwrap();
+            conn.execute_batch(&format!("{seed}{legacy}")).unwrap();
 
-        crate::storage::init_db(&conn).unwrap();
+            crate::storage::init_db(&conn).unwrap();
 
-        assert_eq!(
-            shape(&conn),
-            shape(&fresh),
-            "fresh vs migrated papers_fts DDL"
-        );
-        let rows: Vec<(i64, String, String)> = conn
-            .prepare("SELECT rowid, paper_id, full_text FROM papers_fts ORDER BY rowid")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(
-            rows,
-            [(1, "arxiv:a".into(), "new body".into())],
-            "one row per active root, rowid == SOURCE_FK, newest body, deleted root dropped"
-        );
-        // The rowid-keyed triggers keep working against the rebuilt table.
-        conn.execute(
-            "UPDATE PAPER_META SET FULL_TEXT = 'rederived body' WHERE PAPER_ID = 11",
-            [],
-        )
-        .unwrap();
-        let hits: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH 'rederived' AND rowid = 1",
+            assert_eq!(
+                shape(&conn),
+                shape(&fresh),
+                "fresh vs migrated papers_fts DDL"
+            );
+            let rows: Vec<(i64, String, i64, String)> = conn
+                .prepare(
+                    "SELECT rowid, source_id, version, full_text FROM papers_fts ORDER BY rowid",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                [
+                    (10, "arxiv:a".into(), 1, "old body".into()),
+                    (11, "arxiv:a".into(), 2, "new body".into()),
+                ],
+                "one row per version with text, rowid == PAPER_ID, deleted root dropped"
+            );
+            // The rowid-keyed triggers keep working against the rebuilt table.
+            conn.execute(
+                "UPDATE PAPER_META SET FULL_TEXT = 'rederived body' WHERE PAPER_ID = 11",
                 [],
-                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(hits, 1);
+            let hits: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH 'rederived' AND rowid = 11",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(hits, 1);
+        }
     }
 
     #[test]

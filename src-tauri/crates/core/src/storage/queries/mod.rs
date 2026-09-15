@@ -3,9 +3,9 @@
 //! NON-NEGOTIABLE notes:
 //!   * Every connection these run on already has `PRAGMA foreign_keys = ON`
 //!     (storage::db::open) — never open a raw rusqlite::Connection here.
-//!   * papers_fts.paper_id holds the SOURCE_ID *string* (e.g. "arxiv:2204.12985"),
-//!     NOT the integer PAPER_ID — the column name is a historical misnomer. The
-//!     FTS join is `papers.source_id = papers_fts.paper_id`.
+//!   * papers_fts holds one row per version with text, rowid == PAPER_ID;
+//!     `source_id` is the lineage string (e.g. "arxiv:2204.12985") the FTS
+//!     join runs on: `papers.source_id = papers_fts.source_id`.
 //!   * Refresh an FTS entry with DELETE-then-INSERT, never UPDATE.
 
 pub mod annotation;

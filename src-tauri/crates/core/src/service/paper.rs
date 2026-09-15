@@ -715,6 +715,12 @@ pub fn set_full_text(
     store::set_full_text(conn, source_id, version, Some(full_text))
 }
 
+/// One active version's stored TeX body, `None` when the version isn't stored
+/// (or the root is trashed). The full-text-diff endpoint is the caller.
+pub fn get_full_text(conn: &Connection, source_id: &str, version: i64) -> Result<Option<String>> {
+    store::get_full_text(conn, source_id, version)
+}
+
 /// The arXiv PDF URL a TeX-source fetch derives from (`/pdf/` -> `/src/`), or an
 /// error naming why there is no fetchable source. Pure. Only arXiv publishes
 /// source tarballs, and arxiv-ness is judged by the `source_id` namespace, not
@@ -1382,9 +1388,9 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source_id, "arxiv:ft");
 
-        // The FTS row is keyed by SOURCE_ID, so a later version indexing empty
+        // Versions index independently, so a later version indexing empty
         // (corrupt tarball, PDF-only submission) must not take the paper out of
-        // search — the clobber guard only ever sees one version's body.
+        // search — v1's row is untouched by v2's write.
         save_paper_metadata(&mut conn, &meta("arxiv:ft", 2, "cs.LG", &[]), None).unwrap();
         set_full_text(&mut conn, "arxiv:ft", 2, "").unwrap();
         assert_eq!(

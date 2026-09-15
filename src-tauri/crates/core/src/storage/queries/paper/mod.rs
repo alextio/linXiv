@@ -10,7 +10,8 @@ mod trash;
 mod write;
 
 pub use fts::{
-    full_text_backfill_candidates, full_text_backfill_count, has_full_text, set_full_text,
+    full_text_backfill_candidates, full_text_backfill_count, get_full_text, has_full_text,
+    set_full_text,
 };
 pub use merge::{merge_paper_roots, merge_plan, MergePlan, MergeStats, VersionAction};
 pub use pdf::{

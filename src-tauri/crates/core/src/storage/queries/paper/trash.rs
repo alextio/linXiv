@@ -30,7 +30,8 @@ pub fn soft_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Optio
         let path = latest_pdf_path(tx, source_id)?;
         tx.execute(
             "DELETE FROM papers_fts \
-             WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+             WHERE rowid IN (SELECT PAPER_ID FROM PAPER \
+                             WHERE SOURCE_FK = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?))",
             [source_id],
         )?;
         tx.execute(
@@ -70,10 +71,12 @@ pub fn restore_paper(conn: &mut Connection, source_id: &str) -> Result<Option<St
 pub fn hard_delete_paper(conn: &mut Connection, source_id: &str) -> Result<Option<String>> {
     transaction(conn, |tx| {
         let path = latest_pdf_path(tx, source_id)?;
-        // Before the root goes: the FTS delete keys off its SOURCE_FK.
+        // Before the root goes: the FTS delete resolves rowids through the
+        // root's SOURCE_FK.
         tx.execute(
             "DELETE FROM papers_fts \
-             WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+             WHERE rowid IN (SELECT PAPER_ID FROM PAPER \
+                             WHERE SOURCE_FK = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?))",
             [source_id],
         )?;
         tx.execute("DELETE FROM PAPER_ROOTS WHERE SOURCE_ID = ?", [source_id])?;
@@ -167,8 +170,12 @@ mod tests {
     fn soft_delete_restore_and_hard_delete() {
         let mut conn = open_in_memory().unwrap();
         init_db(&conn).unwrap();
+        // Two versions with text: every delete path must clear the whole
+        // lineage's FTS rows, not just one.
         save_paper_metadata(&mut conn, &meta("arxiv:d", 1), None).unwrap();
         set_full_text(&mut conn, "arxiv:d", 1, Some("body")).unwrap();
+        save_paper_metadata(&mut conn, &meta("arxiv:d", 2), None).unwrap();
+        set_full_text(&mut conn, "arxiv:d", 2, Some("second body")).unwrap();
 
         // Soft delete: hidden from active view, marked deleted, FTS dropped.
         soft_delete_paper(&mut conn, "arxiv:d").unwrap();
@@ -177,7 +184,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:d"
             ),
             0
@@ -188,17 +195,18 @@ mod tests {
             "deleted"
         );
 
-        // Restore: active again, FTS rebuilt from stored full_text.
+        // Restore: active again, both versions' FTS rows rebuilt from stored
+        // full_text.
         restore_paper(&mut conn, "arxiv:d").unwrap();
         assert!(!is_paper_deleted(&conn, "arxiv:d").unwrap());
         assert!(get_paper(&conn, "arxiv:d", None).unwrap().is_some());
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:d"
             ),
-            1
+            2
         );
 
         // Hard delete: root gone, children cascade-deleted, FTS gone.
@@ -219,7 +227,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:d"
             ),
             0

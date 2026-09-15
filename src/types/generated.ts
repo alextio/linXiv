@@ -520,6 +520,18 @@ export type FullTextPending = {
   pending: number,
 };
 
+export type FullTextDiffResponse = {
+  from_version: number,
+  to_version: number,
+  hunks: Array<DiffHunk>,
+};
+
+export type DiffHunk = {
+  pos: number,
+  delete_len: number,
+  insert: string,
+};
+
 export type SavedSourceIds = {
   saved_source_ids: Array<string>,
 };
