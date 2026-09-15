@@ -9,13 +9,14 @@ import { libraryFetch } from "../stores/backend";
 import { getPdfProxyUrl } from "../api/papers";
 import { Button } from "../components/ui/button";
 import { Spinner } from "../components/ui/spinner";
+import { LogoMark } from "../components/ui/logo-mark";
+import { pdfDocumentOptions, estPageHeight, PAGE_INSET } from "../lib/pdfOptions";
 import type { SearchResult, UploadPdfBody } from "../types/api";
 import { isArxivId } from "../lib/papers";
 import { MathText } from "../lib/tex";
 import { invalidatePaperMutationQueries } from "../lib/paperMutations";
 import { errText } from "../lib/errText";
 import { pdfCanvasDpr } from "../lib/zoom";
-import { pdfDocumentOptions } from "../lib/pdfOptions";
 import { useUiStore } from "../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -180,8 +181,9 @@ export default function PdfPreviewPage() {
             options={pdfDocumentOptions}
             onLoadSuccess={(pdf) => { setNumPages(pdf.numPages); pdfDocRef.current = pdf; }}
             loading={
-              <div className="flex items-center justify-center gap-2 py-16 text-white/60 text-sm">
-                <Spinner size={16} /> Loading PDF…
+              <div className="flex flex-col items-center justify-center gap-3 py-16 text-white/60 text-sm">
+                <LogoMark size={48} className="animate-pulse" />
+                Loading PDF…
               </div>
             }
             error={
@@ -216,15 +218,26 @@ export default function PdfPreviewPage() {
             }
           >
             {Array.from({ length: numPages }, (_, i) => (
-              <Page
+              // react-pdf mounts each canvas unsized (300x150) and sizes it in
+              // an after-paint effect, removing `loading` in the same commit —
+              // only a sized wrapper holds layout through that painted frame
+              // (PdfReader's slot pattern).
+              <div
                 key={i + 1}
-                pageNumber={i + 1}
-                width={containerWidth ? containerWidth - 32 : undefined}
-                devicePixelRatio={pdfCanvasDpr(zoom)}
-                className="mx-auto my-2 shadow-md"
-                renderTextLayer
-                renderAnnotationLayer
-              />
+                className="mx-auto my-2 bg-white shadow-md"
+                style={{
+                  width: containerWidth ? containerWidth - PAGE_INSET : undefined,
+                  minHeight: estPageHeight(containerWidth),
+                }}
+              >
+                <Page
+                  pageNumber={i + 1}
+                  width={containerWidth ? containerWidth - PAGE_INSET : undefined}
+                  devicePixelRatio={pdfCanvasDpr(zoom)}
+                  renderTextLayer
+                  renderAnnotationLayer
+                />
+              </div>
             ))}
           </Document>
         </div>
