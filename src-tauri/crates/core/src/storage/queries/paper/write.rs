@@ -390,8 +390,8 @@ pub fn repair_paper(
         let Some((pid, ver)) = row else { return Ok(()) };
 
         if renamed {
-            // The FTS key (rowid == SOURCE_FK) survives the rename; re-derive
-            // so the row's stored paper_id string picks up the new id.
+            // The FTS keys (rowid == PAPER_ID) survive the rename; re-derive
+            // so the rows' stored source_id strings pick up the new id.
             refresh_fts(tx, new_id)?;
         }
 
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:OLD"
             ),
             1
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:OLD"
             ),
             0
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:NEW"
             ),
             1

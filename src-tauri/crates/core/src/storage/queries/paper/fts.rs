@@ -7,8 +7,8 @@ use crate::error::Result;
 use crate::models::{ARXIV_ID_PREFIX, ARXIV_PDF_MARKER};
 use crate::storage::db::transaction;
 
-// papers_fts is keyed by rowid == SOURCE_FK; paper_id holds the SOURCE_ID
-// *string* (UNINDEXED, display/join only), not the int PAPER_ID.
+// papers_fts is keyed by rowid == PAPER_ID, one row per version with text;
+// source_id/version are UNINDEXED (display/join only).
 // init_db always creates papers_fts, so a DELETE/INSERT against it cannot miss.
 
 /// Rows the backfill works on: latest-version active papers with no TeX source
@@ -44,27 +44,31 @@ pub fn full_text_backfill_count(conn: &Connection) -> Result<i64> {
     )
 }
 
-/// Re-derive a paper's FTS row from `paper_index_text` (dropped when the view
-/// yields nothing) — the same two statements the PAPER_META triggers run, so the
-/// paths can't disagree. Only for writes no trigger sees: a SOURCE_ID rename,
-/// an undelete, a merge; FULL_TEXT writers are covered by trigger already.
+/// Re-derive a lineage's FTS rows from `paper_index_text` (dropped when the
+/// view yields nothing) — the same derivation the PAPER_META triggers run, so
+/// the paths can't disagree. Only for writes no trigger sees: a SOURCE_ID
+/// rename, an undelete, a merge; FULL_TEXT writers are covered by trigger
+/// already. The DELETE routes through PAPER (served by
+/// `idx_paper_source_fk_version`) so renamed/transplanted rows are still found
+/// by rowid whatever source_id string they carry.
 pub(super) fn refresh_fts(tx: &Transaction, source_id: &str) -> Result<()> {
     tx.execute(
         "DELETE FROM papers_fts \
-         WHERE rowid = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?)",
+         WHERE rowid IN (SELECT PAPER_ID FROM PAPER \
+                         WHERE SOURCE_FK = (SELECT SOURCE_FK FROM PAPER_ROOTS WHERE SOURCE_ID = ?))",
         [source_id],
     )?;
     tx.execute(
-        "INSERT INTO papers_fts(rowid, paper_id, full_text) \
-         SELECT source_fk, source_id, full_text FROM paper_index_text WHERE source_id = ?",
+        "INSERT INTO papers_fts(rowid, source_id, version, full_text) \
+         SELECT paper_id, source_id, version, full_text FROM paper_index_text WHERE source_id = ?",
         [source_id],
     )?;
     Ok(())
 }
 
 /// Store extracted TeX and mark DOWNLOADED_SOURCE; no-op if the version doesn't
-/// exist. FTS follows by trigger. Empty text marks the version fetched; search
-/// falls back to an older body, or drops the paper if no version has one.
+/// exist. FTS follows by trigger. Empty text marks the version fetched and
+/// unindexed; other versions' rows are independent and keep answering.
 pub fn set_full_text(
     conn: &mut Connection,
     source_id: &str,
@@ -103,6 +107,20 @@ pub fn has_full_text(conn: &Connection, source_id: &str, version: i64) -> Result
         .unwrap_or(false))
 }
 
+/// One active version's stored TeX body, `None` when the version isn't stored
+/// (or the root is trashed — inherited from `papers`). The full-text-diff
+/// endpoint is the caller; every display read stays `PAPER_COLUMNS_NO_TEXT`.
+pub fn get_full_text(conn: &Connection, source_id: &str, version: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT full_text FROM papers WHERE source_id = ? AND version = ?",
+            params![source_id, version],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::testutil::{count, meta};
@@ -127,7 +145,7 @@ mod tests {
         // FTS searchable under the SOURCE_ID string.
         let hit: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH 'tex' AND paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH 'tex' AND source_id = ?",
                 ["arxiv:ft"],
                 |r| r.get(0),
             )
@@ -139,7 +157,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:ft"
             ),
             1
@@ -159,7 +177,7 @@ mod tests {
         let matches = |conn: &Connection, body: &str| {
             count(
                 conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH ? AND paper_id = 'arxiv:raw'",
+                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH ? AND source_id = 'arxiv:raw'",
                 body,
             )
         };
@@ -176,7 +194,8 @@ mod tests {
         set_text(&conn, 1, Some("smuggled tex"));
         assert_eq!(matches(&conn, "smuggled"), 1);
 
-        // INSERT: a v2 written with text takes over — one row per paper, newest wins.
+        // INSERT: a v2 written with text gets its own row — one per version,
+        // the older body stays searchable beside it.
         save_paper_metadata(&mut conn, &meta("arxiv:raw", 2), None).unwrap();
         let v2: i64 = conn
             .query_row(
@@ -194,18 +213,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(matches(&conn, "second"), 1);
-        assert_eq!(matches(&conn, "smuggled"), 0);
+        assert_eq!(matches(&conn, "smuggled"), 1);
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:raw"
             ),
-            1
+            2
         );
 
-        // Clearing the newest body falls back to the older version that still has one.
+        // Clearing the newest body only drops its own row; v1 keeps answering.
         set_text(&conn, 2, None);
+        assert_eq!(matches(&conn, "second"), 0);
         assert_eq!(matches(&conn, "smuggled"), 1);
 
         // ...and clearing every body takes the paper out of search entirely.
@@ -213,7 +233,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:raw"
             ),
             0
@@ -226,17 +246,17 @@ mod tests {
         assert_eq!(matches(&conn, "resurrected"), 0);
     }
 
-    /// Dropping a version's meta row changes which body is newest. Delete
+    /// Dropping a version's meta row must drop exactly its own FTS row. Delete
     /// `papers_fts_meta_ad` and this goes red: search keeps answering with a body
     /// whose row no longer exists.
     #[test]
-    fn deleting_the_newest_meta_row_falls_back_to_an_older_body() {
+    fn deleting_a_meta_row_drops_only_its_own_fts_row() {
         let mut conn = open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let matches = |conn: &Connection, body: &str| {
             count(
                 conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH ? AND paper_id = 'arxiv:del'",
+                "SELECT COUNT(*) FROM papers_fts WHERE papers_fts MATCH ? AND source_id = 'arxiv:del'",
                 body,
             )
         };
@@ -254,7 +274,7 @@ mod tests {
         save_paper_metadata(&mut conn, &meta("arxiv:del", 2), None).unwrap();
         set_text(&conn, 2, "newer body");
         assert_eq!(matches(&conn, "newer"), 1);
-        assert_eq!(matches(&conn, "older"), 0);
+        assert_eq!(matches(&conn, "older"), 1, "every version's body indexed");
 
         conn.execute(
             "DELETE FROM PAPER_META WHERE PAPER_ID IN \
@@ -263,7 +283,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(matches(&conn, "older"), 1, "index did not fall back");
+        assert_eq!(matches(&conn, "older"), 1, "sibling version's row dropped");
         assert_eq!(matches(&conn, "newer"), 0, "deleted body still searchable");
     }
 
@@ -279,7 +299,7 @@ mod tests {
         let indexed = |conn: &Connection| {
             count(
                 conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = ?",
                 "arxiv:trash",
             )
         };
