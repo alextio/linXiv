@@ -139,6 +139,8 @@ pub(crate) fn render() -> String {
     out.push_str(&decl::<linxiv_core::service::paper::PaperVersionsResponse>());
     out.push_str(&decl::<linxiv_core::service::paper::DoiCandidates>());
     out.push_str(&decl::<linxiv_core::service::paper::FullTextPending>());
+    out.push_str(&decl::<crate::route::papers::FullTextDiffResponse>());
+    out.push_str(&decl::<crate::route::papers::DiffHunk>());
     out.push_str(&decl::<linxiv_core::service::paper::SavedSourceIds>());
     out.push_str(&decl::<linxiv_core::service::paper::DeletedPaperReceipt>());
     out.push_str(&decl::<linxiv_core::service::project::RemovedFromProjects>());

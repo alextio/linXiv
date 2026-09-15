@@ -2,12 +2,12 @@
 -- one view saying what belongs in the index, and the triggers that keep the
 -- index equal to it.
 --
--- `paper_index_text` is the ONE definition of "the body a paper is searchable
--- by": the newest version that has any text, keyed by SOURCE_FK (papers_fts's
--- rowid) and gated on the root still being active — inherited from `papers`,
--- so a soft-deleted paper yields no row and cannot be indexed. Rust's
--- `refresh_fts` runs the same two statements against the same view, so the
--- automatic path and the hand-called one cannot disagree.
+-- `paper_index_text` is the ONE definition of "the bodies a paper is searchable
+-- by": every version with any text, keyed by PAPER_ID (papers_fts's rowid) and
+-- gated on the root still being active — inherited from `papers`, so a
+-- soft-deleted paper yields no rows and cannot be indexed. Rust's `refresh_fts`
+-- runs the same two statements against the same view, so the automatic path and
+-- the hand-called one cannot disagree.
 --
 -- Applied in the VIEWS phase, after the migrations, and the triggers ship with
 -- the view rather than with the table: SQLite compiles a trigger body when it
@@ -18,19 +18,17 @@ DROP VIEW IF EXISTS paper_index_text;
 
 CREATE VIEW paper_index_text AS
 SELECT
-    v.source_fk AS source_fk,
+    v.paper_id  AS paper_id,
     v.source_id AS source_id,
+    v.version   AS version,
     v.full_text AS full_text
 FROM papers v
-WHERE COALESCE(v.full_text, '') != ''
-  AND v.version = (
-      SELECT MAX(x.version) FROM papers x
-      WHERE x.source_id = v.source_id AND COALESCE(x.full_text, '') != ''
-  );
+WHERE COALESCE(v.full_text, '') != '';
 
 -- DELETE then INSERT, not UPDATE: the INSERT selects from the view, so it
--- writes nothing when the paper no longer belongs in the index (text cleared,
--- or the root soft-deleted while its FULL_TEXT is still stored).
+-- writes nothing when the version no longer belongs in the index (text cleared,
+-- or the root soft-deleted while its FULL_TEXT is still stored). Versions are
+-- independent rows, so each trigger touches exactly its own PAPER_ID.
 --
 -- DROP-then-CREATE, like the view above, NOT `CREATE ... IF NOT EXISTS`: these
 -- ship in the views phase, which runs on every open, so dropping first is what
@@ -40,35 +38,28 @@ DROP TRIGGER IF EXISTS papers_fts_meta_ai;
 CREATE TRIGGER papers_fts_meta_ai AFTER INSERT ON PAPER_META
     WHEN COALESCE(new.FULL_TEXT, '') != ''
 BEGIN
-    DELETE FROM papers_fts
-     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
-    INSERT INTO papers_fts (rowid, paper_id, full_text)
-    SELECT source_fk, source_id, full_text FROM paper_index_text
-     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+    DELETE FROM papers_fts WHERE rowid = new.PAPER_ID;
+    INSERT INTO papers_fts (rowid, source_id, version, full_text)
+    SELECT paper_id, source_id, version, full_text FROM paper_index_text
+     WHERE paper_id = new.PAPER_ID;
 END;
 
 DROP TRIGGER IF EXISTS papers_fts_meta_au;
 CREATE TRIGGER papers_fts_meta_au AFTER UPDATE OF FULL_TEXT ON PAPER_META
     WHEN old.FULL_TEXT IS NOT new.FULL_TEXT
 BEGIN
-    DELETE FROM papers_fts
-     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
-    INSERT INTO papers_fts (rowid, paper_id, full_text)
-    SELECT source_fk, source_id, full_text FROM paper_index_text
-     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = new.PAPER_ID);
+    DELETE FROM papers_fts WHERE rowid = new.PAPER_ID;
+    INSERT INTO papers_fts (rowid, source_id, version, full_text)
+    SELECT paper_id, source_id, version, full_text FROM paper_index_text
+     WHERE paper_id = new.PAPER_ID;
 END;
 
--- Dropping a version's meta row changes which body is newest, so the index has
--- to be re-derived. Guarded on the old row having had text: deleting an empty
--- version cannot change the answer. During a hard delete the root is already
--- gone, so the view yields nothing and this collapses to the DELETE alone.
+-- Deleting a version's meta row only removes its own FTS row — other versions'
+-- rows are independent, so there is nothing to re-derive. Guarded on the old
+-- row having had text: deleting an empty version was never indexed.
 DROP TRIGGER IF EXISTS papers_fts_meta_ad;
 CREATE TRIGGER papers_fts_meta_ad AFTER DELETE ON PAPER_META
     WHEN COALESCE(old.FULL_TEXT, '') != ''
 BEGIN
-    DELETE FROM papers_fts
-     WHERE rowid = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
-    INSERT INTO papers_fts (rowid, paper_id, full_text)
-    SELECT source_fk, source_id, full_text FROM paper_index_text
-     WHERE source_fk = (SELECT SOURCE_FK FROM PAPER WHERE PAPER_ID = old.PAPER_ID);
+    DELETE FROM papers_fts WHERE rowid = old.PAPER_ID;
 END;

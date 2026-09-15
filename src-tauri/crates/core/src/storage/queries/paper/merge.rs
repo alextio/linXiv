@@ -446,7 +446,11 @@ pub fn merge_paper_roots(
         )?;
 
         // 8 + 9. FTS, then the loser root (cascade collapses its leftover rows).
-        tx.execute("DELETE FROM papers_fts WHERE rowid = ?", [l])?;
+        tx.execute(
+            "DELETE FROM papers_fts \
+             WHERE rowid IN (SELECT PAPER_ID FROM PAPER WHERE SOURCE_FK = ?)",
+            [l],
+        )?;
         tx.execute("DELETE FROM PAPER_ROOTS WHERE SOURCE_FK = ?", [l])?;
         refresh_fts(tx, &plan.winner_id)?;
         tx.execute(
@@ -942,7 +946,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = 'local:L'",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = 'local:L'",
                 []
             ),
             1
@@ -954,7 +958,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = 'local:L'",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = 'local:L'",
                 []
             ),
             0
@@ -963,7 +967,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = 'arxiv:W' \
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = 'arxiv:W' \
                  AND full_text MATCH 'entanglement'",
                 [],
             ),
@@ -1284,7 +1288,7 @@ mod tests {
         assert_eq!(
             count(
                 &conn,
-                "SELECT COUNT(*) FROM papers_fts WHERE paper_id = 'local:L'",
+                "SELECT COUNT(*) FROM papers_fts WHERE source_id = 'local:L'",
                 []
             ),
             0

@@ -1,8 +1,8 @@
 //! `/api/papers` routes over `service::paper`.
 //!
 //! The generic `{source_id}` arms match EXACTLY 3 segments, except
-//! `POST {source_id}/full-text`; `{source_id}/pdf` belongs to `uploads` and
-//! `/pdf-path` to `pdfs`.
+//! `POST {source_id}/full-text` and `GET {source_id}/full-text-diff`;
+//! `{source_id}/pdf` belongs to `uploads` and `/pdf-path` to `pdfs`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -34,6 +34,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
         ("POST", ["api", "papers", "saved"]) => Some(saved(state, ctx)),
         ("GET", ["api", "papers", "full-text-pending"]) => Some(full_text_pending(state)),
         ("POST", ["api", "papers", id, "full-text"]) => Some(fetch_full_text(state, id, ctx).await),
+        ("GET", ["api", "papers", id, "full-text-diff"]) => Some(full_text_diff(state, id, ctx)),
         ("GET", ["api", "papers", id]) => Some(get_one(state, id)),
         ("DELETE", ["api", "papers", id]) => Some(delete(state, id)),
         _ => None,
@@ -159,6 +160,107 @@ pub(crate) async fn ingest_full_text(
 ) -> Result<svc_paper::FullTextReceipt, ApiError> {
     let fetched = svc_paper::fetch_full_text(paper, &config::data_dir()).await?;
     Ok(state.with_conn(|conn| fetched.commit(conn))?)
+}
+
+/// full_text_diff response: splice hunks turning `from_version`'s stored text
+/// into `to_version`'s.
+#[derive(serde::Serialize, ts_rs::TS)]
+pub struct FullTextDiffResponse {
+    pub from_version: i64,
+    pub to_version: i64,
+    pub hunks: Vec<DiffHunk>,
+}
+
+/// full_text_diff hunk: chars `pos..pos+delete_len` of the `from` text are
+/// replaced by `insert` ("" = pure deletion). Offsets count chars, hunks
+/// ascend, so a client can replay them in order against the `from` text.
+#[derive(serde::Serialize, ts_rs::TS)]
+pub struct DiffHunk {
+    pub pos: usize,
+    pub delete_len: usize,
+    pub insert: String,
+}
+
+/// `GET /api/papers/{source_id}/full-text-diff?from=&to=` — the splice hunks
+/// between two stored versions' TeX bodies, computed per request (no storage).
+/// 404 when either version has no stored text; 422 on bad/equal versions.
+fn full_text_diff(state: &AppState, source_id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let from = diff_version(ctx, "from")?;
+    let to = diff_version(ctx, "to")?;
+    if from == to {
+        return Err(ApiError::new(422, "from and to must be different versions"));
+    }
+    let (text_from, text_to) = state.with_conn(|conn| -> Result<_, ApiError> {
+        let body = |version: i64| -> Result<String, ApiError> {
+            svc_paper::get_full_text(conn, source_id, version)?
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| {
+                    ApiError::new(
+                        404,
+                        format!("No stored full text for {source_id} v{version}"),
+                    )
+                })
+        };
+        Ok((body(from)?, body(to)?))
+    })?;
+    to_value(&FullTextDiffResponse {
+        from_version: from,
+        to_version: to,
+        hunks: diff_hunks(&text_from, &text_to)?,
+    })
+}
+
+/// `?from=`/`?to=` semantics: required int >= 1, else a 422.
+fn diff_version(ctx: &ReqCtx<'_>, key: &str) -> Result<i64, ApiError> {
+    ctx.q(key)
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|&n| n >= 1)
+        .ok_or_else(|| ApiError::new(422, format!("{key} must be an integer >= 1")))
+}
+
+/// Minimal splice set turning `from` into `to`, via an ephemeral Automerge doc
+/// (`update_text` runs a Myers diff internally; the diff between the two
+/// commits yields the splices). Patch indices address the doc mid-replay, so
+/// `delta` (chars inserted minus deleted so far) maps them back into `from`
+/// coordinates. Char-counted end to end (`TextEncoding::UnicodeCodePoint`).
+fn diff_hunks(from: &str, to: &str) -> Result<Vec<DiffHunk>, ApiError> {
+    use automerge::{transaction::Transactable, AutoCommit, ObjType, PatchAction, TextEncoding};
+    let am = |e: automerge::AutomergeError| ApiError::new(500, e.to_string());
+    let mut doc = AutoCommit::new_with_encoding(TextEncoding::UnicodeCodePoint);
+    let text = doc
+        .put_object(automerge::ROOT, "text", ObjType::Text)
+        .map_err(am)?;
+    doc.update_text(&text, from).map_err(am)?;
+    let heads_from = doc.get_heads();
+    doc.update_text(&text, to).map_err(am)?;
+    let heads_to = doc.get_heads();
+
+    let mut hunks = Vec::new();
+    let mut delta: i64 = 0;
+    for patch in doc.diff(&heads_from, &heads_to) {
+        match patch.action {
+            PatchAction::SpliceText { index, value, .. } => {
+                let insert = value.make_string();
+                let inserted = insert.chars().count() as i64;
+                hunks.push(DiffHunk {
+                    pos: (index as i64 - delta) as usize,
+                    delete_len: 0,
+                    insert,
+                });
+                delta += inserted;
+            }
+            PatchAction::DeleteSeq { index, length } => {
+                hunks.push(DiffHunk {
+                    pos: (index as i64 - delta) as usize,
+                    delete_len: length,
+                    insert: String::new(),
+                });
+                delta -= length as i64;
+            }
+            _ => {}
+        }
+    }
+    Ok(hunks)
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -552,6 +654,118 @@ mod tests {
             "leaked full_text: {searched}"
         );
         assert_eq!(searched["papers"][0]["downloaded_source"], json!(true));
+    }
+
+    /// Replay hunks against `from` the way a client would: copy up to `pos`,
+    /// skip `delete_len` chars, append `insert` (all char-counted).
+    fn apply_hunks(from: &str, hunks: &Value) -> String {
+        let chars: Vec<char> = from.chars().collect();
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        for h in hunks.as_array().unwrap() {
+            let pos = h["pos"].as_u64().unwrap() as usize;
+            assert!(pos >= cursor, "hunks must ascend: {hunks}");
+            out.extend(&chars[cursor..pos]);
+            cursor = pos + h["delete_len"].as_u64().unwrap() as usize;
+            out.push_str(h["insert"].as_str().unwrap());
+        }
+        out.extend(&chars[cursor..]);
+        out
+    }
+
+    /// The endpoint's contract: replaying the hunks over the `from` body
+    /// reproduces the `to` body exactly — including multibyte text, since
+    /// offsets count chars — and the reverse diff works from the same store.
+    #[tokio::test]
+    async fn full_text_diff_hunks_replay_from_into_to() {
+        let st = state();
+        let v1 = "intro\nthe naïve λ-calculus section\nconclusion";
+        let v2 = "intro\nthe typed λ-calculus section, revised\nconclusion";
+        st.with_conn(|conn| {
+            svc_paper::save_paper_metadata(conn, &meta("arxiv:9", None), None)?;
+            let mut m2 = meta("arxiv:9", None);
+            m2.version = 2;
+            svc_paper::save_paper_metadata(conn, &m2, None)?;
+            svc_paper::set_full_text(conn, "arxiv:9", 1, v1)?;
+            svc_paper::set_full_text(conn, "arxiv:9", 2, v2)
+        })
+        .unwrap();
+
+        let out = req(
+            &st,
+            "GET",
+            "/api/papers/arxiv:9/full-text-diff?from=1&to=2",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["from_version"], json!(1));
+        assert_eq!(out["to_version"], json!(2));
+        assert!(!out["hunks"].as_array().unwrap().is_empty());
+        assert_eq!(apply_hunks(v1, &out["hunks"]), v2);
+
+        let back = req(
+            &st,
+            "GET",
+            "/api/papers/arxiv:9/full-text-diff?from=2&to=1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(apply_hunks(v2, &back["hunks"]), v1);
+
+        // Identical bodies (stored twice) diff to no hunks — not an error.
+        st.with_conn(|conn| svc_paper::set_full_text(conn, "arxiv:9", 2, v1))
+            .unwrap();
+        let same = req(
+            &st,
+            "GET",
+            "/api/papers/arxiv:9/full-text-diff?from=1&to=2",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(same["hunks"], json!([]));
+    }
+
+    /// The guards: bad/equal version params are 422s; a version without stored
+    /// text (never fetched, empty extract, or unknown paper) is a typed 404.
+    #[tokio::test]
+    async fn full_text_diff_rejects_bad_params_and_missing_text() {
+        let st = state();
+        st.with_conn(|conn| {
+            svc_paper::save_paper_metadata(conn, &meta("arxiv:10", None), None)?;
+            svc_paper::set_full_text(conn, "arxiv:10", 1, "only body")
+        })
+        .unwrap();
+        let diff = |q: &str| format!("/api/papers/arxiv:10/full-text-diff?{q}");
+
+        for q in [
+            "from=1",
+            "to=1",
+            "from=0&to=1",
+            "from=1&to=x",
+            "from=1&to=1",
+        ] {
+            let err = req(&st, "GET", &diff(q), None).await.unwrap_err();
+            assert_eq!(err.status, 422, "query {q:?}: {}", err.detail);
+        }
+        // v2 exists in no form at all — same 404 as an empty-text version.
+        let err = req(&st, "GET", &diff("from=1&to=2"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.detail, "No stored full text for arxiv:10 v2");
+
+        let err = req(
+            &st,
+            "GET",
+            "/api/papers/arxiv:nope/full-text-diff?from=1&to=2",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
     }
 
     #[tokio::test]

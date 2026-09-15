@@ -32,6 +32,9 @@ linxiv-share = { path = "../share", features = ["auth-keyhive", "sync-beelay"] }
 # Remote Query Mode node half (remote_query.rs): the linxiv-api/1 protocol
 # handler + NodeAddress, served on the share node's endpoint.
 linxiv-p2p = { path = "../p2p" }
+# Ephemeral-doc text diffs (full-text-diff route) + the empty placeholder doc
+# an offline join leaves behind; same version linxiv-share builds against.
+automerge = "0.11.0"
 serde = { version = "1", features = ["derive"] }
 # TS derives on the route request structs + the ts_bindings generator (moved
 # here from core: it sees every crate's wire types).
@@ -80,8 +83,5 @@ wiremock = "0.6"
 # Remote-query tests bind in-process endpoint pairs, like the p2p crate's own
 # tests/api.rs.
 iroh = "1.0.2"
-# Mints the empty placeholder doc an offline join leaves behind; same version
-# linxiv-share builds against.
-automerge = "0.11.0"
 tempfile = "3"
 
