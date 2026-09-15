@@ -6,3 +6,14 @@ export const pdfDocumentOptions = {
   disableStream: true,
   disableRange: true,
 };
+
+// Horizontal padding per page, subtracted from the scroller's measured width
+// to get the width react-pdf renders at.
+export const PAGE_INSET = 32;
+
+/** Estimated page height from a letter aspect ratio, for spacers and <Page>
+ * loading placeholders — without one, freshly mounted pages collapse to a
+ * few pixels and the document flashes as a bunch of thin strips. */
+export function estPageHeight(width: number | null | undefined) {
+  return width ? Math.round((width - PAGE_INSET) * 1.3) : 800;
+}
