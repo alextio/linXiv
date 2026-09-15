@@ -19,7 +19,7 @@ import {
   type UpdateFrequency,
 } from "../../lib/updateSchedule";
 import { Button } from "../ui/button";
-import markUrl from "../../assets/linxiv-mark.svg";
+import { LogoMark } from "../ui/logo-mark";
 
 /** When the last scheduled check ran, per install. */
 const LAST_CHECK_KEY = "linxiv-last-update-check";
@@ -90,32 +90,6 @@ function useScheduledUpdateCheck(settings: Settings | undefined): UpdateResult |
   }, [settings]);
 
   return available;
-}
-
-/**
- * The logo mark, tinted to the current accent. The source art is a single
- * flat colour, so masking it recolours the whole mark from one file.
- */
-function LogoMark() {
-  return (
-    <span
-      aria-hidden="true"
-      className="block shrink-0"
-      style={{
-        width: 26,
-        height: 26,
-        backgroundColor: "var(--color-accent)",
-        WebkitMaskImage: `url(${markUrl})`,
-        maskImage: `url(${markUrl})`,
-        WebkitMaskRepeat: "no-repeat",
-        maskRepeat: "no-repeat",
-        WebkitMaskPosition: "center",
-        maskPosition: "center",
-        WebkitMaskSize: "contain",
-        maskSize: "contain",
-      }}
-    />
-  );
 }
 
 /** Absolutely positioned inside the shell's <main>, above the page-level
