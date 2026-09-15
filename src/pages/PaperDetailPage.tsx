@@ -45,7 +45,7 @@ import { remotePdfPath } from "../api/remote";
 import { libraryFetch, useBackendStore } from "../stores/backend";
 import { errText } from "../lib/errText";
 import { pdfCanvasDpr } from "../lib/zoom";
-import { pdfDocumentOptions } from "../lib/pdfOptions";
+import { pdfDocumentOptions, estPageHeight, PAGE_INSET } from "../lib/pdfOptions";
 import { useUiStore } from "../stores/ui";
 
 const LATEST_VERSION_KEY = "latest" as const;
@@ -1293,15 +1293,26 @@ function PdfPane({
                     }
                   >
                     {Array.from({ length: previewNumPages }, (_, i) => (
-                      <Page
+                      // react-pdf mounts each canvas unsized (300x150) and
+                      // sizes it in an after-paint effect, removing `loading`
+                      // in the same commit — only a sized wrapper holds layout
+                      // through that painted frame (PdfReader's slot pattern).
+                      <div
                         key={i + 1}
-                        pageNumber={i + 1}
-                        width={containerWidth ? containerWidth - 32 : undefined}
-                        devicePixelRatio={pdfCanvasDpr(zoom)}
-                        className="mx-auto my-2 shadow-md"
-                        renderTextLayer
-                        renderAnnotationLayer
-                      />
+                        className="mx-auto my-2 bg-white shadow-md"
+                        style={{
+                          width: containerWidth ? containerWidth - PAGE_INSET : undefined,
+                          minHeight: estPageHeight(containerWidth),
+                        }}
+                      >
+                        <Page
+                          pageNumber={i + 1}
+                          width={containerWidth ? containerWidth - PAGE_INSET : undefined}
+                          devicePixelRatio={pdfCanvasDpr(zoom)}
+                          renderTextLayer
+                          renderAnnotationLayer
+                        />
+                      </div>
                     ))}
                   </Document>
                 </div>

@@ -36,7 +36,7 @@ import {
   type HighlightRange,
   type PageIndex,
 } from "../../lib/pdfFind";
-import { pdfDocumentOptions } from "../../lib/pdfOptions";
+import { pdfDocumentOptions, PAGE_INSET, estPageHeight } from "../../lib/pdfOptions";
 import { useUiStore } from "../../stores/ui";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -69,15 +69,6 @@ const RESIZE_SETTLE_MS = 120;
 // reader still flushes the final position.
 const POSITION_SAVE_INTERVAL_MS = 200;
 
-// Horizontal padding per page, subtracted from the scroller's measured width
-// to get the width react-pdf renders at.
-const PAGE_INSET = 32;
-
-// Spacer height for unrendered pages, from a letter aspect ratio, so scroll
-// offsets stay roughly right until the real page mounts.
-function estPageHeight(width: number) {
-  return width ? Math.round((width - PAGE_INSET) * 1.3) : 800;
-}
 
 type LoadedPdf = Parameters<NonNullable<DocumentProps["onLoadSuccess"]>>[0];
 
@@ -777,6 +768,12 @@ export function PdfReader({ file, sourceId, version, projectId, errorUrl }: PdfR
                     onRenderSuccess={pageCbs(pn).render}
                     onRenderTextLayerSuccess={pageCbs(pn).text}
                     customTextRenderer={findTextRenderer}
+                    loading={
+                      <div
+                        className="bg-white"
+                        style={{ width: pageWidth, height: estPageHeight(width) }}
+                      />
+                    }
                     className="shadow-md"
                     renderTextLayer
                     renderAnnotationLayer
