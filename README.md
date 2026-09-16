@@ -252,6 +252,4 @@ The database (`papers.db`), managed PDFs, and the Obsidian vault live in the per
 
 Thank you to arXiv for use of its open access interoperability!
 
-linXiv owes a debt to [Qiqqa](https://github.com/jimmejardine/qiqqa-open-source), the open-source research management tool originally created by Jimme Jardine.
-
 PDF text and metadata extraction is currently powered by [PDFium](https://pdfium.googlesource.com/pdfium/) (Google's PDF rendering library) via the [`pdfium-render`](https://github.com/ajrcarey/pdfium-render) Rust bindings.
