@@ -1,0 +1,55 @@
+# Rootless Quadlet unit for a Pi-hosted linXiv node. Install as
+# ~/.config/containers/systemd/linxiv.container — see raspberry-pi.md for the
+# SSD mount, the env file, and `loginctl enable-linger` (without linger the
+# node stops when you log out).
+#
+# Needs podman >= 5.0 for the Health* keys below.
+[Unit]
+Description=linXiv headless node
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=linxiv
+Image=localhost/linxiv-headless:local
+# LINXIV_API_TOKEN and LINXIV_P2P_PASSPHRASE, chmod 600. This unit file is
+# world-readable and is not a secret store.
+EnvironmentFile=%h/.config/linxiv/node.env
+# No system bus in a container, so the node's logind sleep inhibit can only
+# fail; a headless Pi never sleeps anyway.
+Environment=LINXIV_ALLOW_SLEEP=1
+# DB, PDFs, and the p2p identity. Must be the SSD: WAL plus PDF blobs is
+# sustained small-write traffic, which is what kills SD cards. Losing this
+# path also resets the node's identity and its Node Address.
+# :Z relabels for SELinux hosts (Fedora IoT), and is a no-op on Pi OS where
+# SELinux is off. Without it on an enforcing host the node dies at startup
+# with "unable to open database file: /data/papers.db". Rootless podman
+# already maps container root to your host user, so no UserNS= is needed.
+Volume=/mnt/linxiv-ssd/data:/data:Z
+# Loopback only. Publishing on the LAN works, but then the bearer token is
+# the single thing between the library and the network.
+PublishPort=127.0.0.1:8000:8000
+# A wedged-but-alive node is the failure an SBC actually hits (IO stall,
+# thermal throttle, OOM-killed worker), and no container runtime restarts one
+# on its own: a restart policy only sees process exit. HealthOnFailure=kill
+# turns an unhealthy verdict into an exit, which Restart=always then acts on.
+HealthCmd=/bin/sh -c 'curl -sf -H "Authorization: Bearer $LINXIV_API_TOKEN" http://localhost:8000/api/papers'
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+# First boot runs migrations, which on an SBC outlasts retries*interval and
+# would otherwise mark a healthy cold start as failed.
+HealthStartPeriod=90s
+HealthOnFailure=kill
+# pdfium extraction spikes; a cap keeps one pathological PDF from taking the
+# whole Pi down with it.
+PodmanArgs=--memory=1500m
+# journald rotates itself. The json-file default does not, and fills the disk.
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
