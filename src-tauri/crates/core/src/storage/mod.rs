@@ -3,6 +3,7 @@
 
 pub mod backup;
 pub mod db;
+pub mod import_merge;
 pub mod migrations;
 pub mod queries;
 pub mod query;
@@ -10,6 +11,7 @@ pub mod schema;
 
 pub use backup::{backup, restore, validate_backup_source};
 pub use db::{open, open_in_memory};
+pub use import_merge::{import_merge, ImportReport};
 pub use queries::*;
 
 use std::fs::File;
