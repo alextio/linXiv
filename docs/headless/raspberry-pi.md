@@ -21,8 +21,8 @@ link, which is largely serial, so the Pi's four cores do not help much there.
 
 ## What you need
 
-- **Raspberry Pi 5, 8 GB.** Comfortable, and needs no swap. 4 GB builds too,
-  with `CARGO_BUILD_JOBS=2` and a swapfile.
+- **Raspberry Pi 5, 8 GB.** Comfortable, and never touches swap. 4 GB builds
+  too, with `CARGO_BUILD_JOBS=2` and the stock zram swap left alone.
 - **Active cooling.** A 40-minute build at full tilt will thermal-throttle a
   passively-cooled Pi 5 into roughly double that.
 - **A 64-bit OS.** Not optional: `scripts/fetch_pdfium.sh` has no armhf asset,
@@ -216,13 +216,21 @@ Two settings that cost nothing and cover real failure modes:
   sudo systemctl daemon-reexec
   ```
 
-- **Disable the swapfile.** `dphys-swapfile` is on by default and puts swap on the
-  root filesystem. On an 8 GB box running a 14 MiB server it is pure write
-  amplification.
+- **Keep swap off the disk.** Trixie replaced `dphys-swapfile` with `rpi-swap`,
+  which defaults to `Mechanism=zram+file`: compressed RAM swap that writes idle
+  pages back to `/var/swap` on a timer. That is already far gentler than the old
+  always-on swapfile, but on an 8 GB box running a 14 MiB server nothing needs to
+  reach the card at all. `zram` keeps the compressed swap and drops the file.
 
   ```bash
-  sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
+  printf '[Main]\nMechanism=zram\n' \
+    | sudo tee /etc/rpi/swap.conf.d/10-no-swap-file.conf
   ```
+
+  Config is read by a generator at boot, so this needs a reboot, after which
+  `systemctl list-units --type swap` should show `dev-zram0.swap` and nothing
+  else. `Mechanism=none` disables swap outright — only worth it if you would
+  rather the OOM killer fire immediately than let the box thrash.
 
 Note what this does *not* cover: an update that boots fine but is functionally
 broken. A watchdog reboots a hung box and `Restart=always` restarts a crashed one,
@@ -325,7 +333,7 @@ next update a full cold build.
 | `unsupported host Linux-armv7l` from `fetch_pdfium.sh` | 32-bit userland. Reflash with a 64-bit image. |
 | Unit works when you are logged in, node is gone after a reboot | `loginctl enable-linger "$USER"` was not run. |
 | Container restart-loops with a healthy-looking log | The healthcheck is failing, most likely a wrong or missing `LINXIV_API_TOKEN` in `node.env`. `podman inspect linxiv --format '{{json .State.Health.Log}}'` shows the probe output. |
-| Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2` and add a swapfile. |
+| Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2`, and raise `[Zram] RamMultiplier` in `/etc/rpi/swap.conf.d/` if 2 GB of zram is not enough. |
 | The build fails early with a cargo error naming `crates/p2p` | The submodule is empty. `git submodule update --init --recursive`. |
 | Node is unhealthy but never restarts | podman is older than 5.0 and ignored the `Health*` keys. `podman --version`. |
 | `podman run` fails with a subuid/subgid error | No UID range for your user; see setup step 4. |
