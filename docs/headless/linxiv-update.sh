@@ -10,7 +10,7 @@ set -euo pipefail
 
 REPO="${LINXIV_REPO:-$HOME/linXiv}"
 ENV_FILE="${LINXIV_ENV_FILE:-$HOME/.config/linxiv/node.env}"
-DATA="${LINXIV_DATA:-/mnt/linxiv-ssd/data}"
+DATA="${LINXIV_DATA:-/mnt/linxiv/data}"
 ADDR="${LINXIV_ADDR:-http://127.0.0.1:8000}"
 
 # shellcheck source=/dev/null
