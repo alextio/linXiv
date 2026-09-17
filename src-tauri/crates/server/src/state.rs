@@ -1,15 +1,15 @@
-//! In-process backend state: the single SQLite connection behind a `Mutex` plus
-//! the managed PDF/vault roots. Every router arm reaches the DB via `with_conn`.
+//! In-process backend state: the database handle plus the managed PDF/vault
+//! roots. Every router arm reaches the DB via `with_conn`.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use rusqlite::Connection;
 
-use linxiv_core::{config, storage};
+use linxiv_core::config;
+use linxiv_core::service::db_admin::Db;
 
 pub struct AppState {
-    conn: Mutex<Connection>,
+    db: Db,
     /// Managed PDF directory (`config::pdf_dir()`), used by the PDF/export arms.
     pub pdf_dir: PathBuf,
     /// LaTeX vault root (`config::vault_dir()`), used by the editor arms.
@@ -25,10 +25,10 @@ impl AppState {
         if let Err(e) = linxiv_share::init_device_actor(&config::data_dir()) {
             eprintln!("device actor init failed (history will be per-run): {e}");
         }
-        let conn = storage::open(&config::db_path())?;
-        storage::init_db(&conn)?;
+        // Lazy: init (and its migrations) run once here, then the connection is
+        // released, so an idle app or node does not block `restore`.
         Ok(Self {
-            conn: Mutex::new(conn),
+            db: Db::lazy()?,
             pdf_dir: config::pdf_dir(),
             vault_root: config::vault_dir(),
         })
@@ -38,20 +38,18 @@ impl AppState {
     /// because downstream crates' tests (linxiv-app) build through it too.
     pub fn from_parts(conn: Connection, pdf_dir: PathBuf, vault_root: PathBuf) -> Self {
         Self {
-            conn: Mutex::new(conn),
+            db: Db::held(conn),
             pdf_dir,
             vault_root,
         }
     }
 
-    /// Locks the shared connection for the duration of `f`. `f` is sync, so the
-    /// guard can never span an `.await`. A poisoned mutex is recovered, not
-    /// propagated — a `Connection` has no broken invariant to protect, and
-    /// refusing the lock forever would take every DB route down for the process.
+    /// Runs `f` against the database, serialized process-wide. `f` is sync, so
+    /// the lock can never span an `.await`. See `db_admin::Db` for why the
+    /// connection itself is per-call in production.
     ///
     /// TODO: maybe parallel reads, serial writes if peers contend.
     pub fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> T {
-        let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut guard)
+        self.db.with(f)
     }
 }

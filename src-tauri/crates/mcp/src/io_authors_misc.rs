@@ -403,12 +403,10 @@ impl Server {
         reject_live_db(&dest, "dest", "destination")?;
         // spawn_blocking: VACUUM INTO of a large library runs for seconds to minutes,
         // and with_conn would hold a tokio worker (and the shared mutex) for all of it.
-        let conn = self.conn_handle();
-        let info = blocking(move || {
-            let guard = conn.lock().expect("db connection mutex poisoned");
-            db_admin::backup(&guard, &dest).map_err(map_core)
-        })
-        .await??;
+        let db = self.db();
+        let info =
+            blocking(move || db.with(|conn| db_admin::backup(conn, &dest).map_err(map_core)))
+                .await??;
         json_ok(&info)
     }
 
@@ -427,10 +425,9 @@ impl Server {
         db_admin::validate_backup_source(&src).map_err(map_core)?;
         // spawn_blocking for the same reason as backup_database: `restore_in_place`
         // holds the mutex across two full-file copies and a rename.
-        let handle = self.conn_handle();
+        let db = self.db();
         blocking(move || -> Result<String, ErrorData> {
-            let mut guard = handle.lock().expect("db connection mutex poisoned");
-            db_admin::restore_in_place(&mut guard, &src).map_err(map_core)?;
+            db.with(|conn| db_admin::restore_in_place(conn, &src).map_err(map_core))?;
             json_ok(&json!({ "ok": true, "restored": db_path.to_string_lossy() }))
         })
         .await?
@@ -493,7 +490,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use linxiv_core::storage;
 
@@ -504,7 +501,7 @@ mod tests {
         let conn = storage::open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
         Server {
-            conn: Arc::new(Mutex::new(conn)),
+            db: Arc::new(linxiv_core::service::db_admin::Db::held(conn)),
             pdf_dir: std::env::temp_dir(),
             tool_router: Server::tools_io_authors_misc(),
         }
