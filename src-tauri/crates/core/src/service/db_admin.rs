@@ -8,6 +8,7 @@
 //! * `restore_in_place` — park the caller's live handle, swap the file, reopen.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 
@@ -23,6 +24,59 @@ pub fn open_app_db() -> Result<Connection> {
     let conn = storage::open(&config::db_path())?;
     storage::init_db(&conn)?;
     Ok(conn)
+}
+
+/// How a long-lived process reaches the database.
+///
+/// `Lazy` opens a connection per operation and drops it again, so an idle
+/// process holds no handle and `restore` — which needs the file exclusively to
+/// leave WAL mode — is not blocked by a running app, node, or MCP server.
+/// `Held` keeps one connection because an in-memory test DB cannot be reopened:
+/// every `open` of `:memory:` is a fresh empty database.
+///
+/// The mutex is the same process-local serialization the old `Mutex<Connection>`
+/// gave: without it a `restore` could run beside a sibling operation's handle in
+/// this very process and refuse itself.
+pub enum Db {
+    Lazy(Mutex<()>),
+    Held(Mutex<Connection>),
+}
+
+impl Db {
+    /// Run `init_db` once (migrations, under the cross-process `.init.lock`),
+    /// then release the connection. Later operations reopen without re-running
+    /// init.
+    pub fn lazy() -> Result<Self> {
+        open_app_db()?;
+        Ok(Db::Lazy(Mutex::new(())))
+    }
+
+    /// Hold `conn` for the process lifetime — the test/DI shape.
+    pub fn held(conn: Connection) -> Self {
+        Db::Held(Mutex::new(conn))
+    }
+
+    /// Lock, get a connection, run `f`, release. A poisoned mutex is recovered,
+    /// not propagated: a `Connection` has no broken invariant to protect, and
+    /// refusing the lock forever would take every DB path down for the process.
+    ///
+    /// ponytail: a failed reopen panics rather than threading a `Result` through
+    /// ~100 call sites. It is close to unreachable — `restore` renames into
+    /// place, so the file never vanishes mid-run, and `open` carries CREATE, so
+    /// even an external `rm` yields an empty DB (loud "no such table: PAPER")
+    /// rather than this. Open READ_WRITE without CREATE if that guess should
+    /// become a hard failure instead.
+    pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> T {
+        match self {
+            Db::Held(m) => f(&mut m.lock().unwrap_or_else(|e| e.into_inner())),
+            Db::Lazy(m) => {
+                let _guard = m.lock().unwrap_or_else(|e| e.into_inner());
+                let mut conn = storage::open(&config::db_path())
+                    .expect("reopen the app database (it was openable at startup)");
+                f(&mut conn)
+            }
+        }
+    }
 }
 
 /// `path` with its parent canonicalized, filename kept — so a destination that does

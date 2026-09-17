@@ -126,6 +126,52 @@ fn sidecar(p: &Path, suffix: &str) -> PathBuf {
     s.into()
 }
 
+/// Best-effort "who has it open", as `name (pid N)`, so a refused restore names
+/// the culprit instead of listing every binary that could be it. Reads
+/// `/proc/*/fd`; other platforms have no equally cheap answer, so they get the
+/// generic message.
+#[cfg(target_os = "linux")]
+fn holders(db_path: &Path) -> Vec<String> {
+    let Ok(target) = db_path.canonicalize() else {
+        return Vec::new();
+    };
+    let me = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for proc in procs.flatten() {
+        let Ok(pid) = proc.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        // Our own probe connection is holding it too; saying so would be noise.
+        if pid == me {
+            continue;
+        }
+        // Unreadable /proc/<pid>/fd is another user's process, not a hit.
+        let Ok(fds) = std::fs::read_dir(proc.path().join("fd")) else {
+            continue;
+        };
+        if !fds
+            .flatten()
+            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == target))
+        {
+            continue;
+        }
+        let name = std::fs::read_to_string(proc.path().join("comm"))
+            .unwrap_or_else(|_| "?".to_string())
+            .trim()
+            .to_string();
+        out.push(format!("{name} (pid {pid})"));
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn holders(_db_path: &Path) -> Vec<String> {
+    Vec::new()
+}
+
 /// Refuse to swap the DB file out from under a live SQLite handle: an open
 /// handle keeps writing to the replaced inode on Unix, and fails the rename
 /// on Windows. Leaving WAL mode requires zero other open handles (even idle
@@ -150,11 +196,16 @@ fn ensure_no_live_connections(db_path: &Path) -> Result<()> {
                 Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
             ) =>
         {
-            Err(CoreError::Conflict(
+            let held_by = match holders(db_path).join(", ") {
+                s if s.is_empty() => "unknown process".to_string(),
+                s => s,
+            };
+            Err(CoreError::Conflict(format!(
                 "database is in use by another linXiv process (app, CLI, or MCP server) — \
-                 close it and retry"
-                    .to_string(),
-            ))
+                 close it and retry; {} holds {} open",
+                held_by,
+                db_path.display()
+            )))
         }
         // Non-busy errors allowed: a broken/corrupted DB is what restore fixes.
         Err(_) => Ok(()),
@@ -566,5 +617,44 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"original contents");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The whole point of `holders` is naming a process that is not us, so the
+    /// check needs a real second process with the file open.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn holders_names_another_process_with_the_db_open() {
+        let dir = std::env::temp_dir().join(format!("linxiv-holders-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("papers.db");
+        std::fs::write(&db, b"not really a db, /proc does not care").unwrap();
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec 9< '{}'; exec sleep 30", db.display()))
+            .spawn()
+            .unwrap();
+        // Both `exec`s matter: the first opens the fd, the second replaces the
+        // shell so the pid we hold is the one holding it. Takes a moment.
+        let found = (0..100)
+            .find_map(|_| {
+                let h = holders(&db);
+                if h.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    None
+                } else {
+                    Some(h)
+                }
+            })
+            .unwrap_or_default();
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(found.len(), 1, "expected exactly the child: {found:?}");
+        assert!(
+            found[0].contains(&format!("pid {}", child.id())),
+            "{found:?}"
+        );
     }
 }
