@@ -60,7 +60,27 @@ Podman must be **5.0 or newer**. The unit's `Health*` keys are what give the
 node automatic recovery, and older podman silently ignores them. Pi OS Bookworm
 ships 4.3, which is too old — use Pi OS Trixie, or install a newer podman.
 
-### 3. Confirm rootless podman has a UID range
+### 3. Enable the memory cgroup controller
+
+Raspberry Pi OS does **not** enable the memory cgroup controller by default. Without
+it, the unit's `--memory` cap is silently ignored — no warning, no error, just an
+unenforced limit until a runaway process takes the board down.
+
+```bash
+grep -q cgroup_memory /boot/firmware/cmdline.txt \
+  || sudo sed -i '1s/$/ cgroup_memory=1 cgroup_enable=memory/' /boot/firmware/cmdline.txt
+```
+
+`cmdline.txt` is a **single line** — the `sed` appends rather than adding a newline,
+which would break boot. Reboot, then confirm:
+
+```bash
+sudo reboot
+# after it comes back:
+grep memory /proc/cgroups          # 'memory' row must show enabled=1
+```
+
+### 4. Confirm rootless podman has a UID range
 
 ```bash
 grep "^$USER:" /etc/subuid /etc/subgid
@@ -74,7 +94,7 @@ sudo usermod --add-subuids 524288-589823 --add-subgids 524288-589823 "$USER"
 podman system migrate
 ```
 
-### 4. Complete the checkout
+### 5. Complete the checkout
 
 The build needs the `crates/p2p` submodule — it is a workspace member and a
 path dependency of the server, so an uninitialized one fails cargo immediately.
@@ -86,7 +106,7 @@ git submodule update --init --recursive
 ls src-tauri/crates/p2p/Cargo.toml     # must exist
 ```
 
-### 5. Create the data directory
+### 6. Create the data directory
 
 Everything the node owns lives here: the database, PDFs, and the p2p identity.
 
@@ -97,7 +117,7 @@ sudo chown -R "$USER" /mnt/linxiv
 
 This is the path `linxiv.container` binds, so nothing in the unit needs editing.
 
-### 6. Build the image
+### 7. Build the image
 
 ```bash
 cd ~/Documents/linxiv
@@ -106,7 +126,7 @@ podman build -t linxiv-headless:local .
 
 40-60 minutes the first time, and there is nothing to watch. Leave it.
 
-### 7. Write the secrets file
+### 8. Write the secrets file
 
 Kept separate from the unit file, which is world-readable.
 
@@ -124,7 +144,7 @@ OS keychain on a headless box. **Copy this file somewhere that is not the Pi.**
 Losing it, or losing `/mnt/linxiv/data`, resets the node's identity and the
 Node Address peers use to reach it.
 
-### 8. Install the unit and start
+### 9. Install the unit and start
 
 ```bash
 mkdir -p ~/.config/containers/systemd
@@ -141,7 +161,7 @@ systemctl --user start linxiv
 No `enable` step: Quadlet generates the unit with `WantedBy=default.target`
 already wired at `daemon-reload`.
 
-### 9. Verify
+### 10. Verify
 
 ```bash
 . ~/.config/linxiv/node.env
@@ -152,9 +172,9 @@ podman healthcheck run linxiv && echo healthy
 `/api/status` answering means migrations ran and the router is up. First boot
 can take a minute; the unit allows 90s before health failures count.
 
-### 10. Reboot and check it comes back
+### 11. Reboot and check it comes back
 
-This is the real test of step 8, and the only way to find out now rather than
+This is the real test of step 9, and the only way to find out now rather than
 after a power cut.
 
 ```bash
@@ -180,6 +200,35 @@ carries the bearer token, so it only works through the tunnel.
 To put the node on the LAN instead, change `PublishPort` in
 `linxiv.container` to `0.0.0.0:8000:8000`. The bearer token then becomes the
 only thing between your library and the network.
+
+## Cheap hardening worth doing
+
+Two settings that cost nothing and cover real failure modes:
+
+- **Arm the hardware watchdog.** The Pi 5's BCM2712 has a real one at
+  `/dev/watchdog0`, enabled in the 64-bit kernel only (one more reason 64-bit is
+  mandatory). If systemd itself wedges, the hardware reboots the board — the one
+  failure the unit's health check cannot catch, because nothing is left running to
+  catch it.
+
+  ```bash
+  echo 'RuntimeWatchdogSec=30s' | sudo tee -a /etc/systemd/system.conf
+  sudo systemctl daemon-reexec
+  ```
+
+- **Disable the swapfile.** `dphys-swapfile` is on by default and puts swap on the
+  root filesystem. On an 8 GB box running a 14 MiB server it is pure write
+  amplification.
+
+  ```bash
+  sudo dphys-swapfile swapoff && sudo systemctl disable --now dphys-swapfile
+  ```
+
+Note what this does *not* cover: an update that boots fine but is functionally
+broken. A watchdog reboots a hung box and `Restart=always` restarts a crashed one,
+but a wrong binary restarts successfully forever. That failure class needs A/B
+image rollback, which Pi OS does not have — which is why the update script takes a
+backup first.
 
 ## Keeping writes down
 
@@ -279,7 +328,9 @@ next update a full cold build.
 | Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2` and add a swapfile. |
 | The build fails early with a cargo error naming `crates/p2p` | The submodule is empty. `git submodule update --init --recursive`. |
 | Node is unhealthy but never restarts | podman is older than 5.0 and ignored the `Health*` keys. `podman --version`. |
-| `podman run` fails with a subuid/subgid error | No UID range for your user; see setup step 3. |
+| `podman run` fails with a subuid/subgid error | No UID range for your user; see setup step 4. |
+| The container exceeds its `--memory` cap with no error | The memory cgroup controller is off; see setup step 3. Check `grep memory /proc/cgroups`. |
+| Logs are gone after a reboot | Expected. Pi OS Trixie defaults journald to `Storage=volatile` (RAM only), which is good for the card. Enable persistence via `raspi-config` if you are chasing a crash loop. |
 
 ## How small can you go?
 
