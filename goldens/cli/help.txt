@@ -1,10 +1,10 @@
 usage: linxiv [-h] [--version]
-              {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,bibtex,stats,categories,settings,backup,restore} ...
+              {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,bibtex,stats,categories,settings,backup,restore,import} ...
 
 linXiv headless CLI
 
 positional arguments:
-  {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,bibtex,stats,categories,settings,backup,restore}
+  {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,bibtex,stats,categories,settings,backup,restore,import}
     search              Search for papers
     fetch               Fetch and save a paper by ID
     list                List papers in the database
@@ -23,6 +23,7 @@ positional arguments:
     settings            View and update user settings
     backup              Snapshot the database to a backup file
     restore             Restore the database from a backup snapshot
+    import              Merge a backup into the database (insert-only, nothing replaced)
 
 options:
   -h, --help            show this help message and exit

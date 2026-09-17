@@ -51,6 +51,12 @@ pub async fn backup(dest: PathBuf, ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn import(src: PathBuf, ctx: &mut Ctx) -> anyhow::Result<()> {
+    db_admin::reject_live_db(&src, "src", "source")?;
+    output(&db_admin::import_merge(&mut ctx.conn, &src)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,12 +2,14 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { apiFetch } from "./client";
 import type {
   BackupInfo,
+  ImportReport,
   PreMigrationBackup,
   StorageBackupBody,
+  StorageImportBody,
   StorageRestoreBody,
 } from "../types/api";
 
-export type { BackupInfo, PreMigrationBackup };
+export type { BackupInfo, ImportReport, PreMigrationBackup };
 
 /** List the copies init takes before a schema upgrade, newest first. */
 export function listPreMigrationBackups(): Promise<PreMigrationBackup[]> {
@@ -27,6 +29,21 @@ export async function backupDatabase(): Promise<BackupInfo | null> {
   if (!destPath) return null;
   const body: StorageBackupBody = { dest_path: destPath };
   return apiFetch<BackupInfo>("/api/storage/backup", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Pick a snapshot with the OS open dialog and merge it into the live DB
+ *  (insert-only, nothing replaced). Returns null when the user cancels. */
+export async function importDatabase(): Promise<ImportReport | null> {
+  const srcPath = await open({
+    title: "Import library from backup",
+    filters: [{ name: "SQLite database", extensions: ["db"] }],
+  });
+  if (!srcPath) return null;
+  const body: StorageImportBody = { src_path: srcPath };
+  return apiFetch<ImportReport>("/api/storage/import", {
     method: "POST",
     body: JSON.stringify(body),
   });

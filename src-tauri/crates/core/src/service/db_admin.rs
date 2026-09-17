@@ -109,6 +109,12 @@ pub fn restore_in_place(conn: &mut Connection, src: &Path) -> Result<()> {
     result
 }
 
+/// Merge another linXiv DB into the live one, insert-only. See
+/// `storage::import_merge` for the matching rules; nothing is replaced.
+pub fn import_merge(conn: &mut Connection, src: &Path) -> Result<storage::ImportReport> {
+    storage::import_merge(conn, src)
+}
+
 /// Restore onto a database nobody currently holds open — the CLI's `restore`,
 /// which deliberately runs before the DB is opened so a corrupted library can
 /// still be recovered.
