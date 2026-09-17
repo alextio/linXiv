@@ -19,81 +19,129 @@ range per update against 40-60 minutes for the first build. The incremental
 cost is dominated by the release profile's `lto = true` + `codegen-units = 1`
 link, which is largely serial, so the Pi's four cores do not help much there.
 
-## Hardware and OS
+## What you need
 
-- **64-bit OS, mandatory.** `scripts/fetch_pdfium.sh` has no armhf asset; a
-  32-bit userland fails at the fetch step. Raspberry Pi OS Lite (64-bit) or
-  Ubuntu Server arm64.
-- **Pi 5, 8 GB** is comfortable and needs no swap. 4 GB builds too, with
-  `CARGO_BUILD_JOBS=2` and a swapfile. The build is what wants RAM; see "How
-  small" below for the runtime side.
+- **Raspberry Pi 5, 8 GB.** Comfortable, and needs no swap. 4 GB builds too,
+  with `CARGO_BUILD_JOBS=2` and a swapfile.
 - **Active cooling.** A 40-minute build at full tilt will thermal-throttle a
   passively-cooled Pi 5 into roughly double that.
-- **podman >= 5.0**, for the `Health*` Quadlet keys in `linxiv.container`.
-  Check with `podman --version`; Pi OS Bookworm's podman 4.3 is too old.
+- **A 64-bit OS.** Not optional: `scripts/fetch_pdfium.sh` has no armhf asset,
+  so a 32-bit userland fails before the build starts.
+- **The linXiv repo on the Pi.** This doc assumes `~/Documents/linxiv`; adjust
+  the paths below if yours is elsewhere.
 
-## Storage
+## Setup
 
-The node keeps its database, PDFs, and p2p identity in one directory. Create it
-before first start:
+### 1. Flash the card and get a shell
+
+Raspberry Pi Imager, **Raspberry Pi OS Lite (64-bit)**. Before writing, open
+Imager's settings (the gear) and set the hostname, enable SSH, create your user
+with an SSH key, and add Wi-Fi credentials if you are not on ethernet. Doing it
+there saves attaching a monitor.
+
+Boot the Pi, then from your laptop:
+
+```bash
+ssh <user>@<hostname>.local
+uname -m        # must print aarch64
+```
+
+`armv7l` means a 32-bit image was flashed. Reflash before going further.
+
+### 2. Update and install dependencies
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y podman git curl openssl
+podman --version
+```
+
+Podman must be **5.0 or newer**. The unit's `Health*` keys are what give the
+node automatic recovery, and older podman silently ignores them. Pi OS Bookworm
+ships 4.3, which is too old — use Pi OS Trixie, or install a newer podman.
+
+### 3. Confirm rootless podman has a UID range
+
+```bash
+grep "^$USER:" /etc/subuid /etc/subgid
+```
+
+Both files should print a line. If either is missing, rootless containers
+cannot start:
+
+```bash
+sudo usermod --add-subuids 524288-589823 --add-subgids 524288-589823 "$USER"
+podman system migrate
+```
+
+### 4. Complete the checkout
+
+The build needs the `crates/p2p` submodule — it is a workspace member and a
+path dependency of the server, so an uninitialized one fails cargo immediately.
+A plain `git clone` leaves it empty.
+
+```bash
+cd ~/Documents/linxiv
+git submodule update --init --recursive
+ls src-tauri/crates/p2p/Cargo.toml     # must exist
+```
+
+### 5. Create the data directory
+
+Everything the node owns lives here: the database, PDFs, and the p2p identity.
 
 ```bash
 sudo mkdir -p /mnt/linxiv/data
 sudo chown -R "$USER" /mnt/linxiv
 ```
 
-That is the path `linxiv.container` binds, so nothing else needs editing. A few
-things keep the write volume down, which is worth doing on any Pi:
+This is the path `linxiv.container` binds, so nothing in the unit needs editing.
 
-- **Check `noatime` is on the root mount** — `findmnt -no OPTIONS /`. Pi OS
-  normally sets it. Without it, every read turns into a write.
-- **Leave the journal in RAM.** Debian only writes the systemd journal to disk
-  if `/var/log/journal` exists. `ls -d /var/log/journal` — if it is absent,
-  leave it absent, and the unit's `LogDriver=journald` costs nothing on disk.
-- **Get one backup off the Pi** once the node is up. This is what actually
-  protects the library:
-
-  ```bash
-  . ~/.config/linxiv/node.env
-  curl -sf -X POST -H "Authorization: Bearer $LINXIV_API_TOKEN" \
-    -H 'Content-Type: application/json' \
-    -d '{"dest_path":"/data/backups/initial.db"}' \
-    http://127.0.0.1:8000/api/storage/backup
-  # then copy /mnt/linxiv/data/backups/initial.db somewhere that is not the Pi
-  ```
-
-Note that one cold build moves far more data than weeks of the node running:
-about 1.7 GB through the cargo cache mounts, plus the image layers. Updates are
-much cheaper, but it is a reason not to rebuild idly.
-
-## Install
+### 6. Build the image
 
 ```bash
-sudo apt install -y podman git
-git clone --recurse-submodules https://github.com/linxiv-dev/linXiv.git ~/linXiv
-podman build -t linxiv-headless:local ~/linXiv        # go do something else
+cd ~/Documents/linxiv
+podman build -t linxiv-headless:local .
+```
 
-# Secrets, separate from the world-readable unit file.
+40-60 minutes the first time, and there is nothing to watch. Leave it.
+
+### 7. Write the secrets file
+
+Kept separate from the unit file, which is world-readable.
+
+```bash
 mkdir -p ~/.config/linxiv
 cat > ~/.config/linxiv/node.env <<EOF
 LINXIV_API_TOKEN=$(openssl rand -hex 32)
 LINXIV_P2P_PASSPHRASE=$(openssl rand -hex 24)
 EOF
 chmod 600 ~/.config/linxiv/node.env
+```
 
-# The Quadlet unit next to this file.
+`LINXIV_P2P_PASSPHRASE` encrypts the p2p key store at rest, since there is no
+OS keychain on a headless box. **Copy this file somewhere that is not the Pi.**
+Losing it, or losing `/mnt/linxiv/data`, resets the node's identity and the
+Node Address peers use to reach it.
+
+### 8. Install the unit and start
+
+```bash
 mkdir -p ~/.config/containers/systemd
-cp ~/linXiv/docs/headless/linxiv.container ~/.config/containers/systemd/
+cp ~/Documents/linxiv/docs/headless/linxiv.container ~/.config/containers/systemd/
 
-# Without linger, rootless user services stop when you log out and never
-# start at boot. This is the step everyone forgets.
+# Without linger, rootless user services stop when you log out and never start
+# at boot. This is the step everyone forgets.
 loginctl enable-linger "$USER"
 
 systemctl --user daemon-reload
 systemctl --user start linxiv
 ```
 
-Verify:
+No `enable` step: Quadlet generates the unit with `WantedBy=default.target`
+already wired at `daemon-reload`.
+
+### 9. Verify
 
 ```bash
 . ~/.config/linxiv/node.env
@@ -101,10 +149,61 @@ curl -sf -H "Authorization: Bearer $LINXIV_API_TOKEN" http://127.0.0.1:8000/api/
 podman healthcheck run linxiv && echo healthy
 ```
 
-`LINXIV_P2P_PASSPHRASE` encrypts the p2p key store at rest, since there is no
-OS keychain here. Losing it, or losing `/mnt/linxiv/data`, resets the
-node's identity and the Node Address peers use to reach it. Back up
-`node.env` somewhere off the Pi.
+`/api/status` answering means migrations ran and the router is up. First boot
+can take a minute; the unit allows 90s before health failures count.
+
+### 10. Reboot and check it comes back
+
+This is the real test of step 8, and the only way to find out now rather than
+after a power cut.
+
+```bash
+sudo reboot
+# wait, then from your laptop:
+ssh <user>@<hostname>.local 'systemctl --user is-active linxiv'
+```
+
+## Reaching the node
+
+The unit publishes on `127.0.0.1` only, so the node is reachable from the Pi
+itself and nowhere else. From your laptop, tunnel over SSH:
+
+```bash
+ssh -N -L 8000:127.0.0.1:8000 <user>@<hostname>.local
+```
+
+Then `http://127.0.0.1:8000/admin` in a browser gives you the admin page: the
+Remote Query Mode member list, the relay and PDF transfer logs, and the
+copyable Node Address. It is served without auth, but every API call it makes
+carries the bearer token, so it only works through the tunnel.
+
+To put the node on the LAN instead, change `PublishPort` in
+`linxiv.container` to `0.0.0.0:8000:8000`. The bearer token then becomes the
+only thing between your library and the network.
+
+## Keeping writes down
+
+Worth doing on any Pi, and more so on a card:
+
+- **Check `noatime` is on the root mount** — `findmnt -no OPTIONS /`. Pi OS
+  normally sets it. Without it, every read turns into a write.
+- **Leave the journal in RAM.** Debian only writes the systemd journal to disk
+  if `/var/log/journal` exists. `ls -d /var/log/journal` — if it is absent,
+  leave it absent, and the unit's `LogDriver=journald` costs nothing on disk.
+- **Get a backup off the Pi** once the node is up:
+
+  ```bash
+  . ~/.config/linxiv/node.env
+  curl -sf -X POST -H "Authorization: Bearer $LINXIV_API_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"dest_path":"/data/backups/initial.db"}' \
+    http://127.0.0.1:8000/api/storage/backup
+  # then copy /mnt/linxiv/data/backups/initial.db off the Pi
+  ```
+
+One cold build moves far more data than weeks of the node running: about 1.7 GB
+through the cargo cache mounts, plus the image layers. Updates are much cheaper,
+but it is a reason not to rebuild idly.
 
 ## Health and restart
 
@@ -134,7 +233,7 @@ journalctl --user -u linxiv -f
 ## Updating
 
 ```bash
-~/linXiv/docs/headless/linxiv-update.sh
+~/Documents/linxiv/docs/headless/linxiv-update.sh
 ```
 
 Snapshot, `git pull`, rebuild, restart, wait for healthy, prune. It backs up
@@ -178,6 +277,9 @@ next update a full cold build.
 | Unit works when you are logged in, node is gone after a reboot | `loginctl enable-linger "$USER"` was not run. |
 | Container restart-loops with a healthy-looking log | The healthcheck is failing, most likely a wrong or missing `LINXIV_API_TOKEN` in `node.env`. `podman inspect linxiv --format '{{json .State.Health.Log}}'` shows the probe output. |
 | Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2` and add a swapfile. |
+| The build fails early with a cargo error naming `crates/p2p` | The submodule is empty. `git submodule update --init --recursive`. |
+| Node is unhealthy but never restarts | podman is older than 5.0 and ignored the `Health*` keys. `podman --version`. |
+| `podman run` fails with a subuid/subgid error | No UID range for your user; see setup step 3. |
 
 ## How small can you go?
 
