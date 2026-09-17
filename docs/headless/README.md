@@ -58,7 +58,10 @@ docker compose -f docs/headless/docker-compose.yml up -d --build
 ```
 
 Published images are on GHCR (`ghcr.io/linxiv-dev/linxiv-headless:<version>`,
-plus `:latest` for stable releases) if you'd rather pull than build.
+plus `:latest` for stable releases) if you'd rather pull than build. Those are
+amd64 only — for an arm64 host see [raspberry-pi.md](raspberry-pi.md), which
+covers building on the box, storage, and a podman/systemd unit that restarts a
+wedged node.
 
 > The library is single-writer: never point two running nodes (or a node and
 > the desktop app) at the same `LINXIV_DATA_DIR` / volume — they contend on the
