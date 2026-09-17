@@ -135,6 +135,9 @@ mkdir -p ~/.config/linxiv
 cat > ~/.config/linxiv/node.env <<EOF
 LINXIV_API_TOKEN=$(openssl rand -hex 32)
 LINXIV_P2P_PASSPHRASE=$(openssl rand -hex 24)
+# Optional; see "The relay" below. Seeded into settings on first boot.
+#LINXIV_P2P_RELAY_URL=https://relay.example.com
+#LINXIV_P2P_RELAY_TOKEN=
 EOF
 chmod 600 ~/.config/linxiv/node.env
 ```
@@ -170,7 +173,8 @@ podman healthcheck run linxiv && echo healthy
 ```
 
 `/api/status` answering means migrations ran and the router is up. First boot
-can take a minute; the unit allows 90s before health failures count.
+can take a minute; the unit allows 90s before health failures count. `relay` in
+that output reads `default` until you configure one — see "The relay".
 
 ### 11. Reboot and check it comes back
 
@@ -193,13 +197,43 @@ ssh -N -L 8000:127.0.0.1:8000 <user>@<hostname>.local
 ```
 
 Then `http://127.0.0.1:8000/admin` in a browser gives you the admin page: the
-Remote Query Mode member list, the relay and PDF transfer logs, and the
-copyable Node Address. It is served without auth, but every API call it makes
+Remote Query Mode member list, the relay and PDF transfer logs, and — once a
+relay is configured — the copyable Node Address. It is served without auth, but every API call it makes
 carries the bearer token, so it only works through the tunnel.
 
 To put the node on the LAN instead, change `PublishPort` in
 `linxiv.container` to `0.0.0.0:8000:8000`. The bearer token then becomes the
 only thing between your library and the network.
+
+## The relay
+
+The node binds without one. With `p2p_relay_url` unset it uses iroh's default
+public relay set, and sharing and sync work. What it cannot do is mint a **Node
+Address**: `GET /api/admin/node-address` answers 409, because the default set is
+several relays with no single URL to encode into an address. Remote Query Mode is
+built on that address, so a node meant to be *dialed* needs a relay of its own.
+
+To point the Pi at one, uncomment the two lines in `node.env` and restart:
+
+```bash
+systemctl --user restart linxiv
+. ~/.config/linxiv/node.env
+curl -sf -H "Authorization: Bearer $LINXIV_API_TOKEN" \
+  http://127.0.0.1:8000/api/status   # "relay" should be your URL, not "default"
+```
+
+`LINXIV_P2P_RELAY_URL` only seeds `p2p_relay_url` while that setting is blank, so
+it works on a node that has already booted, but stops mattering the moment you
+`PATCH /api/settings` — after which `POST /api/share/relay/reconnect` rebinds
+without a restart. Leave `p2p_relay_only` alone unless you mean it: on with no
+valid URL, the share node does not bind — it refuses to fall back to the public
+relays, so sharing and sync are off while the HTTP API keeps answering.
+`/api/status` reports `require-custom-missing`.
+
+Standing the relay up is a separate box and separate work. It has to be publicly
+reachable, which the Pi behind home NAT is not, and while `iroh-relay` is a
+single binary, its access-control story is still an open item in `TODO.md` — an
+unauthenticated relay is a bandwidth donation to the internet.
 
 ## Cheap hardening worth doing
 
@@ -340,6 +374,7 @@ next update a full cold build.
 | Node is unhealthy but never restarts | podman is older than 5.0 and ignored the `Health*` keys. `podman --version`. |
 | `podman run` fails with a subuid/subgid error | No UID range for your user; see setup step 4. |
 | The container exceeds its `--memory` cap with no error | The memory cgroup controller is off; see setup step 3. Check `grep memory /proc/cgroups`. |
+| `/api/admin/node-address` returns 409 | No relay configured, so there is no URL to put in an address. See "The relay". |
 | Logs are gone after a reboot | Expected. Pi OS Trixie defaults journald to `Storage=volatile` (RAM only), which is good for the card. Enable persistence via `raspi-config` if you are chasing a crash loop. |
 
 ## How small can you go?
