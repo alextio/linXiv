@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { getSettings, updateSettings } from "../../api/settings";
-import { backupDatabase, restoreDatabase } from "../../api/storage";
+import { backupDatabase, importDatabase, restoreDatabase } from "../../api/storage";
 import { isTauri } from "../../api/client";
 import { listSavedPdfs, deleteSavedPdf } from "../../api/pdfs";
 import type { SavedPdf } from "../../api/pdfs";
@@ -72,6 +72,21 @@ export function StorageSection() {
       setBackupMsg(info ? { ok: true, text: `Saved ${formatBytes(info.bytes)} to ${info.path}` } : null),
     onError: (e) =>
       setBackupMsg({ ok: false, text: errText(e, "Backup failed") }),
+  });
+
+  const [importMsg, setImportMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const { mutate: runImport, isPending: importing } = useMutation({
+    mutationFn: importDatabase,
+    onSuccess: (report) => {
+      if (!report) return; // picker cancelled
+      setImportMsg({
+        ok: true,
+        text: `Imported ${report.papers} papers, ${report.notes} notes, ${report.projects} projects.`,
+      });
+      qc.invalidateQueries();
+    },
+    onError: (e) =>
+      setImportMsg({ ok: false, text: errText(e, "Import failed") }),
   });
 
   const restoreGuard = useConfirmWithTimeout();
@@ -160,7 +175,7 @@ export function StorageSection() {
         >
           <Button
             size="sm"
-            disabled={!isTauri || backingUp || restoring}
+            disabled={!isTauri || backingUp || restoring || importing}
             onClick={() => {
               setBackupMsg(null);
               runBackup();
@@ -171,12 +186,28 @@ export function StorageSection() {
           <StatusMessage msg={backupMsg} />
         </SettingRow>
         <SettingRow
+          label="Import from backup"
+          description="Merge a backup's papers, notes, and projects into your library without replacing anything. Also available as: linxiv import <src>"
+        >
+          <Button
+            size="sm"
+            disabled={!isTauri || backingUp || restoring || importing}
+            onClick={() => {
+              setImportMsg(null);
+              runImport();
+            }}
+          >
+            {importing ? "Importing…" : "Import…"}
+          </Button>
+          <StatusMessage msg={importMsg} />
+        </SettingRow>
+        <SettingRow
           label="Restore database"
           description="Replace your database with a backup snapshot, then restart linXiv. Also available as: linxiv restore <src>"
         >
           <Button
             size="sm"
-            disabled={!isTauri || backingUp || restoring}
+            disabled={!isTauri || backingUp || restoring || importing}
             onClick={() => {
               if (restoreGuard.confirm) {
                 restoreGuard.disarm();

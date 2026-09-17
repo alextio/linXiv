@@ -123,6 +123,7 @@ pub(crate) fn render() -> String {
     out.push_str(&decl::<linxiv_core::service::export_import::ImportPreview>());
     out.push_str(&decl::<linxiv_core::storage::backup::BackupInfo>());
     out.push_str(&decl::<linxiv_core::storage::backup::PreMigrationBackup>());
+    out.push_str(&decl::<linxiv_core::storage::ImportReport>());
     out.push_str(&decl::<linxiv_core::service::paper::DeletedPaperDetails>());
     out.push_str(&decl::<linxiv_core::service::trash::TrashedProjectRow>());
     out.push_str(&decl::<linxiv_core::service::trash::RestoredPaper>());
@@ -221,6 +222,7 @@ pub(crate) fn render() -> String {
     out.push_str(&decl::<crate::route::tags::PaperTagsBody>());
     out.push_str(&decl::<crate::route::storage::StorageBackupBody>());
     out.push_str(&decl::<crate::route::storage::StorageRestoreBody>());
+    out.push_str(&decl::<crate::route::storage::StorageImportBody>());
     out.push_str(&decl::<crate::route::sources::ArxivSearchBody>());
     out.push_str(&decl::<crate::route::sources::ArxivFetchBody>());
     out.push_str(&decl::<crate::route::sources::OpenAlexSearchBody>());

@@ -16,6 +16,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
     match (ctx.method, ctx.segs) {
         ("POST", ["api", "storage", "backup"]) => Some(backup(state, ctx)),
         ("POST", ["api", "storage", "restore"]) => Some(restore(state, ctx)),
+        ("POST", ["api", "storage", "import"]) => Some(import(state, ctx)),
         ("GET", ["api", "storage", "pre-migration-backups"]) => Some(list_pre_migration_backups()),
         _ => None,
     }
@@ -81,6 +82,21 @@ fn restore(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     db_admin::validate_backup_source(&b.src_path)?;
     state.with_conn(|conn| db_admin::restore_in_place(conn, &b.src_path))?;
     to_value(&OkReceipt { ok: true })
+}
+
+#[derive(Deserialize, ts_rs::TS)]
+pub struct StorageImportBody {
+    pub src_path: PathBuf,
+}
+
+/// `POST /api/storage/import` `{src_path}` → `ImportReport`. Merges a backup
+/// into the live DB insert-only; unlike restore, nothing is replaced and no
+/// restart is needed.
+fn import(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
+    let b: StorageImportBody = ctx.parse_body()?;
+    db_admin::reject_live_db(&b.src_path, "src_path", "source")?;
+    let report = state.with_conn(|conn| db_admin::import_merge(conn, &b.src_path))?;
+    to_value(&report)
 }
 
 #[cfg(test)]

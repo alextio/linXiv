@@ -92,6 +92,8 @@ enum Commands {
     Backup { dest: std::path::PathBuf },
     /// Restore the database from a backup snapshot
     Restore { src: std::path::PathBuf },
+    /// Merge a backup into the database (insert-only, nothing replaced)
+    Import { src: std::path::PathBuf },
     /// Hidden pdfium worker: extraction runs in this child so a native libpdfium
     /// crash kills the child, not the app. Named by core's `PDF_META_SUBCOMMAND`.
     #[command(name = PDF_META_SUBCOMMAND, hide = true)]
@@ -117,6 +119,7 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Categories => cmd::misc::categories(ctx).await,
         Commands::Settings { cmd } => cmd::misc::settings(cmd, ctx).await,
         Commands::Backup { dest } => cmd::misc::backup(dest, ctx).await,
+        Commands::Import { src } => cmd::misc::import(src, ctx).await,
         // `main` intercepts both before `Ctx::open()`; these arms exist only
         // so the match is exhaustive.
         Commands::Restore { .. } => unreachable!("restore is handled in main() before dispatch"),
