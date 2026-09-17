@@ -881,7 +881,9 @@ async fn status(ctx: &Ctx) -> Response {
     let settings = linxiv_core::config::UserSettings::load().ok();
     let get = |k: &str| settings.as_ref().and_then(|s| s.get(k));
     let relay = match p2p_config::relay_setting() {
-        p2p_config::RelaySetting::Default => "default".to_string(),
+        // Named, not bare "default": the admin page renders this verbatim and
+        // "default" alone reads as "unset" rather than "iroh's public relays".
+        p2p_config::RelaySetting::Default => "default (iroh public relays)".to_string(),
         p2p_config::RelaySetting::RequireCustomButMissing => "require-custom-missing".into(),
         // `CustomRelay` also carries the auth token, so report the URL setting
         // it was parsed from — never the relay struct itself.
