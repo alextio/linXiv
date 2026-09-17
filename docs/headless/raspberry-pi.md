@@ -24,9 +24,9 @@ link, which is largely serial, so the Pi's four cores do not help much there.
 - **64-bit OS, mandatory.** `scripts/fetch_pdfium.sh` has no armhf asset; a
   32-bit userland fails at the fetch step. Raspberry Pi OS Lite (64-bit) or
   Ubuntu Server arm64.
-- **Pi 5, 8 GB** is comfortable. 4 GB builds too, with `CARGO_BUILD_JOBS=2`
-  and swap on the SSD. The build is what wants RAM; see "How small" below for
-  the runtime side.
+- **Pi 5, 8 GB** is comfortable and needs no swap. 4 GB builds too, with
+  `CARGO_BUILD_JOBS=2` and a swapfile. The build is what wants RAM; see "How
+  small" below for the runtime side.
 - **Active cooling.** A 40-minute build at full tilt will thermal-throttle a
   passively-cooled Pi 5 into roughly double that.
 - **podman >= 5.0**, for the `Health*` Quadlet keys in `linxiv.container`.
@@ -34,30 +34,37 @@ link, which is largely serial, so the Pi's four cores do not help much there.
 
 ## Storage
 
-Put `/data` on an SSD, not the SD card. The node's write pattern is SQLite in
-WAL mode plus PDF blobs — sustained small writes, which is precisely what wears
-SD cards out and corrupts databases. This is the one item here that is about
-not losing your library.
-
-Either works:
-
-- **NVMe via a Pi 5 M.2 HAT** (~450-900 MB/s). Best, costs money.
-- **A 2.5" SATA SSD on a UASP-capable USB 3.0 adapter** (~300-400 MB/s). Free
-  if you have the drive. Insist on UASP — non-UASP bridges use BOT, which is
-  slow and drops the disk under sustained load.
-
-Either way, mount it and hand it to your user:
+The node keeps its database, PDFs, and p2p identity in one directory. Create it
+before first start:
 
 ```bash
-sudo mkdir -p /mnt/linxiv-ssd
-# find the UUID, then add to /etc/fstab so it mounts at boot:
-lsblk -o NAME,SIZE,UUID,MOUNTPOINT
-echo 'UUID=<uuid> /mnt/linxiv-ssd ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
-sudo mount -a
-sudo mkdir -p /mnt/linxiv-ssd/data && sudo chown -R "$USER" /mnt/linxiv-ssd
+sudo mkdir -p /mnt/linxiv/data
+sudo chown -R "$USER" /mnt/linxiv
 ```
 
-`noatime` is there to stop every read from turning into a write.
+That is the path `linxiv.container` binds, so nothing else needs editing. A few
+things keep the write volume down, which is worth doing on any Pi:
+
+- **Check `noatime` is on the root mount** — `findmnt -no OPTIONS /`. Pi OS
+  normally sets it. Without it, every read turns into a write.
+- **Leave the journal in RAM.** Debian only writes the systemd journal to disk
+  if `/var/log/journal` exists. `ls -d /var/log/journal` — if it is absent,
+  leave it absent, and the unit's `LogDriver=journald` costs nothing on disk.
+- **Get one backup off the Pi** once the node is up. This is what actually
+  protects the library:
+
+  ```bash
+  . ~/.config/linxiv/node.env
+  curl -sf -X POST -H "Authorization: Bearer $LINXIV_API_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"dest_path":"/data/backups/initial.db"}' \
+    http://127.0.0.1:8000/api/storage/backup
+  # then copy /mnt/linxiv/data/backups/initial.db somewhere that is not the Pi
+  ```
+
+Note that one cold build moves far more data than weeks of the node running:
+about 1.7 GB through the cargo cache mounts, plus the image layers. Updates are
+much cheaper, but it is a reason not to rebuild idly.
 
 ## Install
 
@@ -95,7 +102,7 @@ podman healthcheck run linxiv && echo healthy
 ```
 
 `LINXIV_P2P_PASSPHRASE` encrypts the p2p key store at rest, since there is no
-OS keychain here. Losing it, or losing `/mnt/linxiv-ssd/data`, resets the
+OS keychain here. Losing it, or losing `/mnt/linxiv/data`, resets the
 node's identity and the Node Address peers use to reach it. Back up
 `node.env` somewhere off the Pi.
 
@@ -166,11 +173,11 @@ next update a full cold build.
 | Symptom | Cause |
 |---|---|
 | `podman pull` says "no matching manifest" | Expected. There is no arm64 image; build it. |
-| Panics at startup with `unable to open database file: /data/papers.db` | The container cannot write the bind mount. On an SELinux host, the `:Z` on the `Volume=` line is missing. Otherwise check `/mnt/linxiv-ssd/data` exists and you own it. |
+| Panics at startup with `unable to open database file: /data/papers.db` | The container cannot write the bind mount. On an SELinux host, the `:Z` on the `Volume=` line is missing. Otherwise check `/mnt/linxiv/data` exists and you own it. |
 | `unsupported host Linux-armv7l` from `fetch_pdfium.sh` | 32-bit userland. Reflash with a 64-bit image. |
 | Unit works when you are logged in, node is gone after a reboot | `loginctl enable-linger "$USER"` was not run. |
 | Container restart-loops with a healthy-looking log | The healthcheck is failing, most likely a wrong or missing `LINXIV_API_TOKEN` in `node.env`. `podman inspect linxiv --format '{{json .State.Health.Log}}'` shows the probe output. |
-| Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2` and add swap on the SSD. |
+| Build is killed partway through | Out of RAM. `CARGO_BUILD_JOBS=2` and add a swapfile. |
 
 ## How small can you go?
 
@@ -203,5 +210,5 @@ Two knobs that do matter on a Pi:
 | `LINXIV_PDF_RATE_BPS` | `node.env` | Throttles the Remote Query PDF lane when the uplink, not the Pi, is the bottleneck. |
 
 If it feels slow under real use, watch `podman stats` and `vmstat 5` rather
-than guessing. The bottleneck will be disk IO on the SQLite and PDF path, and
-the fix for that is the SSD, not a compiler flag.
+than guessing. The bottleneck will be disk IO on the SQLite and PDF path
+rather than the CPU, so a compiler flag is not what fixes it.
