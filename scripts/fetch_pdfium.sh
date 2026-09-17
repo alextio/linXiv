@@ -14,7 +14,7 @@ DEST="$ROOT/src-tauri/vendor/pdfium"
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)   ASSET=pdfium-linux-x64.tgz ASSET_LIB_DIR=lib SHA=e07bc44c4e422c50eb01da742dc1ec59ad6780ce64ed91955533da8e9fe1a363 ;;
-  Linux-aarch64)  ASSET=pdfium-linux-arm64.tgz ASSET_LIB_DIR=lib SHA= ;;
+  Linux-aarch64)  ASSET=pdfium-linux-arm64.tgz ASSET_LIB_DIR=lib SHA=a188262ab444d43e6030ffabc8b03a7d3a4e3b1146ecbfb030af42f402ee0cff ;;
   Darwin-x86_64)  ASSET=pdfium-mac-x64.tgz   ASSET_LIB_DIR=lib SHA= ;;
   Darwin-arm64)   ASSET=pdfium-mac-arm64.tgz ASSET_LIB_DIR=lib SHA= ;;
   # Git Bash / MSYS2 report uname -s as MINGW64_NT-*, MSYS_NT-*, or CYGWIN_NT-*.
