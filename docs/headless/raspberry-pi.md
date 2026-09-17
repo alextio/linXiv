@@ -223,6 +223,8 @@ Two settings that cost nothing and cover real failure modes:
   reach the card at all. `zram` keeps the compressed swap and drops the file.
 
   ```bash
+  # The package ships /etc/rpi/swap.conf but not the drop-in dir.
+  sudo mkdir -p /etc/rpi/swap.conf.d
   printf '[Main]\nMechanism=zram\n' \
     | sudo tee /etc/rpi/swap.conf.d/10-no-swap-file.conf
   ```
