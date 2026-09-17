@@ -230,7 +230,23 @@ valid URL, the share node does not bind — it refuses to fall back to the publi
 relays, so sharing and sync are off while the HTTP API keeps answering.
 `/api/status` reports `require-custom-missing`.
 
-Standing the relay up is a separate box and separate work. It has to be publicly
+You do not have to *run* one to get past the 409. Naming a single public n0
+relay is enough, because the setting only needs one URL — these are the four the
+pinned iroh 1.0.2 uses by default, so pick the nearest:
+
+| Region | URL |
+|---|---|
+| NA east | `https://use1-1.relay.n0.iroh.link.` |
+| NA west | `https://usw1-1.relay.n0.iroh.link.` |
+| EU | `https://euc1-1.relay.n0.iroh.link.` |
+| Asia-Pacific | `https://aps1-1.relay.n0.iroh.link.` |
+
+That is the fast way to exercise Remote Query Mode end to end, with two caveats:
+n0 says the public relays are for development and testing and advises against
+production use, and pinning one drops the failover the default set gives you — if
+it goes down, every address you minted names a dead hop.
+
+Running your own is a separate box and separate work: it has to be publicly
 reachable, which the Pi behind home NAT is not, and while `iroh-relay` is a
 single binary, its access-control story is still an open item in `TODO.md` — an
 unauthenticated relay is a bandwidth donation to the internet.
