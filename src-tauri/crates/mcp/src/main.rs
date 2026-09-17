@@ -9,7 +9,7 @@ mod projects_tags;
 mod util;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{ServerCapabilities, ServerInfo};
@@ -19,26 +19,26 @@ use rusqlite::Connection;
 use tracing_subscriber::EnvFilter;
 
 use linxiv_core::config;
-use linxiv_core::service::db_admin;
+use linxiv_core::service::db_admin::Db;
 
-/// Shared MCP server state: the single SQLite connection (opened once, behind a
-/// `Mutex`), the managed PDF root, and the merged tool router.
+/// Shared MCP server state: the database handle, the managed PDF root, and the
+/// merged tool router.
 #[derive(Clone)]
 pub struct Server {
-    conn: Arc<Mutex<Connection>>,
+    db: Arc<Db>,
     /// Managed PDF directory (`config::pdf_dir()`). Used by the PDF tools.
     pdf_dir: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 impl Server {
-    /// Open the data dir, the DB, and run startup init, then assemble the
-    /// merged router.
+    /// Open the data dir, run startup init, then assemble the merged router.
+    /// The connection is NOT kept: an editor session that is connected but idle
+    /// must not hold the database open, or `restore` can never run.
     pub fn new() -> anyhow::Result<Self> {
         config::init_data_dir()?;
-        let conn = db_admin::open_app_db()?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            db: Arc::new(Db::lazy()?),
             pdf_dir: config::pdf_dir(),
             tool_router: Self::tools_papers()
                 + Self::tools_projects_tags()
@@ -48,17 +48,15 @@ impl Server {
         })
     }
 
-    /// Locks the shared connection for the duration of `f`. Panics only if the
-    /// lock is poisoned (a previous tool body panicked while holding it).
+    /// Runs `f` against the database, serialized across this server's tool calls.
     pub fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> T {
-        let mut guard = self.conn.lock().expect("db connection mutex poisoned");
-        f(&mut guard)
+        self.db.with(f)
     }
 
-    /// The shared handle for work that must run off the async runtime: `with_conn`
+    /// The handle for work that must run off the async runtime: `with_conn`
     /// blocks a tokio worker, fine for fast statements but not whole-DB file I/O.
-    pub fn conn_handle(&self) -> Arc<Mutex<Connection>> {
-        Arc::clone(&self.conn)
+    pub fn db(&self) -> Arc<Db> {
+        Arc::clone(&self.db)
     }
 }
 

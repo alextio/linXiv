@@ -507,7 +507,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use linxiv_core::models::PaperMetadata;
     use linxiv_core::storage;
@@ -519,7 +519,7 @@ mod tests {
         let conn = storage::open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
         Server {
-            conn: Arc::new(Mutex::new(conn)),
+            db: Arc::new(linxiv_core::service::db_admin::Db::held(conn)),
             pdf_dir: std::env::temp_dir(),
             tool_router: Server::tools_papers(),
         }
