@@ -425,6 +425,20 @@ export type PreMigrationBackup = {
   modified_at: string,
 };
 
+export type ImportReport = {
+  roots: number,
+  papers: number,
+  paper_meta: number,
+  authors: number,
+  tags: number,
+  projects: number,
+  paper_links: number,
+  project_links: number,
+  notes: number,
+  annotations: number,
+  pdf_refs_cleared: number,
+};
+
 export type DeletedPaperDetails = {
   source_fk: number,
   source_id: string,
@@ -823,6 +837,10 @@ export type StorageBackupBody = {
 };
 
 export type StorageRestoreBody = {
+  src_path: string,
+};
+
+export type StorageImportBody = {
   src_path: string,
 };
 
