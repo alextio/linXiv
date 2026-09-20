@@ -1,29 +1,15 @@
 //! `/api/feed` routes — home RSS/Atom feed via a rolling `RSS_CACHE_ENTRY` window.
-//! Thin handlers over `service::feed`; only the in-process fetch throttle lives here.
-
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+//! Thin handlers over `service::feed`, which also owns the per-URL fetch throttle.
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use linxiv_core::config::UserSettings;
 use linxiv_core::models::OkReceipt;
 use linxiv_core::service::feed as svc_feed;
-use linxiv_core::service::feed::{
-    CreatedFeedRule, FeedResponse, FeedRulesResponse, FilterAction, FilterField,
-};
+use linxiv_core::service::feed::{CreatedFeedRule, FeedRulesResponse, FilterAction, FilterField};
 
 use crate::route::{to_value, ApiError, ReqCtx};
 use crate::state::AppState;
-
-const CACHE_TTL: Duration = Duration::from_secs(300);
-
-// Throttle state: last-fetch time + channel title per URL (title isn't stored
-// in the DB window, so a throttled request still needs it from here).
-static LAST_FETCH: LazyLock<Mutex<HashMap<String, (Instant, String)>>> =
-    LazyLock::new(Default::default);
 
 pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
     match (ctx.method, ctx.segs) {
@@ -42,19 +28,8 @@ async fn get_feed(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError>
         .filter(|u| !u.trim().is_empty())
         .ok_or_else(|| ApiError::new(422, "url query parameter is required"))?;
 
-    let last_fetch = LAST_FETCH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(url)
-        .cloned();
-    let due = last_fetch
-        .as_ref()
-        .map(|(at, _)| at.elapsed() >= CACHE_TTL)
-        .unwrap_or(true);
-    let mut title = last_fetch.map(|(_, t)| t).unwrap_or_default();
-    let retention_days = UserSettings::load()
-        .map(|s| s.rss_cache_retention_days())
-        .unwrap_or(30);
+    let (due, mut title) = svc_feed::throttle_state(url);
+    let retention_days = svc_feed::retention_days();
 
     let mut fetch_err = None;
     if due {
@@ -70,16 +45,7 @@ async fn get_feed(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError>
     }
 
     let page = state.with_conn(|conn| svc_feed::read_page(conn, url, retention_days))?;
-    if page.window_was_empty {
-        if let Some(e) = fetch_err {
-            return Err(e);
-        }
-    }
-    to_value(&FeedResponse {
-        title,
-        entries: page.entries,
-        saved_arxiv_ids: page.saved_arxiv_ids,
-    })
+    to_value(&page.into_response(title, fetch_err)?)
 }
 
 /// One fetch-and-persist pass for `url`: prune, fetch, merge into the DB window,
@@ -92,10 +58,7 @@ pub async fn refresh(state: &AppState, url: &str, retention_days: i64) -> Result
     // data_dir carries the shared .arxiv_ratelimit file (same one arxiv_get uses).
     let fetched = svc_feed::fetch(url, &linxiv_core::config::data_dir()).await?;
     state.with_conn(|conn| svc_feed::apply_fetch(conn, url, &fetched.entries, retention_days))?;
-    LAST_FETCH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(url.to_string(), (Instant::now(), fetched.title.clone()));
+    svc_feed::record_fetched(url, &fetched.title);
     Ok(fetched.title)
 }
 
@@ -265,9 +228,9 @@ mod tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // No LAST_FETCH.lock().unwrap().clear() here: LAST_FETCH is a process-wide
-        // static and cargo test runs these #[tokio::test]s concurrently, so a blind
-        // clear() races with sibling tests and can evict their entries mid-test.
+        // No throttle clear() here: core's LAST_FETCH is a process-wide static and
+        // cargo test runs these #[tokio::test]s concurrently, so a blind clear()
+        // would race with sibling tests and evict their entries mid-test.
         let mock_server = MockServer::start().await;
         let feed_url = format!("{}/feed.xml", mock_server.uri());
 
