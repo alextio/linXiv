@@ -8,6 +8,7 @@ mod notes_pdf_trash;
 mod orcid;
 mod papers;
 mod projects_tags;
+mod refs;
 mod util;
 mod versions;
 
@@ -50,7 +51,8 @@ impl Server {
                 + Self::tools_io_authors_misc()
                 + Self::tools_versions()
                 + Self::tools_orcid()
-                + Self::tools_feed(),
+                + Self::tools_feed()
+                + Self::tools_refs(),
         })
     }
 
@@ -69,8 +71,11 @@ impl Server {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("linXiv: search, fetch, organize, and annotate academic papers.")
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "linXiv: search, fetch, organize, and annotate academic papers. Cite papers as \
+                 linxiv://paper/{source_fk}?v={version} using the source_fk and version fields \
+                 returned by the paper tools, and verify citations with resolve_refs.",
+        )
     }
 }
 
