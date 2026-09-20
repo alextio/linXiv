@@ -8,6 +8,7 @@ pub mod doi;
 pub mod library;
 pub mod misc;
 pub mod note;
+pub mod orcid;
 pub mod paper;
 pub mod pdf;
 pub mod project;
