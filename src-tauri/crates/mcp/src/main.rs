@@ -2,6 +2,7 @@
 //! split across six cluster modules, each a `#[tool_router]` impl merged here.
 
 mod annotations;
+mod feed;
 mod io_authors_misc;
 mod notes_pdf_trash;
 mod orcid;
@@ -48,7 +49,8 @@ impl Server {
                 + Self::tools_annotations()
                 + Self::tools_io_authors_misc()
                 + Self::tools_versions()
-                + Self::tools_orcid(),
+                + Self::tools_orcid()
+                + Self::tools_feed(),
         })
     }
 
