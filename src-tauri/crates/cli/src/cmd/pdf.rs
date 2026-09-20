@@ -14,6 +14,7 @@ use crate::output::{as_source_id, fail, output, pyrepr};
 
 #[derive(Subcommand)]
 pub enum PdfCmd {
+    // Route parity: `GET /api/papers/{}/pdf-path`.
     /// Show local PDF path for a paper
     Path {
         source_id: String,
@@ -21,6 +22,7 @@ pub enum PdfCmd {
         #[arg(long)]
         version: Option<i64>,
     },
+    // Route parity: `POST /api/papers/import/pdf-url`.
     /// Download PDF for a paper
     Download {
         source_id: String,
@@ -30,12 +32,15 @@ pub enum PdfCmd {
         #[arg(long)]
         version: Option<i64>,
     },
+    // Route parity: `GET /api/pdfs`.
     /// List papers with a PDF saved on disk
     List,
+    // Route parity: `DELETE /api/pdfs/{}`.
     /// Delete every saved version's PDF for a paper
     Delete { source_id: String },
     /// Report total PDF storage usage
     Storage,
+    // Route parity: `POST /api/papers/import/pdf`.
     /// Import a local PDF (extract metadata)
     Import {
         /// Path to PDF file

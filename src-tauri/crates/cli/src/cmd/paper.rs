@@ -9,12 +9,16 @@ use linxiv_core::service::{paper as svc_paper, paper_merge as svc_merge, project
 
 #[derive(Subcommand)]
 pub enum PaperCmd {
+    // Route parity: `GET /api/papers/{}`.
     /// Get full details for a paper
     Get { source_id: String },
+    // Route parity: `DELETE /api/papers/{}`.
     /// Soft-delete a paper
     Delete { source_id: String },
+    // Route parity: `GET /api/papers/sfk/{}/versions`.
     /// List all stored versions of a paper
     Versions { source_id: String },
+    // Route parity: `PUT /api/papers/sfk/{}`.
     /// Overwrite paper metadata in-place
     Repair {
         source_id: String,
@@ -40,16 +44,20 @@ pub enum PaperCmd {
     Restore { source_id: String },
     /// Permanently delete a paper
     HardDelete { source_id: String },
+    // Route parity: `GET /api/papers/search`.
     /// Full-text search within local library
     Search {
         query: String,
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    // Route parity: `DELETE /api/papers/sfk/{}/projects`.
     /// Remove a paper from every project
     RemoveFromAllProjects { source_id: String },
+    // Route parity: `GET /api/papers/sfk/{}/doi-candidates`.
     /// List other paper roots sharing this paper's DOI
     DoiCandidates { source_id: String },
+    // Route parity: `POST /api/papers/sfk/{}/merge`.
     /// Merge a duplicate paper into this one (the duplicate is deleted)
     Merge {
         /// The paper that survives; its metadata stays canonical
@@ -57,6 +65,7 @@ pub enum PaperCmd {
         /// The duplicate to merge away
         loser_source_id: String,
     },
+    // Route parity: `POST /api/papers/{}/full-text`.
     /// Fetch a paper's arXiv TeX source and index it for full-text search
     FetchSource {
         source_id: String,
@@ -64,6 +73,7 @@ pub enum PaperCmd {
         #[arg(long)]
         force: bool,
     },
+    // Route parity: `GET /api/papers/full-text-pending`.
     /// Backfill full-text search over stored arXiv papers with no TeX source yet
     IndexSources {
         /// Stop after this many papers — arXiv pacing puts each fetch ~7s apart

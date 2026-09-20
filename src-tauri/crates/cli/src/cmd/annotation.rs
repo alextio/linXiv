@@ -12,6 +12,7 @@ use crate::output::{as_source_id, fail, output};
 
 #[derive(Subcommand)]
 pub enum AnnotationCmd {
+    // Route parity: `POST /api/annotations`.
     /// Create a PDF highlight annotation on a paper
     Create {
         source_id: String,
@@ -26,6 +27,7 @@ pub enum AnnotationCmd {
     },
     /// Get an annotation by ID
     Get { annotation_id: i64 },
+    // Route parity: `GET /api/annotations`.
     /// List annotations
     List {
         /// Filter by paper source ID
@@ -35,12 +37,14 @@ pub enum AnnotationCmd {
         #[arg(long = "project-id")]
         project_id: Option<i64>,
     },
+    // Route parity: `PATCH /api/annotations/{}`.
     /// Update an annotation's comment
     Update {
         annotation_id: i64,
         #[arg(long)]
         comment: String,
     },
+    // Route parity: `DELETE /api/annotations/{}`.
     /// Delete an annotation by ID
     Delete { annotation_id: i64 },
 }

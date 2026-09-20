@@ -11,14 +11,17 @@ use crate::output::{fail, output, resolve_source_fk};
 
 #[derive(Subcommand)]
 pub enum VersionsCmd {
+    // Route parity: `POST /api/versions/check`.
     /// Poll arXiv for new versions of the stalest saved papers
     Check {
         /// Papers to poll in this pass (1 to 100)
         #[arg(long, default_value_t = svc::DEFAULT_LIMIT)]
         limit: i64,
     },
+    // Route parity: `GET /api/versions/new`.
     /// List papers with an unacknowledged new version
     New,
+    // Route parity: `POST /api/versions/ack`.
     /// Clear the new-version flag on one paper
     Ack { paper_id: String },
 }
