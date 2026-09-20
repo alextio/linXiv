@@ -6,6 +6,7 @@ const EXPORT_FORMAT_OPTIONS: { key: ExportFormatKey; label: string; description:
   { key: "lxproj",   label: ".lxproj",  description: "linXiv project archive (papers + metadata + PDFs)" },
   { key: "bibtex",   label: "BibTeX",   description: "Standard .bib citation export" },
   { key: "obsidian", label: "Obsidian", description: "Markdown notes for Obsidian vault" },
+  { key: "zotero",   label: "Zotero",   description: "CSL JSON for Zotero's file importer" },
 ];
 
 export function ExportSection() {
