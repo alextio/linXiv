@@ -74,6 +74,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: cmd::author::AuthorCmd,
     },
+    /// Backfill author ORCIDs from CrossRef and OpenAlex
+    Orcid {
+        #[command(subcommand)]
+        cmd: cmd::orcid::OrcidCmd,
+    },
     /// BibTeX import
     Bibtex {
         #[command(subcommand)]
@@ -124,6 +129,7 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Trash { cmd } => cmd::trash::run(cmd, ctx).await,
         Commands::Doi { cmd } => cmd::doi::run(cmd, ctx).await,
         Commands::Author { cmd } => cmd::author::run(cmd, ctx).await,
+        Commands::Orcid { cmd } => cmd::orcid::run(cmd, ctx).await,
         Commands::Bibtex { cmd } => cmd::bibtex::run(cmd, ctx).await,
         Commands::Zotero { cmd } => cmd::zotero::run(cmd, ctx).await,
         Commands::Versions { cmd } => cmd::versions::run(cmd, ctx).await,

@@ -4,6 +4,7 @@
 mod annotations;
 mod io_authors_misc;
 mod notes_pdf_trash;
+mod orcid;
 mod papers;
 mod projects_tags;
 mod util;
@@ -46,7 +47,8 @@ impl Server {
                 + Self::tools_notes_pdf_trash()
                 + Self::tools_annotations()
                 + Self::tools_io_authors_misc()
-                + Self::tools_versions(),
+                + Self::tools_versions()
+                + Self::tools_orcid(),
         })
     }
 

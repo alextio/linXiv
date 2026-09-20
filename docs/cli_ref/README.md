@@ -106,6 +106,10 @@ linxiv author delete 12                          # blocked if still linked to pa
 linxiv author merge-candidates 12                # other authors sharing author 12's ORCID
 linxiv author merge 12 34 56                     # fold 34 and 56 into canonical author 12
 
+# ORCID
+linxiv orcid backfill                            # one pass: fill missing ORCIDs via CrossRef then OpenAlex
+linxiv orcid backfill --limit 50                 # authors to check this pass (1 to 100, default 20)
+
 # BibTeX import
 linxiv bibtex import ./refs.bib
 linxiv bibtex import ./refs.bib --project-id 1   # link every imported paper to a project
