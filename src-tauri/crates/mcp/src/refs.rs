@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use linxiv_core::service::refs as svc_refs;
 
-use crate::util::{core_err, json_ok};
+use crate::util::{core_err, guard_err, json_ok};
 use crate::Server;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -17,8 +17,29 @@ pub struct ResolveRefsParams {
     pub refs: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PaperRefParams {
+    /// Paper source id (e.g. "arxiv:2204.12985").
+    pub paper_id: String,
+    /// Stored version to pin; the latest stored version when omitted.
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
 #[tool_router(router = tools_refs, vis = "pub(crate)")]
 impl Server {
+    #[tool(
+        description = "Citation handle linxiv://paper/{source_fk}?v={version} for a saved paper, pinned to a stored version (latest by default). Paste it into notes; verify later with resolve_refs."
+    )]
+    pub async fn paper_ref(
+        &self,
+        Parameters(p): Parameters<PaperRefParams>,
+    ) -> Result<String, ErrorData> {
+        self.with_conn(|conn| {
+            json_ok(&svc_refs::paper_ref(conn, &p.paper_id, p.version).map_err(guard_err)?)
+        })
+    }
+
     #[tool(
         description = "Verify citation refs (linxiv://paper/{source_fk}?v={version}). Each comes back current, stale (newer version stored), unknown (no such paper or version), or malformed."
     )]
@@ -70,9 +91,19 @@ mod tests {
                 svc_paper::resolve_source_fk(conn, "arxiv:A")
             })
             .unwrap();
+        let handle: Value = serde_json::from_str(
+            &srv.paper_ref(Parameters(PaperRefParams {
+                paper_id: "arxiv:A".into(),
+                version: None,
+            }))
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(handle["ref"], format!("linxiv://paper/{fk}?v=1"));
         let out = srv
             .resolve_refs(Parameters(ResolveRefsParams {
-                refs: vec![format!("linxiv://paper/{fk}?v=1"), "junk".into()],
+                refs: vec![handle["ref"].as_str().unwrap().into(), "junk".into()],
             }))
             .await
             .unwrap();

@@ -19,7 +19,7 @@ struct Cli {
     command: Commands,
 }
 
-/// All 20 top-level groups; flat commands route into `library`/`misc`. `Restore`
+/// All 22 top-level groups; flat commands route into `library`/`misc`. `Restore`
 /// and `PdfMeta` are special-cased in `main` before `Ctx::open()` (no valid DB needed).
 #[derive(Subcommand)]
 enum Commands {
