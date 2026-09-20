@@ -19,7 +19,7 @@ struct Cli {
     command: Commands,
 }
 
-/// All 19 top-level groups; flat commands route into `library`/`misc`. `Restore`
+/// All 20 top-level groups; flat commands route into `library`/`misc`. `Restore`
 /// and `PdfMeta` are special-cased in `main` before `Ctx::open()` (no valid DB needed).
 #[derive(Subcommand)]
 enum Commands {
@@ -84,6 +84,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: cmd::zotero::ZoteroCmd,
     },
+    /// Poll arXiv for new versions of saved papers
+    Versions {
+        #[command(subcommand)]
+        cmd: cmd::versions::VersionsCmd,
+    },
     /// Library statistics
     Stats,
     /// List all paper categories in the library
@@ -121,6 +126,7 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Author { cmd } => cmd::author::run(cmd, ctx).await,
         Commands::Bibtex { cmd } => cmd::bibtex::run(cmd, ctx).await,
         Commands::Zotero { cmd } => cmd::zotero::run(cmd, ctx).await,
+        Commands::Versions { cmd } => cmd::versions::run(cmd, ctx).await,
         Commands::Stats => cmd::misc::stats(ctx).await,
         Commands::Categories => cmd::misc::categories(ctx).await,
         Commands::Settings { cmd } => cmd::misc::settings(cmd, ctx).await,

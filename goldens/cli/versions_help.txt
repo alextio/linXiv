@@ -1,0 +1,10 @@
+usage: linxiv versions [-h] {check,new,ack} ...
+
+positional arguments:
+  {check,new,ack}
+    check         Poll arXiv for new versions of the stalest saved papers
+    new           List papers with an unacknowledged new version
+    ack           Clear the new-version flag on one paper
+
+options:
+  -h, --help      show this help message and exit

@@ -1,27 +1,15 @@
 //! `/api/versions` routes — arXiv new-version monitoring. `check` polls the
 //! stalest N saved papers in ONE arXiv request; `new`/`ack` surface and clear the flags.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use serde::Deserialize;
 use serde_json::Value;
 
-use linxiv_core::models::OkReceipt;
 use linxiv_core::service::version_monitor::{
     self as svc, NewVersionsResponse, VersionCheckResponse,
 };
 
 use crate::route::{to_value, ApiError, ReqCtx};
 use crate::state::AppState;
-
-static CHECK_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-
-struct CheckGuard;
-impl Drop for CheckGuard {
-    fn drop(&mut self) {
-        CHECK_IN_PROGRESS.store(false, Ordering::SeqCst);
-    }
-}
 
 /// Returns `Some(result)` if this group owns `(method, path)`, else `None`.
 pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
@@ -34,7 +22,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
 }
 
 fn default_limit() -> i64 {
-    20
+    svc::DEFAULT_LIMIT
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -54,24 +42,13 @@ async fn check(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
         Some(_) => ctx.parse_body::<VersionsCheckBody>()?.limit,
         None => default_limit(),
     };
-    if !(1..=100).contains(&limit) {
-        return Err(ApiError::new(422, "limit must be between 1 and 100"));
-    }
-
-    if CHECK_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        return Err(ApiError::new(409, "version check already in progress"));
-    }
-    let _guard = CheckGuard;
+    let limit = svc::validate_limit(limit)?;
+    let Some(_guard) = svc::try_begin_check() else {
+        return Err(ApiError::new(409, svc::CHECK_BUSY_MSG));
+    };
 
     let candidates = state.with_conn(|conn| svc::stale_candidates(conn, limit))?;
-    if candidates.is_empty() {
-        return to_value(&VersionCheckResponse {
-            checked: 0,
-            new_versions: vec![],
-        });
-    }
-    let ids: Vec<String> = candidates.iter().map(|c| c.source_id.clone()).collect();
-    let fetched = svc::fetch_latest(&ids).await?;
+    let fetched = svc::fetch_latest(&candidates).await?;
     let found = state.with_conn(|conn| svc::apply_results(conn, &candidates, &fetched))?;
     to_value(&VersionCheckResponse {
         checked: candidates.len(),
@@ -93,11 +70,8 @@ pub struct VersionsAckBody {
 /// `POST /api/versions/ack` — clear the flag for one paper. 404 when unset.
 fn ack(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     let b: VersionsAckBody = ctx.parse_body()?;
-    let cleared = state.with_conn(|conn| svc::ack(conn, b.source_fk))?;
-    if !cleared {
-        return Err(ApiError::new(404, "no new version flagged for this paper"));
-    }
-    to_value(&OkReceipt { ok: true })
+    let receipt = state.with_conn(|conn| svc::ack_flagged(conn, b.source_fk))?;
+    to_value(&receipt)
 }
 
 #[cfg(test)]
@@ -107,7 +81,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::Mutex;
 
-    // Serialize access to CHECK_IN_PROGRESS across all tests to prevent race
+    // Serialize access to core's single-flight slot across all tests to prevent race
     // conditions (flag must reset on Drop even if test panics).
     //
     // tokio's Mutex, not std's: this guard is held across `.await`, and std's
@@ -143,11 +117,9 @@ mod tests {
     #[tokio::test]
     async fn check_in_progress_returns_409() {
         let _guard = TEST_MUTEX.lock().await;
-        CHECK_IN_PROGRESS.store(true, Ordering::SeqCst);
-        // Resets the flag on drop, including on assertion panic. A trailing
-        // `store(false)` did not: a failed assert left the flag set and every
-        // sibling test then got a 409 — mirrors orcid.rs's BackfillGuard.
-        let _reset = CheckGuard;
+        // Holding the core guard sets the flag and resets it on drop, including
+        // on assertion panic, so a failed assert cannot leak a 409 into siblings.
+        let _busy = svc::try_begin_check().expect("no other pass running");
 
         let err = req(&state(), "POST", "/api/versions/check", None)
             .await
