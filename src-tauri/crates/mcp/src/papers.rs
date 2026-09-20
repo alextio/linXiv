@@ -163,6 +163,7 @@ pub struct RepairPaperParams {
 
 #[tool_router(router = tools_papers, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/arxiv/search`.
     #[tool(description = "Search for academic papers by keyword.")]
     pub async fn search_papers(
         &self,
@@ -182,6 +183,7 @@ impl Server {
         json_ok(&results)
     }
 
+    // Route parity: `POST /api/arxiv/fetch`.
     #[tool(
         description = "Fetch full metadata for a paper by id and save it to the local database."
     )]
@@ -197,6 +199,7 @@ impl Server {
         json_ok(&meta)
     }
 
+    // Route parity: `GET /api/papers`.
     #[tool(
         description = "List papers stored in the local database, optionally sorted by publication \
                        date, date added, or title."
@@ -231,6 +234,7 @@ impl Server {
         json_ok(&papers)
     }
 
+    // Route parity: `GET /api/papers/{}`.
     #[tool(description = "Get full metadata for a single paper from the local database.")]
     pub async fn get_paper(
         &self,
@@ -242,6 +246,7 @@ impl Server {
         json_ok(&paper)
     }
 
+    // Route parity: `DELETE /api/papers/{}`.
     #[tool(description = "Soft-delete a paper from the local database (moves it to trash).")]
     pub async fn delete_paper(
         &self,
@@ -260,6 +265,7 @@ impl Server {
         json_ok(&svc_paper::DeletedPaperReceipt { deleted: paper_id })
     }
 
+    // Route parity: `GET /api/papers/sfk/{}/versions`.
     #[tool(description = "Get all stored versions of a paper.")]
     pub async fn get_paper_versions(
         &self,
@@ -271,6 +277,7 @@ impl Server {
         json_ok(&all_ver)
     }
 
+    // Route parity: `GET /api/papers/search`.
     #[tool(description = "Full-text search over downloaded TeX source and note content.")]
     pub async fn search_full_text(
         &self,
@@ -286,6 +293,7 @@ impl Server {
         }
     }
 
+    // Route parity: `POST /api/papers/{}/full-text`.
     #[tool(
         description = "Download a paper's arXiv TeX source and index it so search_full_text can \
                        find it. arXiv only; an already-indexed paper is skipped unless force=true."
@@ -319,6 +327,7 @@ impl Server {
         json_ok(&receipt)
     }
 
+    // Route parity: `GET /api/papers/full-text-pending`.
     #[tool(
         description = "List stored arXiv papers whose TeX source has not been indexed yet — the \
                        backlog fetch_full_text still has to work through. Read-only."
@@ -345,6 +354,7 @@ impl Server {
         }))
     }
 
+    // Route parity: `GET /api/papers/sfk/{}/doi-candidates`.
     #[tool(
         description = "Find other papers sharing this paper's DOI — likely the same work resolved \
                        from a different source."
@@ -365,6 +375,7 @@ impl Server {
         }))
     }
 
+    // Route parity: `POST /api/papers/sfk/{}/merge`.
     #[tool(
         description = "Merge a duplicate paper into another: the winner's metadata stays \
                        canonical; the duplicate's notes, annotations, project memberships, \
@@ -392,6 +403,7 @@ impl Server {
         json_ok(&receipt)
     }
 
+    // Route parity: `PUT /api/papers/sfk/{}`.
     #[tool(description = "Overwrite a paper's metadata in-place to fix a bad import.")]
     pub async fn repair_paper(
         &self,
@@ -488,6 +500,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/papers/sfk/{}/projects`.
     #[tool(description = "Remove a paper from every project it currently belongs to.")]
     pub async fn remove_paper_from_all_projects(
         &self,

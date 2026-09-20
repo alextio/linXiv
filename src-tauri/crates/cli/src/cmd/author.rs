@@ -8,10 +8,13 @@ use crate::output::{fail, output};
 
 #[derive(Subcommand)]
 pub enum AuthorCmd {
+    // Route parity: `GET /api/authors`.
     /// List all authors with paper counts
     List,
+    // Route parity: `GET /api/authors/{}`.
     /// Get author details and paper list
     Get { author_id: i64 },
+    // Route parity: `PATCH /api/authors/{}`.
     /// Update author fields
     Update {
         author_id: i64,
@@ -24,14 +27,17 @@ pub enum AuthorCmd {
         #[arg(long)]
         orcid: Option<String>,
     },
+    // Route parity: `DELETE /api/authors/{}`.
     /// Delete an author (blocked if linked to papers)
     Delete { author_id: i64 },
+    // Route parity: `POST /api/authors/{}/merge`.
     /// Merge duplicate authors into a canonical one
     Merge {
         canonical_id: i64,
         #[arg(required = true, num_args = 1..)]
         duplicate_ids: Vec<i64>,
     },
+    // Route parity: `GET /api/authors/{}/merge-candidates`.
     /// List authors sharing this author's ORCID (likely duplicates)
     MergeCandidates { author_id: i64 },
 }

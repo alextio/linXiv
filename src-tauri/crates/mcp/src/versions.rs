@@ -33,6 +33,7 @@ pub struct AckVersionParams {
 
 #[tool_router(router = tools_versions, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/versions/check`.
     #[tool(
         description = "Poll arXiv once for new versions of the stalest saved papers. Newer \
                        versions are saved and flagged; one pass runs at a time."
@@ -60,6 +61,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/versions/new`.
     #[tool(description = "List saved papers with an unacknowledged new arXiv version.")]
     pub async fn list_new_versions(
         &self,
@@ -72,6 +74,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/versions/ack`.
     #[tool(description = "Clear the new-version flag on one paper.")]
     pub async fn ack_version(
         &self,

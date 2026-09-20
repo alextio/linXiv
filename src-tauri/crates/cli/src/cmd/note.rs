@@ -12,6 +12,7 @@ use crate::output::{as_source_id, fail, output};
 
 #[derive(Subcommand)]
 pub enum NoteCmd {
+    // Route parity: `POST /api/notes`.
     /// Create a note on a paper
     Create {
         source_id: String,
@@ -23,8 +24,10 @@ pub enum NoteCmd {
         #[arg(long = "project-id")]
         project_id: Option<i64>,
     },
+    // Route parity: `GET /api/notes/{}`.
     /// Get a note by ID
     Get { note_id: i64 },
+    // Route parity: `GET /api/notes`.
     /// List notes
     List {
         /// Filter by paper source ID
@@ -34,6 +37,7 @@ pub enum NoteCmd {
         #[arg(long = "project-id")]
         project_id: Option<i64>,
     },
+    // Route parity: `PATCH /api/notes/{}`.
     /// Update note title or content
     Update {
         note_id: i64,
@@ -42,6 +46,7 @@ pub enum NoteCmd {
         #[arg(long)]
         content: Option<String>,
     },
+    // Route parity: `DELETE /api/notes/{}`.
     /// Delete a note by ID
     Delete { note_id: i64 },
 }

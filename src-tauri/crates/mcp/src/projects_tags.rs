@@ -157,6 +157,7 @@ pub struct DeleteTagParams {
 
 #[tool_router(router = tools_projects_tags, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `GET /api/projects`.
     #[tool(description = "List research projects.")]
     pub async fn list_projects(
         &self,
@@ -187,6 +188,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/projects/{}`.
     #[tool(description = "Get full details for a project.")]
     pub async fn get_project(
         &self,
@@ -201,6 +203,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/projects`.
     #[tool(description = "Create a new research project.")]
     pub async fn create_project(
         &self,
@@ -223,6 +226,7 @@ impl Server {
         })
     }
 
+    // Route parity: `PATCH /api/projects/{}`.
     #[tool(description = "Update a project's name, description, color, tags, or lifecycle status.")]
     pub async fn update_project(
         &self,
@@ -260,6 +264,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/projects/{}`.
     #[tool(description = "Soft-delete a project (moves it to trash).")]
     pub async fn delete_project(
         &self,
@@ -273,6 +278,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/projects/{}/papers`.
     #[tool(description = "Add a paper to an existing project.")]
     pub async fn add_paper_to_project(
         &self,
@@ -285,6 +291,7 @@ impl Server {
         self.with_conn(|conn| paper_membership(conn, project_id, paper_id, project::add_paper))
     }
 
+    // Route parity: `POST /api/projects/{}/papers/bulk`.
     #[tool(
         description = "Add several papers to a project in one call. Ids that are not in the local \
                        database come back in `failed` instead of failing the whole call."
@@ -329,6 +336,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/projects/{}/papers/{}`.
     #[tool(description = "Remove a paper from a project.")]
     pub async fn remove_paper_from_project(
         &self,
@@ -341,6 +349,7 @@ impl Server {
         self.with_conn(|conn| paper_membership(conn, project_id, paper_id, project::remove_paper))
     }
 
+    // Route parity: `PATCH /api/projects/{}`.
     #[tool(description = "Archive a project (read-only, still visible).")]
     pub async fn archive_project(
         &self,
@@ -423,6 +432,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/tags`.
     #[tool(description = "List all tags in the database.")]
     pub async fn list_all_tags(&self) -> Result<String, ErrorData> {
         self.with_conn(|conn| jval(tag::list_all_tags(conn).map_err(core_err)?))
@@ -444,6 +454,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/papers/{}/tags`.
     #[tool(description = "Add one or more tags to a paper.")]
     pub async fn add_tags_to_paper(
         &self,
@@ -456,6 +467,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/papers/{}/tags`.
     #[tool(description = "Remove one or more tags from a paper.")]
     pub async fn remove_tags_from_paper(
         &self,
@@ -468,6 +480,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/tags`.
     #[tool(description = "Create a new tag (or return its id if it already exists).")]
     pub async fn create_tag(
         &self,
@@ -492,6 +505,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/tags/{}`.
     #[tool(description = "Delete a tag by its id.")]
     pub async fn delete_tag(
         &self,

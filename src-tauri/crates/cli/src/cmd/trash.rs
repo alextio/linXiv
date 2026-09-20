@@ -8,14 +8,19 @@ use crate::output::{as_source_id, fail, output};
 
 #[derive(Subcommand)]
 pub enum TrashCmd {
+    // Route parity: `GET /api/trash`.
     /// List soft-deleted papers and projects
     List,
+    // Route parity: `POST /api/trash/.../restore`.
     /// Restore a soft-deleted paper
     Restore { source_id: String },
+    // Route parity: `DELETE /api/trash/...`.
     /// Permanently delete a paper
     HardDelete { source_id: String },
+    // Route parity: `POST /api/trash/projects/{}/restore`.
     /// Restore a soft-deleted project
     RestoreProject { project_id: i64 },
+    // Route parity: `DELETE /api/trash/projects/{}`.
     /// Permanently delete a project
     HardDeleteProject { project_id: i64 },
 }
