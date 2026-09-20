@@ -199,7 +199,7 @@ linxiv fetch 2204.12985
 linxiv paper get 2204.12985
 ```
 
-Covers papers, tags, projects, notes, PDF annotations, PDFs, DOI resolution, authors, BibTeX import, Zotero import/export, arXiv version monitoring, trash, and library maintenance; see [docs/cli_ref/](docs/cli_ref/) for the full command reference.
+Covers papers, tags, projects, notes, PDF annotations, PDFs, DOI resolution, authors, ORCID backfill, BibTeX import, Zotero import/export, arXiv version monitoring, trash, and library maintenance; see [docs/cli_ref/](docs/cli_ref/) for the full command reference.
 
 ## MCP server
 
