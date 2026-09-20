@@ -38,6 +38,9 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
         ("GET", ["api", "projects", id, "export", "obsidian"]) => {
             Some(export_text(state, id, ctx, formats::obsidian_export))
         }
+        ("GET", ["api", "projects", id, "export", "zotero"]) => {
+            Some(export_text(state, id, ctx, linxiv_core::zotero::csl_export))
+        }
         _ => None,
     }
 }
@@ -77,7 +80,7 @@ fn export(state: &AppState, id: &str, ctx: &ReqCtx<'_>) -> Result<Value, ApiErro
     crate::route::to_value(&OkReceipt { ok: true })
 }
 
-/// `GET /api/projects/{id}/export/{bibtex,obsidian}?dest_path=` — the dest_path
+/// `GET /api/projects/{id}/export/{bibtex,obsidian,zotero}?dest_path=` — the dest_path
 /// branch of the text exporters. Writes the formatted project to disk, `{ok}`.
 fn export_text(
     state: &AppState,

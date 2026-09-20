@@ -132,6 +132,7 @@ pub enum ProjectCmd {
         /// Output file path (.md added if no extension)
         dest: String,
     },
+    // Route parity: `GET /api/projects/{}/export/zotero`.
     /// Export project papers as Zotero CSL JSON
     ExportZotero {
         project_id: i64,
