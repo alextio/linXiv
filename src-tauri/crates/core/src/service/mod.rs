@@ -13,6 +13,7 @@ pub mod paper_import;
 pub mod paper_merge;
 pub mod project;
 pub mod reading_list;
+pub mod refs;
 pub mod search_state;
 pub mod source;
 pub mod stats;

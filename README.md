@@ -203,7 +203,7 @@ Covers papers, tags, projects, notes, PDF annotations, PDFs, DOI resolution, the
 
 ## MCP server
 
-`linxiv-mcp` is a stdio MCP server exposing ~75 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly.
+`linxiv-mcp` is a stdio MCP server exposing ~75 tools (search, fetch, papers, projects, tags, notes, annotations, PDFs, trash, authors, import/export, settings, stats) so an MCP client like Claude can drive your library directly. Paper tools return a `source_fk` and `version`; cite a paper in notes as `linxiv://paper/{source_fk}?v={version}` and pass those handles to `resolve_refs` to check each one is still current, stale, or unknown.
 
 The simplest path is to install the desktop app and use **Settings → Integrations**, which registers the bundled server with a detected client.
 
