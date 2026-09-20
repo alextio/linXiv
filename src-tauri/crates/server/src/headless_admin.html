@@ -456,10 +456,10 @@ async function loadSettings() {
       inp.size = 40;
       inp.value = writeOnly || v == null ? "" : String(v);
       // The relay token is in the GET body, so the hint can report its state.
-      // The two API keys are stripped from that body, so the page cannot know
-      // whether one is stored: say so instead of implying an empty box is unset.
+      // The two API keys are stripped from that body and replaced by a
+      // `<KEY>_SET` boolean, so the hint reports presence without the value.
       if (kind === "password") inp.placeholder = v ? "set, type to replace" : "not set";
-      else if (writeOnly) inp.placeholder = "write only, cannot show if set";
+      else if (writeOnly) inp.placeholder = s[key + "_SET"] ? "Set (write only)" : "Not set";
     }
     // Numbers stay numbers: a stringified cap silently falls back to the default.
     inp.onchange = () => {

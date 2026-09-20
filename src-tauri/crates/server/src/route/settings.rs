@@ -22,7 +22,7 @@ const ALLOWED_ENV_KEYS: [&str; 5] = [
     "OPENAI_API_KEY",
 ];
 
-/// Keys `redact_secrets` strips from the GET body.
+/// Keys `redact_secrets` strips from the GET body, replaced by `<KEY>_SET`.
 const SECRET_ENV_KEYS: [&str; 2] = ["GEMINI_API_KEY", "OPENAI_API_KEY"];
 
 pub(crate) async fn handle(_state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
@@ -59,9 +59,13 @@ fn env_patch(ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
 }
 
 /// `GET /api/settings` — settings first, then each present env key overlaid;
-/// missing env keys are skipped.
+/// missing env keys are skipped. Secrets become `<KEY>_SET` booleans.
 fn get() -> Result<Value, ApiError> {
-    let settings = redact_secrets(UserSettings::load()?.all());
+    let secrets: Vec<(&str, bool)> = SECRET_ENV_KEYS
+        .iter()
+        .map(|&k| (k, std::env::var(k).is_ok_and(|v| !v.is_empty())))
+        .collect();
+    let settings = redact_secrets(UserSettings::load()?.all(), &secrets);
     let env: Vec<(&str, Option<String>)> = SETTINGS_ENV_KEYS
         .iter()
         .map(|&k| (k, std::env::var(k).ok()))
@@ -83,10 +87,15 @@ fn patch(ctx: &ReqCtx<'_>) -> Result<Value, ApiError> {
     to_value(&OkReceipt { ok: true })
 }
 
-/// Remove `SECRET_ENV_KEYS` from the settings map.
-fn redact_secrets(mut settings: Map<String, Value>) -> Map<String, Value> {
-    for key in SECRET_ENV_KEYS {
-        settings.remove(key);
+/// Replace each secret key with an appended `<KEY>_SET` bool: true when the
+/// stored value or the live env var (`env`) is non-empty.
+fn redact_secrets(mut settings: Map<String, Value>, env: &[(&str, bool)]) -> Map<String, Value> {
+    for (key, in_env) in env {
+        let stored = settings
+            .shift_remove(*key)
+            .and_then(|v| v.as_str().map(|s| !s.is_empty()))
+            .unwrap_or(false);
+        settings.insert(format!("{key}_SET"), Value::Bool(stored || *in_env));
     }
     settings
 }
@@ -129,13 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn redact_drops_secret_keys_keeping_others_in_order() {
+    fn redact_replaces_secrets_with_set_flags_keeping_order() {
         let mut base = Map::new();
-        base.insert("theme".into(), json!("dark"));
         base.insert("GEMINI_API_KEY".into(), json!("g"));
-        base.insert("OPENAI_API_KEY".into(), json!("o"));
-        let redacted = redact_secrets(base);
-        // Then the GET overlay still adds the present mailto key after the survivors.
+        base.insert("theme".into(), json!("dark"));
+        base.insert("OPENAI_API_KEY".into(), json!(""));
+        let secrets = [("GEMINI_API_KEY", false), ("OPENAI_API_KEY", false)];
+        let redacted = redact_secrets(base, &secrets);
+        // Then the GET overlay still adds the present mailto key after the flags.
         let env = [
             ("CROSSREF_MAILTO", Some("a@b.c".to_string())),
             ("OPENALEX_MAILTO", None),
@@ -143,8 +153,21 @@ mod tests {
         let merged = overlay_env(redacted, &env);
         assert_eq!(
             serde_json::to_string(&Value::Object(merged)).unwrap(),
-            r#"{"theme":"dark","CROSSREF_MAILTO":"a@b.c"}"#
+            r#"{"theme":"dark","GEMINI_API_KEY_SET":true,"OPENAI_API_KEY_SET":false,"CROSSREF_MAILTO":"a@b.c"}"#
         );
+    }
+
+    #[test]
+    fn redact_set_flag_true_from_env_or_store_false_when_absent() {
+        // Env only, store only, neither: flag never leaks the value.
+        let mut base = Map::new();
+        base.insert("OPENAI_API_KEY".into(), json!("o"));
+        let out = redact_secrets(base, &[("GEMINI_API_KEY", true), ("OPENAI_API_KEY", false)]);
+        assert_eq!(out["GEMINI_API_KEY_SET"], json!(true));
+        assert_eq!(out["OPENAI_API_KEY_SET"], json!(true));
+        assert!(out.get("OPENAI_API_KEY").is_none());
+        let out = redact_secrets(Map::new(), &[("GEMINI_API_KEY", false)]);
+        assert_eq!(out["GEMINI_API_KEY_SET"], json!(false));
     }
 
     #[test]
