@@ -13,8 +13,10 @@ use crate::output::output;
 
 #[derive(Subcommand)]
 pub enum SettingsCmd {
+    // Route parity: `GET /api/settings`.
     /// Show all current settings
     Get,
+    // Route parity: `PATCH /api/settings`.
     /// Set a setting value
     Update {
         key: String,

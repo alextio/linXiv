@@ -8,8 +8,10 @@ use crate::output::{fail, output};
 
 #[derive(Subcommand)]
 pub enum DoiCmd {
+    // Route parity: `POST /api/doi/resolve`.
     /// Resolve DOI to metadata (no save)
     Resolve { doi: String },
+    // Route parity: `POST /api/doi/save`.
     /// Resolve DOI and save paper to library
     Save { doi: String },
 }

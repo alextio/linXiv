@@ -10,6 +10,7 @@ use crate::output::output;
 
 #[derive(Subcommand)]
 pub enum OrcidCmd {
+    // Route parity: `POST /api/orcid/backfill`.
     /// Fill missing ORCIDs onto DOI-linked authors via CrossRef then OpenAlex
     Backfill {
         /// Random ORCID-less authors to check this pass (1 to 100)

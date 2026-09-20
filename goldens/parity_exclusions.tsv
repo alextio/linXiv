@@ -1,0 +1,90 @@
+# Deliberate parity gaps: surface<TAB>name<TAB>missing-on<TAB>reason.
+# Anything not listed must exist on all three surfaces (route, cli, mcp), linked by
+# `METHOD /api/path` citations in CLI variant docs and MCP tool docs. Checked by
+# crates/cli/tests/parity.rs, which regenerates goldens/parity.tsv with PARITY_REGEN=1.
+route	POST /api/papers/saved	cli,mcp	GUI search-page saved indicator
+route	GET /api/papers/{}/full-text-diff	cli,mcp	GUI version-diff view
+route	GET /api/papers/sfk/{}	cli,mcp	GUI sfk lookup; CLI/MCP address by source_id
+cli	paper restore	route	route restores via /api/trash
+mcp	restore_paper	route	route restores via /api/trash
+cli	paper hard-delete	route	route hard-deletes via /api/trash
+mcp	hard_delete_paper	route	route hard-deletes via /api/trash
+mcp	paper_ref	route	MCP citation handles; no GUI/CLI use yet
+mcp	resolve_refs	route	MCP citation handles; no GUI/CLI use yet
+cli	pdf storage	route	GUI computes from list_pdfs
+mcp	get_pdf_storage	route	GUI computes from list_pdfs
+route	PUT /api/papers/{}/pdf	cli,mcp	GUI attach-by-bytes
+route	POST /api/papers/import/recognize	cli,mcp	GUI drop-zone sniffing
+cli	zotero import	route	GUI imports Zotero via bibtex
+mcp	import_zotero	route	GUI imports Zotero via bibtex
+route	POST /api/openalex/search	cli,mcp	CLI/MCP: search --source openalex
+route	POST /api/openalex/save	cli,mcp	CLI/MCP: fetch --source openalex
+route	POST /api/crossref/search	cli,mcp	CLI/MCP: search --source crossref
+cli	project restore	route	route restores via /api/trash
+mcp	restore_project	route	route restores via /api/trash
+cli	project hard-delete	route	route hard-deletes via /api/trash
+mcp	hard_delete_project	route	route hard-deletes via /api/trash
+cli	project export-zotero	route	GUI has no Zotero export
+mcp	export_project_zotero	route	GUI has no Zotero export
+route	POST /api/projects/import/preview	cli,mcp	GUI two-phase import
+route	GET /api/tags/{}	cli,mcp	GUI tag detail page
+cli	tag list	route	GUI reads tags off get_paper
+mcp	get_paper_tags	route	GUI reads tags off get_paper
+cli	tag add-project	route	GUI uses PATCH /api/projects/{}
+mcp	add_tags_to_project	route	GUI uses PATCH /api/projects/{}
+cli	tag remove-project	route	GUI uses PATCH /api/projects/{}
+mcp	remove_tags_from_project	route	GUI uses PATCH /api/projects/{}
+cli	tag list-project	route	GUI reads tags off get_project
+mcp	get_project_tags	route	GUI reads tags off get_project
+cli	annotation get	route	GUI reads from list
+mcp	get_annotation	route	GUI reads from list
+route	POST /api/authors/{}/papers/{}	cli,mcp	GUI manual link
+route	DELETE /api/authors/{}/papers/{}	cli,mcp	GUI manual unlink
+route	POST /api/trash/.../restore	mcp	MCP: restore_paper
+route	PATCH /api/env	cli,mcp	GUI env overrides
+route	POST /api/storage/import	mcp	MCP: use restore_database
+route	GET /api/storage/pre-migration-backups	cli,mcp	GUI migration recovery
+route	GET /api/graph	cli,mcp	GUI graph view
+route	GET /api/search/history	cli,mcp	GUI search box state
+route	GET /api/search/state	cli,mcp	GUI search box state
+route	POST /api/search/state	cli,mcp	GUI search box state
+route	GET /api/reading-status	cli,mcp	GUI reading tracker
+route	PUT /api/reading-status/{}	cli,mcp	GUI reading tracker
+route	GET /api/editor/projects	cli,mcp	TeXbrain editor, GUI-only
+route	POST /api/editor/projects	cli,mcp	TeXbrain editor, GUI-only
+route	GET /api/editor/projects/{}/doc	cli,mcp	TeXbrain editor, GUI-only
+route	POST /api/editor/vault/{}/fs	cli,mcp	TeXbrain editor, GUI-only
+route	GET /api/history/actor	cli,mcp	journal history, GUI-only
+route	GET /api/history/library	cli,mcp	journal history, GUI-only
+route	GET /api/history/library/diff	cli,mcp	journal history, GUI-only
+route	POST /api/history/library/restore	cli,mcp	journal history, GUI-only
+route	GET /api/history/project/{}	cli,mcp	journal history, GUI-only
+route	GET /api/history/project/{}/diff	cli,mcp	journal history, GUI-only
+route	POST /api/history/project/{}/restore	cli,mcp	journal history, GUI-only
+route	GET /api/history/share/{}	cli,mcp	journal history, GUI-only
+route	GET /api/history/share/{}/diff	cli,mcp	journal history, GUI-only
+route	POST /api/share/project/{}/ticket	cli,mcp	p2p share needs a live node
+route	POST /api/share/join	cli,mcp	p2p share needs a live node
+route	POST /api/share/project/{}/publish	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/unpublish	cli,mcp	p2p share needs a live node
+route	POST /api/share/received/{}/import	cli,mcp	p2p share needs a live node
+route	POST /api/share/received/{}/leave	cli,mcp	p2p share needs a live node
+route	POST /api/share/received/{}/unlink	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/sync	cli,mcp	p2p share needs a live node
+route	GET /api/share/member_code	cli,mcp	p2p share needs a live node
+route	POST /api/share/relay/reconnect	cli,mcp	p2p share needs a live node
+route	GET /api/share/received	cli,mcp	p2p share needs a live node
+route	POST /api/share/project/{}/publish_secure	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/invite	cli,mcp	p2p share needs a live node
+route	GET /api/share/{}/members	cli,mcp	p2p share needs a live node
+route	GET /api/share/{}/presence	cli,mcp	p2p share needs a live node
+route	POST /api/share/presence	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/member/{}/role	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/revoke	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/transfer_admin	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/member/{}/remove	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/rekey	cli,mcp	p2p share needs a live node
+route	POST /api/share/{}/pdf	cli,mcp	p2p share needs a live node
+route	GET /api/share/projects	cli,mcp	p2p share needs a live node
+route	GET /api/share/received/{}	cli,mcp	p2p share needs a live node
+route	GET /api/share/{}/settings	cli,mcp	p2p share needs a live node

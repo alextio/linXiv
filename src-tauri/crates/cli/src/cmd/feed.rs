@@ -12,8 +12,10 @@ use crate::output::output;
 
 #[derive(Subcommand)]
 pub enum FeedCmd {
+    // Route parity: `GET /api/feed`.
     /// Fetch a feed URL, merge it into the cache window, and print the filtered page
     Get { url: String },
+    // Route parity: `POST /api/feed/dismiss`.
     /// Hide one entry (this version) or block the whole paper
     Dismiss {
         arxiv_id: String,
@@ -33,8 +35,10 @@ pub enum FeedCmd {
 
 #[derive(Subcommand)]
 pub enum RulesCmd {
+    // Route parity: `GET /api/feed/rules`.
     /// List auto-filter rules
     List,
+    // Route parity: `POST /api/feed/rules`.
     /// Add an auto-filter rule
     Add {
         /// Entry field the keywords match against
@@ -47,6 +51,7 @@ pub enum RulesCmd {
         #[arg(long, value_enum, default_value_t = Action::Deny)]
         action: Action,
     },
+    // Route parity: `DELETE /api/feed/rules/{}`.
     /// Delete an auto-filter rule by id
     Delete { id: i64 },
 }

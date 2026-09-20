@@ -123,6 +123,7 @@ pub struct ImportPdfParams {
 
 #[tool_router(router = tools_notes_pdf_trash, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/notes`.
     #[tool(description = "Create a note attached to a paper, optionally scoped to a project.")]
     pub async fn create_note(
         &self,
@@ -153,6 +154,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/notes/{}`.
     #[tool(description = "Get a single note by its id.")]
     pub async fn get_note(
         &self,
@@ -164,6 +166,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/notes`.
     #[tool(description = "List notes, optionally filtered by paper or project.")]
     pub async fn list_notes(
         &self,
@@ -179,6 +182,7 @@ impl Server {
         })
     }
 
+    // Route parity: `PATCH /api/notes/{}`.
     #[tool(description = "Update a note's title and/or content.")]
     pub async fn update_note(
         &self,
@@ -201,6 +205,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/notes/{}`.
     #[tool(description = "Delete a note by its id.")]
     pub async fn delete_note(
         &self,
@@ -216,6 +221,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/notes`.
     #[tool(description = "Retrieve notes attached to a paper.")]
     pub async fn get_notes_for_paper(
         &self,
@@ -229,6 +235,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/notes`.
     #[tool(description = "Retrieve all notes scoped to a project, across all its papers.")]
     pub async fn get_notes_for_project(
         &self,
@@ -247,6 +254,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/papers/{}/pdf-path`.
     #[tool(description = "Get the local filesystem path for a paper's PDF, if downloaded.")]
     pub async fn get_pdf_path(
         &self,
@@ -269,6 +277,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/papers/import/pdf-url`.
     #[tool(description = "Download a PDF for a paper and save it to the managed PDF directory.")]
     pub async fn download_pdf(
         &self,
@@ -300,6 +309,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/pdfs`.
     #[tool(
         description = "List every paper whose PDF is stored on disk, with file sizes, largest \
                        first (capped at 200)."
@@ -315,6 +325,7 @@ impl Server {
         json_ok(&svc_files::SavedPdfListing { pdfs })
     }
 
+    // Route parity: `DELETE /api/pdfs/{}`.
     #[tool(
         description = "Delete a paper's stored PDF files from disk — every version — keeping the \
                        paper record itself."
@@ -345,6 +356,7 @@ impl Server {
         }))
     }
 
+    // Route parity: `GET /api/trash`.
     #[tool(description = "List all soft-deleted papers and projects currently in the trash.")]
     pub async fn list_trash(&self) -> Result<String, ErrorData> {
         self.with_conn(|conn| {
@@ -353,6 +365,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/trash/...`.
     #[tool(
         description = "Permanently delete a trashed paper. Only works if the paper is in the trash."
     )]
@@ -373,6 +386,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/trash/projects/{}/restore`.
     #[tool(
         description = "Restore a project from the trash. Only works if the project is soft-deleted."
     )]
@@ -396,6 +410,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/trash/projects/{}`.
     #[tool(
         description = "Permanently delete a trashed project. Only works if the project is soft-deleted."
     )]
@@ -419,6 +434,7 @@ impl Server {
         })
     }
 
+    // Route parity: `POST /api/papers/import/pdf`.
     #[tool(description = "Import a local PDF file, extracting paper metadata from its contents.")]
     pub async fn import_pdf(
         &self,
