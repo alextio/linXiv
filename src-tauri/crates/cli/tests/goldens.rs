@@ -135,8 +135,8 @@ fn txt_goldens_match_the_command_tree() {
     let goldens = goldens_with_extension("txt");
     assert_eq!(
         goldens.len(),
-        19,
-        "expected 19 .txt goldens, found {} — corpus changed, update this test",
+        21,
+        "expected 21 .txt goldens, found {} — corpus changed, update this test",
         goldens.len()
     );
 

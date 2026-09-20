@@ -64,6 +64,35 @@ pub struct RefResolution {
     pub latest_version: Option<i64>,
 }
 
+/// `paper_ref` envelope: the handle for one stored version of a paper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperRefOut {
+    pub r#ref: String,
+    pub source_id: String,
+    pub source_fk: i64,
+    pub version: i64,
+}
+
+/// Handle for `source_id` at `version` (latest stored when `None`);
+/// `PaperNotFound` when the paper or that version is not stored.
+pub fn paper_ref(conn: &Connection, source_id: &str, version: Option<i64>) -> Result<PaperRefOut> {
+    let source_fk = crate::service::paper::resolve_source_fk(conn, source_id)?;
+    let sid = store::get_source_id(conn, source_fk)?
+        .ok_or_else(|| CoreError::PaperNotFound(source_id.to_string()))?;
+    let paper = store::get_paper(conn, &sid, version)?
+        .ok_or_else(|| CoreError::PaperNotFound(source_id.to_string()))?;
+    Ok(PaperRefOut {
+        r#ref: PaperRef {
+            source_fk,
+            version: paper.version,
+        }
+        .to_string(),
+        source_id: sid,
+        source_fk,
+        version: paper.version,
+    })
+}
+
 /// Resolve each ref against the active library, one row per input in order.
 /// Trashed papers resolve as `unknown`: nothing a client can open until the
 /// paper is restored, and restoring makes the same ref `current` again.
@@ -146,6 +175,13 @@ mod tests {
         let a = svc_paper::resolve_source_fk(&conn, "arxiv:A").unwrap();
         let b = svc_paper::resolve_source_fk(&conn, "arxiv:B").unwrap();
         svc_paper::delete(&mut conn, &svc_paper::PaperRef::source("arxiv:B".into())).unwrap();
+
+        let latest = paper_ref(&conn, "arxiv:A", None).unwrap();
+        assert_eq!((latest.source_fk, latest.version), (a, 2));
+        assert_eq!(latest.r#ref, format!("linxiv://paper/{a}?v=2"));
+        assert_eq!(paper_ref(&conn, "arxiv:A", Some(1)).unwrap().version, 1);
+        assert!(paper_ref(&conn, "arxiv:A", Some(9)).is_err());
+        assert!(paper_ref(&conn, "arxiv:B", None).is_err(), "trashed");
 
         let refs: Vec<String> = vec![
             PaperRef {
