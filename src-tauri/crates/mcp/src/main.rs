@@ -1,5 +1,5 @@
 //! linXiv MCP server — the library tools over stdio JSON-RPC. The tools are
-//! split across six cluster modules, each a `#[tool_router]` impl merged here.
+//! split across nine cluster modules, each a `#[tool_router]` impl merged here.
 
 mod annotations;
 mod feed;
@@ -73,8 +73,8 @@ impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "linXiv: search, fetch, organize, and annotate academic papers. Cite papers as \
-                 linxiv://paper/{source_fk}?v={version} using the source_fk and version fields \
-                 returned by the paper tools, and verify citations with resolve_refs.",
+                 linxiv://paper/{source_fk}?v={version}: get the handle from paper_ref and \
+                 verify citations with resolve_refs.",
         )
     }
 }
