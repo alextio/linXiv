@@ -231,6 +231,7 @@ impl Server {
         json_ok(&json!({ "path": out.to_string_lossy(), "project_id": project_id }))
     }
 
+    // Route parity: `GET /api/projects/{}/export/zotero`.
     #[tool(description = "Export a project's papers as CSL JSON for Zotero's file importer.")]
     pub async fn export_project_zotero(
         &self,

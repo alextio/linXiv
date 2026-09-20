@@ -24,8 +24,6 @@ cli	project restore	route	route restores via /api/trash
 mcp	restore_project	route	route restores via /api/trash
 cli	project hard-delete	route	route hard-deletes via /api/trash
 mcp	hard_delete_project	route	route hard-deletes via /api/trash
-cli	project export-zotero	route	GUI has no Zotero export
-mcp	export_project_zotero	route	GUI has no Zotero export
 route	POST /api/projects/import/preview	cli,mcp	GUI two-phase import
 route	GET /api/tags/{}	cli,mcp	GUI tag detail page
 cli	tag list	route	GUI reads tags off get_paper
