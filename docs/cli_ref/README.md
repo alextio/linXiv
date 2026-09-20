@@ -114,6 +114,11 @@ linxiv bibtex import ./refs.bib --project-id 1   # link every imported paper to 
 linxiv zotero import ./library.json --project-id 1
 linxiv project export-zotero 1 ./diffusion.json
 
+# Versions (arXiv new-version monitor)
+linxiv versions check --limit 20                 # poll the 20 stalest saved arXiv papers once
+linxiv versions new                              # papers with an unacknowledged new version
+linxiv versions ack 2204.12985                   # clear the flag on one paper
+
 # Trash (soft-deleted items)
 linxiv trash list
 linxiv trash restore 2204.12985

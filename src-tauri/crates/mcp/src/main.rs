@@ -1,5 +1,5 @@
 //! linXiv MCP server — the library tools over stdio JSON-RPC. The tools are
-//! split across five cluster modules, each a `#[tool_router]` impl merged here.
+//! split across six cluster modules, each a `#[tool_router]` impl merged here.
 
 mod annotations;
 mod io_authors_misc;
@@ -7,6 +7,7 @@ mod notes_pdf_trash;
 mod papers;
 mod projects_tags;
 mod util;
+mod versions;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +45,8 @@ impl Server {
                 + Self::tools_projects_tags()
                 + Self::tools_notes_pdf_trash()
                 + Self::tools_annotations()
-                + Self::tools_io_authors_misc(),
+                + Self::tools_io_authors_misc()
+                + Self::tools_versions(),
         })
     }
 
