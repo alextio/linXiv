@@ -18,7 +18,7 @@ export const DEFAULT_SIDEBAR_PAGES: SidebarPages = {
   reading: true,
 };
 
-export type ExportFormatKey = "lxproj" | "bibtex" | "obsidian";
+export type ExportFormatKey = "lxproj" | "bibtex" | "obsidian" | "zotero";
 
 export type ExportMethods = Record<ExportFormatKey, boolean>;
 
@@ -26,6 +26,7 @@ export const DEFAULT_EXPORT_METHODS: ExportMethods = {
   lxproj: true,
   bibtex: true,
   obsidian: true,
+  zotero: true,
 };
 
 /** The persisted slice of the ui store (no actions). */

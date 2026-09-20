@@ -47,6 +47,7 @@ GET /api/projects	project list	list_projects
 GET /api/projects/{}	project get	get_project
 GET /api/projects/{}/export/bibtex	project export-bibtex	export_project_bibtex
 GET /api/projects/{}/export/obsidian	project export-obsidian	export_project_obsidian
+GET /api/projects/{}/export/zotero	project export-zotero	export_project_zotero
 GET /api/reading-status	-	-
 GET /api/search/history	-	-
 GET /api/search/state	-	-
@@ -136,7 +137,6 @@ PUT /api/reading-status/{}	-	-
 -	paper hard-delete	-
 -	paper restore	-
 -	pdf storage	-
--	project export-zotero	-
 -	project hard-delete	-
 -	project restore	-
 -	tag add-project	-
@@ -145,7 +145,6 @@ PUT /api/reading-status/{}	-	-
 -	tag remove-project	-
 -	zotero import	-
 -	-	add_tags_to_project
--	-	export_project_zotero
 -	-	get_annotation
 -	-	get_paper_tags
 -	-	get_pdf_storage

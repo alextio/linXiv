@@ -133,6 +133,21 @@ export async function exportBibtex(projectId: number, projectName?: string): Pro
   triggerDownload(blob, slug);
 }
 
+export async function exportZotero(projectId: number, projectName?: string): Promise<void> {
+  const slug = slugify(projectName, projectId, ".json");
+  if (isTauri) {
+    const destPath = await save({
+      defaultPath: slug,
+      filters: [{ name: "CSL JSON", extensions: ["json"] }],
+    });
+    if (!destPath) throw pickerCancelled();
+    await libraryFetch<OkReceipt>(`/api/projects/${projectId}/export/zotero?dest_path=${encodeURIComponent(destPath)}`);
+    return;
+  }
+  const { blob } = await fetchBlob(`${BASE_URL}/api/projects/${projectId}/export/zotero`);
+  triggerDownload(blob, slug);
+}
+
 export async function exportObsidian(projectId: number, projectName?: string): Promise<void> {
   const slug = slugify(projectName, projectId, ".md");
   if (isTauri) {

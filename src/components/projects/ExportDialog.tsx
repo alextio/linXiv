@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Download } from "lucide-react";
 import { useUiStore, type ExportFormatKey } from "../../stores/ui";
-import { exportProject, exportBibtex, exportObsidian } from "../../api/exportImport";
+import { exportProject, exportBibtex, exportObsidian, exportZotero } from "../../api/exportImport";
 import { Button } from "../ui/button";
 import { Dialog } from "../ui/dialog";
 import { Spinner } from "../ui/spinner";
@@ -40,6 +40,8 @@ export function ExportDialog({
         await exportBibtex(projectId, projectName);
       } else if (format === "obsidian") {
         await exportObsidian(projectId, projectName);
+      } else if (format === "zotero") {
+        await exportZotero(projectId, projectName);
       } else {
         format satisfies never;
       }
@@ -68,9 +70,9 @@ export function ExportDialog({
               />
               Include PDFs in .lxproj archive
             </label>
-            {(exportMethods.bibtex || exportMethods.obsidian) && (
+            {(exportMethods.bibtex || exportMethods.obsidian || exportMethods.zotero) && (
               <p className="text-xs" style={{ color: "var(--color-muted)" }}>
-                BibTeX and Obsidian exports include paper metadata only.
+                BibTeX, Obsidian and Zotero exports include paper metadata only.
               </p>
             )}
           </div>
@@ -96,6 +98,11 @@ export function ExportDialog({
           {exportMethods.obsidian && (
             <Button variant="muted" onClick={() => handleExport("obsidian")} disabled={!!busy}>
               {busy === "obsidian" ? <Spinner size={14} /> : <><Download size={13} className="mr-1" />Obsidian</>}
+            </Button>
+          )}
+          {exportMethods.zotero && (
+            <Button variant="muted" onClick={() => handleExport("zotero")} disabled={!!busy}>
+              {busy === "zotero" ? <Spinner size={14} /> : <><Download size={13} className="mr-1" />Zotero</>}
             </Button>
           )}
           {exportMethods.lxproj && (

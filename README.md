@@ -103,7 +103,7 @@ git submodule update --init --recursive
 - **Tags** — Tag papers and projects; list and manage the full tag set.
 - **PDF management** — Download PDFs, import local PDFs (with first-page text and metadata extraction via native PDFium), and track total storage usage.
 - **Full-text search** — Pull an arXiv paper's TeX source into a local SQLite FTS5 index, from the paper page, the CLI (`linxiv paper fetch-source` / `index-sources`), or the `fetch_full_text` MCP tool; library search then matches the paper's body, not just its metadata.
-- **Import / export** — Import and export projects as `.lxproj` archives, import BibTeX (`.bib`), and export projects to BibTeX or Obsidian-flavored Markdown. Zotero CSL JSON is CLI- and MCP-only — `linxiv zotero import` / `linxiv project export-zotero`, or the `import_zotero` / `export_project_zotero` MCP tools — with no desktop-app button.
+- **Import / export** — Import and export projects as `.lxproj` archives, import BibTeX (`.bib`), and export projects to BibTeX, Obsidian-flavored Markdown, or Zotero CSL JSON. Zotero CSL JSON import is CLI- and MCP-only (`linxiv zotero import` / the `import_zotero` MCP tool).
 - **Interactive graph** — Force-directed network of papers, authors and tags (Cytoscape rendering a d3-force layout), with real-time force controls and filter panels.
 - **TeX rendering** — MathJax renders LaTeX math in titles and abstracts, bundled locally for full offline use.
 - **CLI & MCP server** — A headless `linxiv` CLI and an `linxiv-mcp` MCP server expose the same library over the terminal and to LLM clients such as Claude.
