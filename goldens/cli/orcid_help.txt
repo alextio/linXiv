@@ -1,0 +1,9 @@
+usage: linxiv orcid [-h] {backfill} ...
+
+positional arguments:
+  {backfill}
+    backfill    Fill missing ORCIDs onto DOI-linked authors via CrossRef then
+                OpenAlex
+
+options:
+  -h, --help    show this help message and exit
