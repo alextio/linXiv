@@ -1,14 +1,79 @@
 //! orcid_backfill — fills ORCIDs onto existing authors via paper DOIs.
-//! Orchestrated by the caller (route), same shape as `version_monitor`.
+//! Adapters: `validate_limit` → `try_begin_backfill` → candidates (own conn)
+//! → `fetch_orcid_records().await` → `apply_results` (own conn).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::models::PaperMetadata;
+use crate::service::source::orcid_records_for_doi;
 use crate::storage::queries::author::fill_orcid_if_null;
 pub use crate::storage::queries::author::{orcid_backfill_candidates, OrcidCandidate};
+
+pub const DEFAULT_LIMIT: i64 = 20;
+/// Worded once so every surface reports the single-flight refusal identically.
+pub const BUSY_MSG: &str = "an ORCID backfill is already in progress";
+
+/// Pause between distinct DOIs so a pass never bursts CrossRef/OpenAlex,
+/// neither of which is rate-limited by `sources::http` the way arXiv is.
+const INTER_DOI_DELAY: Duration = Duration::from_millis(200);
+
+/// `limit` must be 1..=100; `Validation` (422) otherwise.
+pub fn validate_limit(limit: i64) -> Result<()> {
+    if (1..=100).contains(&limit) {
+        Ok(())
+    } else {
+        Err(CoreError::Validation(
+            "limit must be between 1 and 100".into(),
+        ))
+    }
+}
+
+// ponytail: process-global single flight; a per-Db flag if one process ever
+// serves several libraries.
+static BACKFILL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Held for the duration of one pass; releases the single-flight flag on drop.
+pub struct BackfillGuard(());
+impl Drop for BackfillGuard {
+    fn drop(&mut self) {
+        BACKFILL_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Claim the single-flight slot; `None` while another pass holds it.
+pub fn try_begin_backfill() -> Option<BackfillGuard> {
+    (!BACKFILL_IN_PROGRESS.swap(true, Ordering::SeqCst)).then_some(BackfillGuard(()))
+}
+
+/// Fetch CrossRef then OpenAlex records per distinct DOI, paced by
+/// `INTER_DOI_DELAY`. Returns records keyed by DOI plus the errored-DOI count.
+pub async fn fetch_orcid_records(
+    candidates: &[OrcidCandidate],
+) -> (HashMap<String, Vec<PaperMetadata>>, i64) {
+    let mut dois: Vec<&str> = candidates.iter().map(|c| c.doi.as_str()).collect();
+    dois.sort_unstable();
+    dois.dedup();
+
+    let mut fetched = HashMap::new();
+    let mut errored = 0i64;
+    let mut dois = dois.into_iter().peekable();
+    while let Some(doi) = dois.next() {
+        let (records, doi_errored) = orcid_records_for_doi(doi).await;
+        if doi_errored {
+            errored += 1;
+        }
+        fetched.insert(doi.to_string(), records);
+        if dois.peek().is_some() {
+            tokio::time::sleep(INTER_DOI_DELAY).await;
+        }
+    }
+    (fetched, errored)
+}
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct OrcidBackfillResponse {
@@ -77,6 +142,29 @@ mod tests {
             source: Some("crossref".into()),
             author_orcids: orcids.map(|v| v.into_iter().map(|o| o.map(String::from)).collect()),
         }
+    }
+
+    #[test]
+    fn validate_limit_accepts_only_1_to_100() {
+        assert!(validate_limit(1).is_ok() && validate_limit(100).is_ok());
+        for bad in [0, 101, -3] {
+            assert!(matches!(validate_limit(bad), Err(CoreError::Validation(_))));
+        }
+    }
+
+    #[test]
+    fn guard_is_single_flight_and_releases_on_drop() {
+        let first = try_begin_backfill().expect("slot free");
+        assert!(try_begin_backfill().is_none());
+        drop(first);
+        assert!(try_begin_backfill().is_some());
+    }
+
+    #[tokio::test]
+    async fn fetch_with_no_candidates_is_empty_and_touches_no_network() {
+        let (fetched, errored) = fetch_orcid_records(&[]).await;
+        assert!(fetched.is_empty());
+        assert_eq!(errored, 0);
     }
 
     #[test]

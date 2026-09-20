@@ -1,31 +1,14 @@
-//! `/api/orcid` routes: on-demand backfill pass
-//! (candidates → single-flight guard → network → apply).
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+//! `/api/orcid` routes: on-demand backfill pass, orchestrated by
+//! `service::orcid_backfill` (guard → candidates → network → apply).
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use linxiv_core::models::PaperMetadata;
+use linxiv_core::service::orcid_backfill as svc;
 use linxiv_core::service::orcid_backfill::OrcidBackfillResponse;
-use linxiv_core::service::{orcid_backfill as svc, source as svc_source};
-
-/// Pause between distinct DOIs so a backfill pass never bursts CrossRef/
-/// OpenAlex — neither is rate-limited by `sources::http` the way arXiv is.
-const INTER_DOI_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
 use crate::route::{to_value, ApiError, ReqCtx};
 use crate::state::AppState;
-
-static BACKFILL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-
-struct BackfillGuard;
-impl Drop for BackfillGuard {
-    fn drop(&mut self) {
-        BACKFILL_IN_PROGRESS.store(false, Ordering::SeqCst);
-    }
-}
 
 /// Returns `Some(result)` if this group owns `(method, path)`, else `None`.
 pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
@@ -36,7 +19,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
 }
 
 fn default_limit() -> i64 {
-    20
+    svc::DEFAULT_LIMIT
 }
 
 #[derive(Deserialize, ts_rs::TS)]
@@ -53,45 +36,13 @@ async fn backfill(state: &AppState, ctx: &ReqCtx<'_>) -> Result<Value, ApiError>
         Some(_) => ctx.parse_body::<OrcidBackfillBody>()?.limit,
         None => default_limit(),
     };
-    if !(1..=100).contains(&limit) {
-        return Err(ApiError::new(422, "limit must be between 1 and 100"));
-    }
-
-    if BACKFILL_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        return Err(ApiError::new(
-            409,
-            "an ORCID backfill is already in progress",
-        ));
-    }
-    let _guard = BackfillGuard;
+    svc::validate_limit(limit)?;
+    let Some(_guard) = svc::try_begin_backfill() else {
+        return Err(ApiError::new(409, svc::BUSY_MSG));
+    };
 
     let candidates = state.with_conn(|conn| svc::orcid_backfill_candidates(conn, limit))?;
-    if candidates.is_empty() {
-        return to_value(&OrcidBackfillResponse {
-            checked: 0,
-            updated: vec![],
-            errored: 0,
-        });
-    }
-
-    let mut dois: Vec<&str> = candidates.iter().map(|c| c.doi.as_str()).collect();
-    dois.sort_unstable();
-    dois.dedup();
-
-    let mut fetched: HashMap<String, Vec<PaperMetadata>> = HashMap::new();
-    let mut errored = 0i64;
-    let mut dois = dois.into_iter().peekable();
-    while let Some(doi) = dois.next() {
-        let (records, doi_errored) = svc_source::orcid_records_for_doi(doi).await;
-        if doi_errored {
-            errored += 1;
-        }
-        fetched.insert(doi.to_string(), records);
-        if dois.peek().is_some() {
-            tokio::time::sleep(INTER_DOI_DELAY).await;
-        }
-    }
-
+    let (fetched, errored) = svc::fetch_orcid_records(&candidates).await;
     let updated = state.with_conn(|conn| svc::apply_results(conn, &candidates, &fetched))?;
     to_value(&OrcidBackfillResponse {
         checked: candidates.len(),
@@ -107,7 +58,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::Mutex;
 
-    // Serialize access to BACKFILL_IN_PROGRESS across all tests to prevent
+    // Serialize access to core's single-flight flag across all tests to prevent
     // races (flag must reset on Drop even if a test panics).
     //
     // tokio's Mutex, not std's: this guard is held across `.await`, and std's
@@ -143,10 +94,9 @@ mod tests {
     #[tokio::test]
     async fn backfill_in_progress_returns_409() {
         let _guard = TEST_MUTEX.lock().await;
-        BACKFILL_IN_PROGRESS.store(true, Ordering::SeqCst);
-        // Resets the flag on drop, including on assertion panic, so a failure
-        // here can't poison the other tests sharing TEST_MUTEX.
-        let _reset = BackfillGuard;
+        // Holding core's guard releases the flag on drop, including on
+        // assertion panic, so a failure here can't poison sibling tests.
+        let _busy = svc::try_begin_backfill().expect("slot free");
 
         let err = req(&state(), "POST", "/api/orcid/backfill", None)
             .await
