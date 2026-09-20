@@ -98,6 +98,13 @@ linxiv pdf storage
 linxiv doi resolve 10.48550/arXiv.1706.03762     # resolve to metadata, no save
 linxiv doi save 10.48550/arXiv.1706.03762        # resolve and save to library
 
+# Home feed (arXiv RSS)
+linxiv feed get https://rss.arxiv.org/rss/cs.LG        # fetch, merge into the cache window, print the filtered page
+linxiv feed dismiss 2204.12985 --version 1             # hide this version; --permanent blocks the whole paper
+linxiv feed rules list
+linxiv feed rules add --field TITLE --keywords "survey,tutorial"   # --field TITLE|SUMMARY|AUTHOR, --action DENY (default)|ALLOW
+linxiv feed rules delete 3
+
 # Authors
 linxiv author list
 linxiv author get 12

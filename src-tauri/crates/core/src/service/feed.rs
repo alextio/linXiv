@@ -2,8 +2,12 @@
 //! fetch (`fetch`), sync cache apply (`apply_fetch`), the filtered read model
 //! (`read_page`), and the dismissal/rule mutations. Callers sequence
 //! fetch → apply → read; the split exists so no DB lock is held across the await.
+//! The per-URL fetch throttle lives here too, so every long-lived surface shares it.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::NaiveDateTime;
 use rusqlite::Connection;
@@ -15,6 +19,44 @@ use crate::storage::queries::paper;
 use crate::storage::queries::rss;
 
 pub use crate::storage::queries::rss::{FilterAction, FilterField, FilterRule};
+
+/// Minimum gap between upstream fetches of the same URL.
+const CACHE_TTL: Duration = Duration::from_secs(300);
+
+// Throttle state: last-fetch time + channel title per URL (title isn't stored
+// in the DB window, so a throttled request still needs it from here).
+static LAST_FETCH: LazyLock<Mutex<HashMap<String, (Instant, String)>>> =
+    LazyLock::new(Default::default);
+
+/// Throttle probe: `(fetch is due, last fetched title)` for `url`. Never-fetched
+/// URLs are due with an empty title.
+pub fn throttle_state(url: &str) -> (bool, String) {
+    let last = LAST_FETCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(url)
+        .cloned();
+    match last {
+        Some((at, title)) => (at.elapsed() >= CACHE_TTL, title),
+        None => (true, String::new()),
+    }
+}
+
+/// Record a successful fetch of `url`; callers skip this on failure so the
+/// next request retries instead of waiting out the TTL.
+pub fn record_fetched(url: &str, title: &str) {
+    LAST_FETCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(url.to_string(), (Instant::now(), title.to_string()));
+}
+
+/// Retention window from user settings; unreadable settings fall back to the default.
+pub fn retention_days() -> i64 {
+    crate::config::UserSettings::load()
+        .map(|s| s.rss_cache_retention_days())
+        .unwrap_or(30)
+}
 
 /// A fetched feed reduced to what the cache window persists.
 pub struct FetchedFeed {
@@ -29,6 +71,25 @@ pub struct FeedPage {
     pub entries: Vec<Value>,
     pub saved_arxiv_ids: Vec<String>,
     pub window_was_empty: bool,
+}
+
+impl FeedPage {
+    /// The wire envelope. A failed fetch only surfaces when there is no cached
+    /// window to serve instead.
+    pub fn into_response<E>(
+        self,
+        title: String,
+        fetch_err: Option<E>,
+    ) -> std::result::Result<FeedResponse, E> {
+        match fetch_err {
+            Some(e) if self.window_was_empty => Err(e),
+            _ => Ok(FeedResponse {
+                title,
+                entries: self.entries,
+                saved_arxiv_ids: self.saved_arxiv_ids,
+            }),
+        }
+    }
 }
 
 /// `GET /api/feed` envelope; `entries` are untyped cached blobs, so the TS type stays hand-written.
@@ -382,6 +443,29 @@ mod tests {
         let page = read_page(&mut c, url, 30).unwrap();
         assert_eq!(page.entries.len(), 4);
         assert_eq!(page.saved_arxiv_ids, ["1111.00001", "1111.00001"]);
+    }
+
+    /// A never-seen URL is due; recording a fetch makes it not due and keeps the title.
+    #[test]
+    fn throttle_records_title_and_blocks_within_ttl() {
+        let url = "https://example.com/throttle-test";
+        assert_eq!(throttle_state(url), (true, String::new()));
+        record_fetched(url, "Chan");
+        assert_eq!(throttle_state(url), (false, "Chan".into()));
+    }
+
+    /// The fetch error surfaces only when the DB window was empty.
+    #[test]
+    fn into_response_surfaces_fetch_error_only_on_empty_window() {
+        let page = |empty: bool| FeedPage {
+            entries: vec![],
+            saved_arxiv_ids: vec![],
+            window_was_empty: empty,
+        };
+        assert!(page(true).into_response("t".into(), Some("boom")).is_err());
+        let ok = page(false).into_response("t".into(), Some("boom")).unwrap();
+        assert_eq!(ok.title, "t");
+        assert!(page(true).into_response("t".into(), None::<()>).is_ok());
     }
 
     #[test]

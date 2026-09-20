@@ -5,6 +5,7 @@ pub mod annotation;
 pub mod author;
 pub mod bibtex;
 pub mod doi;
+pub mod feed;
 pub mod library;
 pub mod misc;
 pub mod note;
