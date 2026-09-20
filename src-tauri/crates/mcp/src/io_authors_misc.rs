@@ -165,6 +165,7 @@ pub struct UpdateSettingParams {
 
 #[tool_router(router = tools_io_authors_misc, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/projects/{}/export`.
     #[tool(description = "Export a project to a .lxproj archive file.")]
     pub async fn export_project(
         &self,
@@ -186,6 +187,7 @@ impl Server {
         json_ok(&json!({ "path": path, "project_id": project_id }))
     }
 
+    // Route parity: `POST /api/projects/import/commit`.
     #[tool(description = "Import a project from a .lxproj archive file.")]
     pub async fn import_project(
         &self,
@@ -213,6 +215,7 @@ impl Server {
         json_ok(&svc_ei::ImportedProject { project_id: fk })
     }
 
+    // Route parity: `GET /api/projects/{}/export/bibtex`.
     #[tool(description = "Export a project's papers to a BibTeX (.bib) file.")]
     pub async fn export_project_bibtex(
         &self,
@@ -243,6 +246,7 @@ impl Server {
         json_ok(&json!({ "path": out.to_string_lossy(), "project_id": project_id }))
     }
 
+    // Route parity: `GET /api/projects/{}/export/obsidian`.
     #[tool(description = "Export a project's papers as Obsidian-style markdown notes.")]
     pub async fn export_project_obsidian(
         &self,
@@ -258,6 +262,7 @@ impl Server {
         json_ok(&json!({ "path": out.to_string_lossy(), "project_id": project_id }))
     }
 
+    // Route parity: `POST /api/doi/resolve`.
     #[tool(description = "Resolve a DOI to paper metadata without saving it to the library.")]
     pub async fn resolve_doi(&self, params: Parameters<DoiParams>) -> Result<String, ErrorData> {
         let meta = svc_source::resolve_doi(&params.0.doi)
@@ -266,6 +271,7 @@ impl Server {
         json_ok(&meta)
     }
 
+    // Route parity: `POST /api/doi/save`.
     #[tool(description = "Resolve a DOI and save the resulting paper to the local library.")]
     pub async fn save_doi(&self, params: Parameters<DoiParams>) -> Result<String, ErrorData> {
         let meta = svc_source::resolve_doi(&params.0.doi)
@@ -280,6 +286,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/authors`.
     #[tool(
         description = "List authors that have at least one active paper in the library, with their paper counts."
     )]
@@ -290,6 +297,7 @@ impl Server {
         json_ok(&authors)
     }
 
+    // Route parity: `GET /api/authors/{}`.
     #[tool(description = "Get an author's details together with a preview of their papers.")]
     pub async fn get_author(
         &self,
@@ -306,6 +314,7 @@ impl Server {
         json_ok(&detail)
     }
 
+    // Route parity: `PATCH /api/authors/{}`.
     #[tool(description = "Update an author's fields. At least one field must be provided.")]
     pub async fn update_author(
         &self,
@@ -333,6 +342,7 @@ impl Server {
         json_ok(&json!({ "updated_author_id": author_id }))
     }
 
+    // Route parity: `DELETE /api/authors/{}`.
     #[tool(description = "Delete an author. Blocked if the author is still linked to any papers.")]
     pub async fn delete_author(
         &self,
@@ -353,6 +363,7 @@ impl Server {
         json_ok(&json!({ "deleted_author_id": author_id }))
     }
 
+    // Route parity: `POST /api/authors/{}/merge`.
     #[tool(
         description = "Merge duplicate authors into one canonical author, re-pointing all their papers."
     )]
@@ -385,6 +396,7 @@ impl Server {
         json_ok(&json!({ "canonical_id": canonical_id, "merged_ids": merged }))
     }
 
+    // Route parity: `GET /api/authors/{}/merge-candidates`.
     #[tool(
         description = "Find likely duplicate authors — other authors sharing this author's ORCID. \
                        Feed the result to merge_authors."
@@ -415,6 +427,7 @@ impl Server {
         json_ok(&json!({ "author_id": author_id, "candidates": candidates }))
     }
 
+    // Route parity: `POST /api/storage/backup`.
     #[tool(
         description = "Snapshot the database to a backup file. `dest` must be an absolute path \
                        that does not already exist."
@@ -434,6 +447,7 @@ impl Server {
         json_ok(&info)
     }
 
+    // Route parity: `POST /api/storage/restore`.
     #[tool(
         description = "Restore the database from a backup snapshot, replacing the current library. \
                        Refused while another process holds the database open."
@@ -457,6 +471,7 @@ impl Server {
         .await?
     }
 
+    // Route parity: `POST /api/papers/import/bibtex`.
     #[tool(description = "Bulk-import papers from a BibTeX (.bib) file into the library.")]
     pub async fn import_bibtex(
         &self,
@@ -487,6 +502,7 @@ impl Server {
         json_ok(&receipt)
     }
 
+    // Route parity: `GET /api/stats`.
     #[tool(
         description = "Report library statistics: paper, tag, category, and downloaded-PDF counts, \
                        plus the 10 newest papers."
@@ -498,6 +514,7 @@ impl Server {
         })
     }
 
+    // Route parity: `GET /api/categories`.
     #[tool(description = "List all distinct paper categories present in the library.")]
     pub async fn list_categories(&self) -> Result<String, ErrorData> {
         let categories = self
@@ -506,12 +523,14 @@ impl Server {
         json_ok(&categories)
     }
 
+    // Route parity: `GET /api/settings`.
     #[tool(description = "Get all current user settings.")]
     pub async fn get_settings(&self) -> Result<String, ErrorData> {
         let settings = UserSettings::load().map_err(map_core)?;
         json_ok(&Value::Object(settings.all()))
     }
 
+    // Route parity: `PATCH /api/settings`.
     #[tool(description = "Update a single user setting.")]
     pub async fn update_setting(
         &self,

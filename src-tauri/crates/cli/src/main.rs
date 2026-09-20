@@ -23,10 +23,13 @@ struct Cli {
 /// and `PdfMeta` are special-cased in `main` before `Ctx::open()` (no valid DB needed).
 #[derive(Subcommand)]
 enum Commands {
+    // Route parity: `POST /api/arxiv/search`.
     /// Search for papers
     Search(cmd::library::SearchArgs),
+    // Route parity: `POST /api/arxiv/fetch`.
     /// Fetch and save a paper by ID
     Fetch(cmd::library::FetchArgs),
+    // Route parity: `GET /api/papers`.
     /// List papers in the database
     List(cmd::library::ListArgs),
     /// Manage individual papers
@@ -99,8 +102,10 @@ enum Commands {
         #[command(subcommand)]
         cmd: cmd::versions::VersionsCmd,
     },
+    // Route parity: `GET /api/stats`.
     /// Library statistics
     Stats,
+    // Route parity: `GET /api/categories`.
     /// List all paper categories in the library
     Categories,
     /// View and update user settings
@@ -108,10 +113,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: cmd::misc::SettingsCmd,
     },
+    // Route parity: `POST /api/storage/backup`.
     /// Snapshot the database to a backup file
     Backup { dest: std::path::PathBuf },
+    // Route parity: `POST /api/storage/restore`.
     /// Restore the database from a backup snapshot
     Restore { src: std::path::PathBuf },
+    // Route parity: `POST /api/storage/import`.
     /// Merge a backup into the database (insert-only, nothing replaced)
     Import { src: std::path::PathBuf },
     /// Hidden pdfium worker: extraction runs in this child so a native libpdfium

@@ -10,6 +10,7 @@ use crate::output::{fail, output};
 
 #[derive(Subcommand)]
 pub enum BibtexCmd {
+    // Route parity: `POST /api/papers/import/bibtex`.
     /// Import papers from a .bib file
     Import {
         /// Path to .bib file

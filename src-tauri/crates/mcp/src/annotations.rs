@@ -55,6 +55,7 @@ pub struct UpdateAnnotationParams {
 
 #[tool_router(router = tools_annotations, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/annotations`.
     #[tool(
         description = "Create a PDF highlight annotation on a paper, optionally scoped to a project."
     )]
@@ -99,6 +100,7 @@ impl Server {
         self.with_conn(|conn| json_ok(&svc_ann::get(conn, p.annotation_id).map_err(core_err)?))
     }
 
+    // Route parity: `GET /api/annotations`.
     #[tool(description = "List PDF annotations, optionally filtered by paper or project.")]
     pub async fn list_annotations(
         &self,
@@ -115,6 +117,7 @@ impl Server {
         })
     }
 
+    // Route parity: `PATCH /api/annotations/{}`.
     #[tool(description = "Update a PDF annotation's written comment.")]
     pub async fn update_annotation(
         &self,
@@ -143,6 +146,7 @@ impl Server {
         })
     }
 
+    // Route parity: `DELETE /api/annotations/{}`.
     #[tool(description = "Delete a PDF annotation by its id.")]
     pub async fn delete_annotation(
         &self,

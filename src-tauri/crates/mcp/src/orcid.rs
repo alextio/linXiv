@@ -20,6 +20,7 @@ pub struct OrcidBackfillParams {
 
 #[tool_router(router = tools_orcid, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `POST /api/orcid/backfill`.
     #[tool(
         description = "Fill missing ORCIDs onto DOI-linked authors via CrossRef then OpenAlex. One paced pass; only one may run at a time."
     )]

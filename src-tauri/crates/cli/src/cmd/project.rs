@@ -34,14 +34,17 @@ impl OnConflict {
 
 #[derive(Subcommand)]
 pub enum ProjectCmd {
+    // Route parity: `GET /api/projects`.
     /// List projects
     List {
         /// active, archived, or deleted
         #[arg(long, value_parser = status_arg)]
         status: Option<Status>,
     },
+    // Route parity: `GET /api/projects/{}`.
     /// Get project details
     Get { project_id: i64 },
+    // Route parity: `POST /api/projects`.
     /// Create a project
     Create {
         name: String,
@@ -53,6 +56,7 @@ pub enum ProjectCmd {
         #[arg(long, num_args = 0..)]
         tags: Option<Vec<String>>,
     },
+    // Route parity: `PATCH /api/projects/{}`.
     /// Update project fields
     Update {
         project_id: i64,
@@ -70,24 +74,30 @@ pub enum ProjectCmd {
         #[arg(long, value_parser = status_arg)]
         status: Option<Status>,
     },
+    // Route parity: `DELETE /api/projects/{}`.
     /// Soft-delete a project
     Delete { project_id: i64 },
+    // Route parity: `PATCH /api/projects/{}`.
     /// Archive an active project
     Archive { project_id: i64 },
     /// Restore an archived or deleted project
     Restore { project_id: i64 },
     /// Permanently delete a project
     HardDelete { project_id: i64 },
+    // Route parity: `POST /api/projects/{}/papers`.
     /// Add a paper to a project
     AddPaper { project_id: i64, source_id: String },
+    // Route parity: `POST /api/projects/{}/papers/bulk`.
     /// Add several papers to a project in one call
     AddPapers {
         project_id: i64,
         #[arg(required = true, num_args = 1..)]
         source_ids: Vec<String>,
     },
+    // Route parity: `DELETE /api/projects/{}/papers/{}`.
     /// Remove a paper from a project
     RemovePaper { project_id: i64, source_id: String },
+    // Route parity: `POST /api/projects/{}/export`.
     /// Export a project to a .lxproj archive
     Export {
         project_id: i64,
@@ -97,6 +107,7 @@ pub enum ProjectCmd {
         #[arg(long)]
         pdfs: bool,
     },
+    // Route parity: `POST /api/projects/import/commit`.
     /// Import a project from a .lxproj archive
     Import {
         zip_path: String,
@@ -107,12 +118,14 @@ pub enum ProjectCmd {
         #[arg(long, value_enum, default_value_t = OnConflict::Merge)]
         on_conflict: OnConflict,
     },
+    // Route parity: `GET /api/projects/{}/export/bibtex`.
     /// Export project papers as BibTeX
     ExportBibtex {
         project_id: i64,
         /// Output file path (.bib added if no extension)
         dest: String,
     },
+    // Route parity: `GET /api/projects/{}/export/obsidian`.
     /// Export project papers as Obsidian markdown
     ExportObsidian {
         project_id: i64,

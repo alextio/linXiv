@@ -11,12 +11,14 @@ use crate::output::{as_source_id, fail, output};
 
 #[derive(Subcommand)]
 pub enum TagCmd {
+    // Route parity: `POST /api/papers/{}/tags`.
     /// Add tags to a paper
     Add {
         source_id: String,
         #[arg(required = true, num_args = 1..)]
         tags: Vec<String>,
     },
+    // Route parity: `DELETE /api/papers/{}/tags`.
     /// Remove tags from a paper
     Remove {
         source_id: String,
@@ -25,10 +27,13 @@ pub enum TagCmd {
     },
     /// List tags on a paper
     List { source_id: String },
+    // Route parity: `GET /api/tags`.
     /// List all tags in the database
     ListAll,
+    // Route parity: `POST /api/tags`.
     /// Create a tag
     Create { label: String },
+    // Route parity: `DELETE /api/tags/{}`.
     /// Delete a tag by ID
     Delete { tag_id: i64 },
     /// Add tags to a project

@@ -87,6 +87,7 @@ pub struct RuleIdParams {
 
 #[tool_router(router = tools_feed, vis = "pub(crate)")]
 impl Server {
+    // Route parity: `GET /api/feed`.
     #[tool(
         description = "Fetch an RSS/Atom feed URL (throttled to once per 5 minutes per URL), merge it into the cached window, and return the filtered page with which entries are already saved."
     )]
@@ -126,6 +127,7 @@ impl Server {
         })?)
     }
 
+    // Route parity: `POST /api/feed/dismiss`.
     #[tool(
         description = "Hide a feed entry by arXiv id and version, or block the whole paper with permanent."
     )]
@@ -138,6 +140,7 @@ impl Server {
         json_ok(&OkReceipt { ok: true })
     }
 
+    // Route parity: `GET /api/feed/rules`.
     #[tool(description = "List the feed auto-filter rules.")]
     pub async fn list_feed_rules(&self) -> Result<String, ErrorData> {
         let rules = self
@@ -146,6 +149,7 @@ impl Server {
         json_ok(&FeedRulesResponse { rules })
     }
 
+    // Route parity: `POST /api/feed/rules`.
     #[tool(
         description = "Create a feed auto-filter rule: keywords matched against a field, DENY (default) or ALLOW."
     )]
@@ -163,6 +167,7 @@ impl Server {
         json_ok(&CreatedFeedRule { rule_id })
     }
 
+    // Route parity: `DELETE /api/feed/rules/{}`.
     #[tool(description = "Delete a feed auto-filter rule by id.")]
     pub async fn delete_feed_rule(
         &self,
