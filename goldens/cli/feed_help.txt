@@ -1,0 +1,10 @@
+usage: linxiv feed [-h] {get,dismiss,rules} ...
+
+positional arguments:
+  {get,dismiss,rules}
+    get           Fetch a feed URL, merge it into the cache window, and print the filtered page
+    dismiss       Hide one entry (this version) or block the whole paper
+    rules         Manage auto-filter rules
+
+options:
+  -h, --help      show this help message and exit

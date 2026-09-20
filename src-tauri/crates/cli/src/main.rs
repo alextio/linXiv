@@ -69,6 +69,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: cmd::doi::DoiCmd,
     },
+    /// arXiv RSS home feed: fetch, dismiss entries, filter rules
+    Feed {
+        #[command(subcommand)]
+        cmd: cmd::feed::FeedCmd,
+    },
     /// Manage authors
     Author {
         #[command(subcommand)]
@@ -128,6 +133,7 @@ async fn dispatch(command: Commands, ctx: &mut Ctx) -> anyhow::Result<()> {
         Commands::Pdf { cmd } => cmd::pdf::run(cmd, ctx).await,
         Commands::Trash { cmd } => cmd::trash::run(cmd, ctx).await,
         Commands::Doi { cmd } => cmd::doi::run(cmd, ctx).await,
+        Commands::Feed { cmd } => cmd::feed::run(cmd, ctx).await,
         Commands::Author { cmd } => cmd::author::run(cmd, ctx).await,
         Commands::Orcid { cmd } => cmd::orcid::run(cmd, ctx).await,
         Commands::Bibtex { cmd } => cmd::bibtex::run(cmd, ctx).await,

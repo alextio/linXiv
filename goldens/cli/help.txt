@@ -1,10 +1,10 @@
 usage: linxiv [-h] [--version]
-              {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,orcid,bibtex,zotero,versions,stats,categories,settings,backup,restore,import} ...
+              {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,feed,author,orcid,bibtex,zotero,versions,stats,categories,settings,backup,restore,import} ...
 
 linXiv headless CLI
 
 positional arguments:
-  {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,author,orcid,bibtex,zotero,versions,stats,categories,settings,backup,restore,import}
+  {search,fetch,list,paper,tag,project,note,annotation,pdf,trash,doi,feed,author,orcid,bibtex,zotero,versions,stats,categories,settings,backup,restore,import}
     search              Search for papers
     fetch               Fetch and save a paper by ID
     list                List papers in the database
@@ -16,6 +16,7 @@ positional arguments:
     pdf                 Manage PDFs
     trash               Manage soft-deleted items
     doi                 Resolve and save papers by DOI
+    feed                arXiv RSS home feed: fetch, dismiss entries, filter rules
     author              Manage authors
     orcid               Backfill author ORCIDs from CrossRef and OpenAlex
     bibtex              BibTeX import
