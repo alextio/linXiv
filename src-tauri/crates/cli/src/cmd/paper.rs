@@ -42,8 +42,6 @@ pub enum PaperCmd {
     },
     /// Restore a soft-deleted paper
     Restore { source_id: String },
-    /// Permanently delete a paper
-    HardDelete { source_id: String },
     // Route parity: `GET /api/papers/search`.
     /// Full-text search within local library
     Search {
@@ -185,17 +183,6 @@ pub async fn run(cmd: PaperCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 restored: source_id,
                 pdf_path,
                 project_fks,
-            });
-        }
-
-        // Permanently remove an existing paper.
-        PaperCmd::HardDelete { source_id } => {
-            let source_id = as_source_id(&ctx.conn, &source_id);
-            svc_paper::resolve_source_fk(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
-            svc_paper::hard_delete(&mut ctx.conn, &paper(&source_id))?;
-            output(&linxiv_core::service::trash::HardDeletedPaper {
-                ok: true,
-                hard_deleted: source_id,
             });
         }
 
