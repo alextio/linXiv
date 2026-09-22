@@ -216,9 +216,13 @@ pub fn save_paper_metadata(
 }
 
 /// Persist many normalized records in one transaction (all-or-nothing).
-/// Returns the source_ids in input order.
+/// Returns the DISTINCT source_ids in first-seen order: storage echoes one id
+/// per input, but two inputs on one identity upsert onto one root.
 pub fn save_papers_metadata(conn: &mut Connection, metas: &[PaperMetadata]) -> Result<Vec<String>> {
-    store::save_papers_metadata(conn, metas)
+    let mut ids = store::save_papers_metadata(conn, metas)?;
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    Ok(ids)
 }
 
 /// UNION `tags` onto a paper's existing tags (dual JSON + relational storage).
@@ -903,6 +907,20 @@ mod tests {
             source: Some("arxiv".into()),
             author_orcids: None,
         }
+    }
+
+    /// Two entries on one identity save onto one root and yield ONE id, so
+    /// import receipts count roots, not input entries.
+    #[test]
+    fn save_papers_metadata_dedupes_ids_first_seen_order() {
+        let mut conn = db();
+        let metas = [
+            meta("arxiv:A", 1, "cs", &[]),
+            meta("arxiv:B", 1, "cs", &[]),
+            meta("arxiv:A", 1, "cs", &[]),
+        ];
+        let ids = save_papers_metadata(&mut conn, &metas).unwrap();
+        assert_eq!(ids, vec!["arxiv:A", "arxiv:B"]);
     }
 
     /// The fail-if-absent half of the pair: an unknown paper errors out rather
