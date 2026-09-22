@@ -847,22 +847,25 @@ impl ShareNode {
         Ok(doc_presence(&doc))
     }
 
-    // ponytail: every sync pass now commits (last_seen always changes), ~288
-    // sealed commits per member per day in the e2ee history, and viewer
-    // writes never land; upgrade: host-observed last_seen at beelay accept.
+    // ponytail: heartbeats commit at most once per HEARTBEAT_MIN (~288 sealed
+    // commits per member per day in the e2ee history), and viewer writes
+    // never land; upgrade: host-observed last_seen at beelay accept.
     /// Insert or update this device's presence entry: `last_seen` = now, and
     /// `reading` replaced when `Some`, kept when `None` (a heartbeat must not
-    /// clobber an opted-in reading indicator).
+    /// clobber an opted-in reading indicator). Skips the doc write when the
+    /// entry was touched within [`HEARTBEAT_MIN`] and `reading` is unchanged.
     pub async fn touch_presence(
         &self,
         share_id: &str,
         reading: Option<Option<String>>,
     ) -> Result<()> {
         let me = member_id_hex(&self.self_member_id()?);
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
         self.with_e2ee_doc(share_id, |doc| {
             let mut list = doc_presence(doc);
-            bump_presence(&mut list, me, now, reading);
+            if !bump_presence(&mut list, me, now, reading) {
+                return Ok(());
+            }
             write_prop(doc, PRESENCE_PROP, list)
         })
         .await
@@ -911,27 +914,39 @@ impl ShareNode {
     }
 }
 
+/// Minimum gap between two heartbeat commits for one member; a reading
+/// change always writes.
+#[cfg(feature = "sync-beelay")]
+const HEARTBEAT_MIN: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+
 /// [`ShareNode::touch_presence`]'s list edit, split out for its unit test.
+/// Returns whether the list changed (false: recent heartbeat, same reading).
 #[cfg(feature = "sync-beelay")]
 fn bump_presence(
     list: &mut Vec<crate::PresenceMeta>,
     me: String,
-    now: String,
+    now: chrono::DateTime<chrono::Utc>,
     reading: Option<Option<String>>,
-) {
+) -> bool {
     match list.iter_mut().find(|p| p.member_id == me) {
         Some(p) => {
-            p.last_seen = now;
+            let recent = chrono::DateTime::parse_from_rfc3339(&p.last_seen)
+                .is_ok_and(|t| now.signed_duration_since(t).abs() < HEARTBEAT_MIN);
+            if recent && reading.as_ref().is_none_or(|r| *r == p.reading) {
+                return false;
+            }
+            p.last_seen = now.to_rfc3339();
             if let Some(r) = reading {
                 p.reading = r;
             }
         }
         None => list.push(crate::PresenceMeta {
             member_id: me,
-            last_seen: now,
+            last_seen: now.to_rfc3339(),
             reading: reading.flatten(),
         }),
     }
+    true
 }
 
 /// The doc-internal `share_id`, hydrated alone — the host-controlled-id guard's
@@ -953,25 +968,47 @@ mod tests {
 
     /// A heartbeat (`reading: None`) keeps the opted-in indicator; an explicit
     /// `Some(None)` clears it; the prop rides beside the project fields.
+    /// Heartbeats inside `HEARTBEAT_MIN` are skipped unless the reading changes.
     #[cfg(feature = "sync-beelay")]
     #[test]
     fn presence_heartbeat_keeps_reading() {
+        let t1 = chrono::Utc::now();
+        let t2 = t1 + HEARTBEAT_MIN * 2;
+        let t3 = t2 + chrono::TimeDelta::seconds(30);
         let mut doc = Automerge::new();
         let mut list = doc_presence(&doc);
-        bump_presence(&mut list, "a".into(), "t1".into(), Some(Some("p1".into())));
-        bump_presence(&mut list, "a".into(), "t2".into(), None);
-        bump_presence(&mut list, "b".into(), "t2".into(), None);
+        assert!(bump_presence(
+            &mut list,
+            "a".into(),
+            t1,
+            Some(Some("p1".into()))
+        ));
+        // stale heartbeat: written
+        assert!(bump_presence(&mut list, "a".into(), t2, None));
+        assert!(bump_presence(&mut list, "b".into(), t2, None));
+        // recent heartbeat, same reading: skipped (both None and Some(same))
+        assert!(!bump_presence(&mut list, "a".into(), t3, None));
+        assert!(!bump_presence(
+            &mut list,
+            "a".into(),
+            t3,
+            Some(Some("p1".into()))
+        ));
         write_prop(&mut doc, PRESENCE_PROP, list).unwrap();
         let got = doc_presence(&doc);
         assert_eq!(got.len(), 2);
         assert_eq!(
             (got[0].last_seen.as_str(), got[0].reading.as_deref()),
-            ("t2", Some("p1"))
+            (t2.to_rfc3339().as_str(), Some("p1"))
         );
         assert_eq!(got[1].reading, None);
+        // recent but reading changed: written
         let mut list = got;
-        bump_presence(&mut list, "a".into(), "t3".into(), Some(None));
-        assert_eq!(list[0].reading, None);
+        assert!(bump_presence(&mut list, "a".into(), t3, Some(None)));
+        assert_eq!(
+            (list[0].last_seen.as_str(), list[0].reading.as_deref()),
+            (t3.to_rfc3339().as_str(), None)
+        );
         assert!(doc_member_meta(&doc).is_empty());
     }
 
