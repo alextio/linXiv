@@ -558,8 +558,28 @@ struct DbImportResponse {
 /// `/api/admin/*` — Member List, logs, Node Address, actors, database
 /// backup/import; JSON like the rest, bar the backup's snapshot bytes. `None`
 /// when the request is not an admin route.
+const MEMBERS: &str = "/api/admin/relay/members";
+const RELAY_LOG: &str = "/api/admin/relay/log";
+const TRANSFERS: &str = "/api/admin/transfers";
+const NODE_ADDRESS: &str = "/api/admin/node-address";
+const DB_BACKUP: &str = "/api/admin/db/backup";
+const DB_IMPORT: &str = "/api/admin/db/import";
+const ACTORS: &str = "/api/admin/actors";
+const STATUS: &str = "/api/status";
+/// Every path `relay_admin`/`dispatch` match on that the admin page must call.
+#[cfg(test)]
+const ADMIN_ROUTES: &[&str] = &[
+    STATUS,
+    MEMBERS,
+    RELAY_LOG,
+    TRANSFERS,
+    NODE_ADDRESS,
+    ACTORS,
+    DB_BACKUP,
+    DB_IMPORT,
+];
+
 async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
-    const MEMBERS: &str = "/api/admin/relay/members";
     let path = req.path.split('?').next().unwrap_or("");
     // Corrupt member list: surface it and refuse writes rather than clobbering.
     let loaded = |r: Result<Vec<Member>, String>| r.map_err(|e| detail(StatusCode::CONFLICT, e));
@@ -568,7 +588,7 @@ async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
             Ok(l) => json(StatusCode::OK, &MembersResponse { members: &l }),
             Err(resp) => resp,
         }),
-        ("GET", "/api/admin/relay/log") => {
+        ("GET", RELAY_LOG) => {
             let log = ctx.relay.lock().unwrap();
             Some(json(
                 StatusCode::OK,
@@ -577,7 +597,7 @@ async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
                 },
             ))
         }
-        ("GET", "/api/admin/transfers") => {
+        ("GET", TRANSFERS) => {
             let log = ctx.transfers.lock().unwrap();
             Some(json(
                 StatusCode::OK,
@@ -586,18 +606,16 @@ async fn relay_admin(ctx: &Ctx, req: &ApiRequest) -> Option<Response> {
                 },
             ))
         }
-        ("GET", "/api/admin/node-address") => Some(node_address(ctx).await),
-        ("GET", "/api/admin/db/backup") => Some(db_backup_download(&ctx.state).await),
-        ("POST", "/api/admin/db/import") => {
-            Some(match db_import(&ctx.state, req.body.as_ref()).await {
-                Ok(r) => json(StatusCode::OK, &r),
-                Err((status, msg)) => detail(status, msg),
-            })
-        }
+        ("GET", NODE_ADDRESS) => Some(node_address(ctx).await),
+        ("GET", DB_BACKUP) => Some(db_backup_download(&ctx.state).await),
+        ("POST", DB_IMPORT) => Some(match db_import(&ctx.state, req.body.as_ref()).await {
+            Ok(r) => json(StatusCode::OK, &r),
+            Err((status, msg)) => detail(status, msg),
+        }),
         // Attribution discovery: every journal actor seen in this node's docs,
         // for pairing with members. ponytail: full doc scan per request; cache
         // per-dir mtimes if doc counts ever make this route noticeable.
-        ("GET", "/api/admin/actors") => {
+        ("GET", ACTORS) => {
             let share_dir = ctx.share.share_dir().to_path_buf();
             let dirs = [
                 journal::journal_dir(),
@@ -986,7 +1004,7 @@ async fn dispatch(State(ctx): State<Ctx>, req: Request) -> Response {
         return rejection;
     }
     // Headless-only aggregate, answered here rather than in the shared router.
-    if req.method() == axum::http::Method::GET && req.uri().path() == "/api/status" {
+    if req.method() == axum::http::Method::GET && req.uri().path() == STATUS {
         return status(&ctx).await;
     }
     // iroh-relay access check: text/plain true/false, not the JSON envelope.
@@ -1107,6 +1125,7 @@ async fn status(ctx: &Ctx) -> Response {
 #[cfg(test)]
 mod tests {
     use super::latest_synced_at;
+    use linxiv_server::route::{settings, share};
     use serde_json::json;
 
     // relay_allow / member-list parsing tests live with the code in
@@ -1117,22 +1136,16 @@ mod tests {
     /// localStorage, is the token-storage contract.
     #[test]
     fn admin_html_matches_api_surface() {
-        for needle in [
-            "/api/status",
-            "/api/admin/relay/members",
-            "/api/admin/relay/log",
-            "/api/admin/transfers",
-            "/api/admin/node-address",
-            "/api/admin/actors",
-            "/api/admin/db/backup",
-            "/api/admin/db/import",
-            "/api/settings",
-            "/api/env",
-            "/api/share/relay/reconnect",
-            "sessionStorage",
-        ] {
+        let shared = [settings::SETTINGS, settings::ENV, share::RELAY_RECONNECT]
+            .map(|segs| format!("/{}", segs.join("/")));
+        for needle in super::ADMIN_ROUTES
+            .iter()
+            .copied()
+            .chain(shared.iter().map(String::as_str))
+        {
             assert!(super::ADMIN_HTML.contains(needle), "missing {needle}");
         }
+        assert!(super::ADMIN_HTML.contains("sessionStorage"));
         assert!(!super::ADMIN_HTML.contains("localStorage"));
     }
 
@@ -1428,10 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn db_routes_are_not_on_the_remote_query_surface() {
         let st = library(&["arxiv:2204.11111"]);
-        for (method, path) in [
-            ("GET", "/api/admin/db/backup"),
-            ("POST", "/api/admin/db/import"),
-        ] {
+        for (method, path) in [("GET", super::DB_BACKUP), ("POST", super::DB_IMPORT)] {
             let err = super::route(
                 &st,
                 super::ApiRequest {
