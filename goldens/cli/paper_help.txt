@@ -1,14 +1,13 @@
 usage: linxiv paper [-h]
-                    {get,delete,versions,repair,restore,hard-delete,search,remove-from-all-projects,doi-candidates,merge,fetch-source,index-sources} ...
+                    {get,delete,versions,repair,restore,search,remove-from-all-projects,doi-candidates,merge,fetch-source,index-sources} ...
 
 positional arguments:
-  {get,delete,versions,repair,restore,hard-delete,search,remove-from-all-projects,doi-candidates,merge,fetch-source,index-sources}
+  {get,delete,versions,repair,restore,search,remove-from-all-projects,doi-candidates,merge,fetch-source,index-sources}
     get                 Get full details for a paper
     delete              Soft-delete a paper
     versions            List all stored versions of a paper
     repair              Overwrite paper metadata in-place
     restore             Restore a soft-deleted paper
-    hard-delete         Permanently delete a paper
     search              Full-text search within local library
     remove-from-all-projects
                         Remove a paper from every project

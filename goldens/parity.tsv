@@ -134,10 +134,8 @@ PUT /api/papers/sfk/{}	paper repair	repair_paper
 PUT /api/papers/{}/pdf	-	-
 PUT /api/reading-status/{}	-	-
 -	annotation get	-
--	paper hard-delete	-
 -	paper restore	-
 -	pdf storage	-
--	project hard-delete	-
 -	project restore	-
 -	tag add-project	-
 -	tag list	-

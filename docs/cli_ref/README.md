@@ -35,7 +35,6 @@ linxiv paper doi-candidates 2204.12985       # other paper roots sharing this pa
 linxiv paper repair 2204.12985 --title "Attention Is All You Need" --authors "A. Vaswani" "N. Shazeer" --published 2017-06-12 --summary "..." --category cs.CL --doi 10.48550/arXiv.1706.03762 --url https://arxiv.org/abs/1706.03762 --tags attention transformers
 linxiv paper delete 2204.12985               # soft-delete
 linxiv paper restore 2204.12985
-linxiv paper hard-delete 2204.12985
 linxiv paper remove-from-all-projects 2204.12985
 
 # Tags (on papers)
@@ -62,7 +61,6 @@ linxiv project remove-paper 1 2006.11239
 linxiv project archive 1
 linxiv project restore 1
 linxiv project delete 1                            # soft-delete
-linxiv project hard-delete 1
 linxiv project export 1 ./diffusion --pdfs         # .lxproj archive
 linxiv project import ./diffusion.lxproj --on-conflict merge   # merge | overwrite; --preview for a dry run
 linxiv project export-bibtex 1 ./diffusion.bib
@@ -133,9 +131,9 @@ linxiv versions ack 2204.12985                   # clear the flag on one paper
 # Trash (soft-deleted items)
 linxiv trash list
 linxiv trash restore 2204.12985
-linxiv trash hard-delete 2204.12985
+linxiv trash hard-delete 2204.12985            # --force: skip the trash, delete an active paper
 linxiv trash restore-project 1
-linxiv trash hard-delete-project 1
+linxiv trash hard-delete-project 1             # --force: skip the trash
 
 # Library / maintenance
 linxiv stats
