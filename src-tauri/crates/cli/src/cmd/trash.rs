@@ -16,13 +16,23 @@ pub enum TrashCmd {
     Restore { source_id: String },
     // Route parity: `DELETE /api/trash/...`.
     /// Permanently delete a paper
-    HardDelete { source_id: String },
+    HardDelete {
+        source_id: String,
+        /// Skip the trash: delete even if the paper is active. Irreversible
+        #[arg(long)]
+        force: bool,
+    },
     // Route parity: `POST /api/trash/projects/{}/restore`.
     /// Restore a soft-deleted project
     RestoreProject { project_id: i64 },
     // Route parity: `DELETE /api/trash/projects/{}`.
     /// Permanently delete a project
-    HardDeleteProject { project_id: i64 },
+    HardDeleteProject {
+        project_id: i64,
+        /// Skip the trash: delete even if the project is active. Irreversible
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
@@ -43,9 +53,11 @@ pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 project_fks,
             });
         }
-        TrashCmd::HardDelete { source_id } => {
+        TrashCmd::HardDelete { source_id, force } => {
             let source_id = as_source_id(&ctx.conn, &source_id);
-            svc_paper::require_trashed(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
+            if !force {
+                svc_paper::require_trashed(&ctx.conn, &source_id).unwrap_or_else(|e| fail(e));
+            }
             // get_paper_root None -> not found; unreachable after the guard,
             // but mirror the message off hard_delete's None return.
             if svc_paper::hard_delete(&mut ctx.conn, &PaperRef::source(source_id.clone()))?
@@ -73,8 +85,12 @@ pub async fn run(cmd: TrashCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
                 restored_project_id: project_id,
             });
         }
-        TrashCmd::HardDeleteProject { project_id } => {
-            svc_project::require_trashed(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));
+        TrashCmd::HardDeleteProject { project_id, force } => {
+            if force {
+                svc_project::require(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));
+            } else {
+                svc_project::require_trashed(&ctx.conn, project_id).unwrap_or_else(|e| fail(e));
+            }
             svc_project::hard_delete(
                 &mut ctx.conn,
                 &Project {

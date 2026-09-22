@@ -481,25 +481,6 @@ impl Server {
         })
     }
 
-    #[tool(description = "Permanently delete a paper and all its data. Irreversible.")]
-    pub async fn hard_delete_paper(
-        &self,
-        Parameters(PaperIdParams { paper_id }): Parameters<PaperIdParams>,
-    ) -> Result<String, ErrorData> {
-        self.with_conn(|conn| {
-            if let Err(e) = svc_paper::resolve_source_fk(conn, &paper_id) {
-                return Ok(Err(crate::util::guard_err(e)));
-            }
-            svc_paper::hard_delete(conn, &paper_key(&paper_id))?;
-            Ok(Ok(()))
-        })
-        .map_err(core_err)??;
-        json_ok(&linxiv_core::service::trash::HardDeletedPaper {
-            ok: true,
-            hard_deleted: paper_id,
-        })
-    }
-
     // Route parity: `DELETE /api/papers/sfk/{}/projects`.
     #[tool(description = "Remove a paper from every project it currently belongs to.")]
     pub async fn remove_paper_from_all_projects(
