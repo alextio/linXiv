@@ -261,11 +261,7 @@ fn save_and_link(
     metas: &[PaperMetadata],
     project_id: Option<i64>,
 ) -> Result<BibtexImportReceipt> {
-    let mut source_ids = crate::service::paper::save_papers_metadata(conn, metas)?;
-    // One id per INPUT entry: two entries on one identity upsert onto one root,
-    // so dedupe (first-seen order) before linking or counting them.
-    let mut seen = std::collections::HashSet::new();
-    source_ids.retain(|id| seen.insert(id.clone()));
+    let source_ids = crate::service::paper::save_papers_metadata(conn, metas)?;
     if let Some(pid) = project_id {
         if !source_ids.is_empty() {
             if let Err(e) = crate::service::project::link_imported(conn, pid, &source_ids) {
