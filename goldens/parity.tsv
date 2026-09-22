@@ -149,8 +149,6 @@ PUT /api/reading-status/{}	-	-
 -	-	get_paper_tags
 -	-	get_pdf_storage
 -	-	get_project_tags
--	-	hard_delete_paper
--	-	hard_delete_project
 -	-	import_zotero
 -	-	paper_ref
 -	-	remove_tags_from_project
