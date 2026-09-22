@@ -44,6 +44,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
 # HTTP front doors: the dev-server shim and the headless bin.
 axum = "0.8"
+# gzip for the headless bin's JSON responses (Accept-Encoding negotiated).
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 # Pinned to core's version so the Connection type unifies to one crate instance.
 rusqlite = "0.40"
 anyhow = "1"
@@ -86,4 +88,6 @@ wiremock = "0.6"
 # Remote-query tests bind in-process endpoint pairs, like the p2p crate's own
 # tests/api.rs.
 iroh = "1.0.2"
+# `ServiceExt::oneshot` to drive the headless router in-process.
+tower = "0.5"
 
