@@ -1,8 +1,8 @@
 usage: linxiv project [-h]
-                      {list,get,create,update,delete,archive,restore,hard-delete,add-paper,add-papers,remove-paper,export,import,export-bibtex,export-obsidian,export-zotero} ...
+                      {list,get,create,update,delete,archive,restore,add-paper,add-papers,remove-paper,export,import,export-bibtex,export-obsidian,export-zotero} ...
 
 positional arguments:
-  {list,get,create,update,delete,archive,restore,hard-delete,add-paper,add-papers,remove-paper,export,import,export-bibtex,export-obsidian,export-zotero}
+  {list,get,create,update,delete,archive,restore,add-paper,add-papers,remove-paper,export,import,export-bibtex,export-obsidian,export-zotero}
     list                List projects
     get                 Get project details
     create              Create a project
@@ -10,7 +10,6 @@ positional arguments:
     delete              Soft-delete a project
     archive             Archive an active project
     restore             Restore an archived or deleted project
-    hard-delete         Permanently delete a project
     add-paper           Add a paper to a project
     add-papers          Add several papers to a project in one call
     remove-paper        Remove a paper from a project
