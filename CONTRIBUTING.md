@@ -16,8 +16,8 @@ linXiv follows [GitLab Flow](https://about.gitlab.com/topics/version-control/wha
 
 - **`main`** is the only long-lived branch. Branch from it and open your PR against it.
 - **Name your branch `<type>/<short-slug>`**, using the same types as commit messages: `feat/`, `fix/`, `refactor/`, `perf/`, `docs/`, `test/`, `chore/`, `build/`, `ci/`, `style/`, `revert/`. For example: `fix/pdf-preview-flash`, `feat/zotero-export`.
-- **Releases are tags** (`v0.6.0`) on `main`. Pushing a tag builds the installers.
-- **Patching an old release:** if a shipped version needs a fix, a `0-6-stable` branch is cut from its tag. The fix still lands in `main` first and is then cherry-picked (`git cherry-pick -x`) into the stable branch. Changes never go into a stable branch without going into `main` first.
+- **Releases are tags** on `main`: `v0.6.0`, or `v0.6.0-beta.1` / `-rc.1` / `-alpha.1` for a pre-release. Pushing a tag builds the installers, and a hyphen marks the release as a pre-release. Never reuse a pre-release's version for a stable release (after `v0.6.0-beta.1`, the stable release can't be `v0.6.0`): RPM would sort the beta above it.
+- **Patching an old release:** if a shipped version needs a fix, a `0-6-stable` branch is cut from its tag. The fix still lands in `main` first and is then cherry-picked (`git cherry-pick -x`) into the stable branch. Changes never go into a stable branch without going into `main` first. A patch like `v0.6.1` is a normal release, but if a newer line (`v0.7.x`) has already shipped it won't be marked as latest.
 
 ## Commit messages
 
