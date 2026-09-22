@@ -251,13 +251,7 @@ The database (`papers.db`), managed PDFs, and the Obsidian vault live in the per
 
 ## Contributing
 
-Turn on the repo's git hooks once per clone. They check commit messages and run `cargo fmt --check`:
-
-```sh
-git config core.hooksPath .githooks
-```
-
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) with short bodies; the rules are in `.githooks/commit-lint.sh`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, commit messages, and how PRs reach a release.
 
 ## Acknowledgements
 
