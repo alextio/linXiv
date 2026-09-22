@@ -82,8 +82,6 @@ pub enum ProjectCmd {
     Archive { project_id: i64 },
     /// Restore an archived or deleted project
     Restore { project_id: i64 },
-    /// Permanently delete a project
-    HardDelete { project_id: i64 },
     // Route parity: `POST /api/projects/{}/papers`.
     /// Add a paper to a project
     AddPaper { project_id: i64, source_id: String },
@@ -277,20 +275,6 @@ pub async fn run(cmd: ProjectCmd, ctx: &mut Ctx) -> anyhow::Result<()> {
             output(&linxiv_core::service::trash::RestoredProject {
                 ok: true,
                 restored_project_id: project_id,
-            });
-        }
-
-        ProjectCmd::HardDelete { project_id } => {
-            resolve_or_exit(ctx, project_id);
-            project::hard_delete(
-                &mut ctx.conn,
-                &project::Project {
-                    project_fk: Some(project_id),
-                },
-            )?;
-            output(&linxiv_core::service::trash::HardDeletedProject {
-                ok: true,
-                hard_deleted_project_id: project_id,
             });
         }
 
