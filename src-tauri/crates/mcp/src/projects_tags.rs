@@ -379,22 +379,6 @@ impl Server {
         })
     }
 
-    #[tool(description = "Permanently delete a project. Irreversible. Papers themselves are kept.")]
-    pub async fn hard_delete_project(
-        &self,
-        _params: Parameters<ProjectIdParams>,
-    ) -> Result<String, ErrorData> {
-        let id = _params.0.project_id;
-        self.with_conn(|conn| {
-            ensure_project(conn, id)?;
-            project::hard_delete(conn, &proj(id)).map_err(core_err)?;
-            jval(linxiv_core::service::trash::HardDeletedProject {
-                ok: true,
-                hard_deleted_project_id: id,
-            })
-        })
-    }
-
     #[tool(description = "Add one or more tags to a project.")]
     pub async fn add_tags_to_project(
         &self,

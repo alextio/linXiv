@@ -15,7 +15,9 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
         ("GET", ["api", "trash"]) => Some(list(state)),
         // Specific project arms MUST precede the greedy paper arms below.
         ("POST", ["api", "trash", "projects", id, "restore"]) => Some(restore_project(state, id)),
-        ("DELETE", ["api", "trash", "projects", id]) => Some(hard_delete_project(state, id)),
+        ("DELETE", ["api", "trash", "projects", id]) => {
+            Some(hard_delete_project(state, id, force(ctx)))
+        }
         // `:path` greedy capture: everything after `/api/trash/` (minus a trailing
         // `/restore`) is the paper source_id. `projects/{id}` is handled by the
         // specific arms above and never reaches here.
@@ -23,7 +25,7 @@ pub(crate) async fn handle(state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<
             Some(restore(state, &rest.join("/")))
         }
         ("DELETE", ["api", "trash", rest @ ..]) if !rest.is_empty() => {
-            Some(hard_delete(state, &rest.join("/")))
+            Some(hard_delete(state, &rest.join("/"), force(ctx)))
         }
         _ => None,
     }
@@ -54,11 +56,21 @@ fn restore(state: &AppState, source_id: &str) -> Result<Value, ApiError> {
     })
 }
 
+/// `?force=1` on the DELETE arms: skip the trash and hard-delete an active item.
+fn force(ctx: &ReqCtx<'_>) -> bool {
+    matches!(ctx.q("force"), Some("1" | "true"))
+}
+
 /// `DELETE /api/trash/{source_id:path}` — permanent, so it 404s unless the paper
-/// is in the trash; use `DELETE /api/papers/{id}` to trash one.
-fn hard_delete(state: &AppState, source_id: &str) -> Result<Value, ApiError> {
+/// is in the trash; use `DELETE /api/papers/{id}` to trash one. `?force=1`
+/// skips that guard (only 404 on a missing paper) and is irreversible.
+fn hard_delete(state: &AppState, source_id: &str, force: bool) -> Result<Value, ApiError> {
     state.with_conn(|conn| -> Result<(), ApiError> {
-        svc_paper::require_trashed(conn, source_id)?;
+        if force {
+            svc_paper::resolve_source_fk(conn, source_id)?;
+        } else {
+            svc_paper::require_trashed(conn, source_id)?;
+        }
         svc_paper::hard_delete(conn, &PaperRef::source(source_id.to_string()))?;
         Ok(())
     })?;
@@ -89,11 +101,16 @@ fn restore_project(state: &AppState, id: &str) -> Result<Value, ApiError> {
 }
 
 /// `DELETE /api/trash/projects/{id}` — permanently delete a trashed project. 422 on a
-/// non-integer id, 404 if absent, 400 if it is not in the trash.
-fn hard_delete_project(state: &AppState, id: &str) -> Result<Value, ApiError> {
+/// non-integer id, 404 if absent, 400 if it is not in the trash. `?force=1` skips
+/// the trash guard and is irreversible.
+fn hard_delete_project(state: &AppState, id: &str, force: bool) -> Result<Value, ApiError> {
     let project_fk = crate::route::path_i64(id)?;
     state.with_conn(|conn| -> Result<(), ApiError> {
-        svc_project::require_trashed(conn, project_fk)?;
+        if force {
+            svc_project::require(conn, project_fk)?;
+        } else {
+            svc_project::require_trashed(conn, project_fk)?;
+        }
         svc_project::hard_delete(
             conn,
             &svc_project::Project {
@@ -232,6 +249,64 @@ mod tests {
             assert_eq!(err.status, 400);
         }
         assert_eq!(get_status(&st, id), Some(Status::Active));
+    }
+
+    /// `?force=1` skips the trash guard; without it an active project is 400,
+    /// an active paper 404 (core's `require_trashed` wording), and both untouched.
+    #[tokio::test]
+    async fn force_skips_the_trash_guard() {
+        use linxiv_core::models::PaperMetadata;
+        let st = state();
+        let id = st.with_conn(|conn| {
+            svc_project::create(
+                conn,
+                &ProjectIn {
+                    name: "Active".into(),
+                    description: String::new(),
+                    color: None,
+                    tags: vec![],
+                    source_fks: vec![],
+                },
+            )
+            .unwrap()
+        });
+        let meta: PaperMetadata = serde_json::from_value(json!({
+            "source_id": "arxiv:1",
+            "version": 1,
+            "title": "T",
+            "authors": ["A"],
+            "published": "2024-01-01",
+            "summary": "S",
+        }))
+        .unwrap();
+        st.with_conn(|conn| svc_paper::save_paper_metadata(conn, &meta, None).unwrap());
+
+        let proj = format!("/api/trash/projects/{id}");
+        assert_eq!(req(&st, "DELETE", &proj).await.unwrap_err().status, 400);
+        assert_eq!(
+            req(&st, "DELETE", "/api/trash/arxiv:1")
+                .await
+                .unwrap_err()
+                .status,
+            404
+        );
+        assert_eq!(get_status(&st, id), Some(Status::Active));
+
+        let v = req(&st, "DELETE", &format!("{proj}?force=1"))
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "ok": true, "hard_deleted_project_id": id }));
+        assert_eq!(get_status(&st, id), None);
+        let v = req(&st, "DELETE", "/api/trash/arxiv:1?force=1")
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "ok": true, "hard_deleted": "arxiv:1" }));
+        assert!(st.with_conn(|conn| svc_paper::resolve_source_fk(conn, "arxiv:1").is_err()));
+        // Missing stays 404 even with force.
+        let err = req(&st, "DELETE", "/api/trash/arxiv:1?force=1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404);
     }
 
     #[tokio::test]
