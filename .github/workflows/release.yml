@@ -6,7 +6,51 @@ on:
       - "v*"
 
 jobs:
+  # Gate every other job: a bad tag should fail in seconds, not after a
+  # 30-minute matrix has half-published a release.
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.check.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$' \
+            || fail "tag $TAG must be vX.Y.Z or vX.Y.Z-(alpha|beta|rc)[.N]"
+
+          # Releases come from main or a *-stable branch, never a feature branch.
+          git branch -r --contains "$GITHUB_SHA" | grep -Eq '^ *origin/(main|[0-9]+-[0-9]+-stable)$' \
+            || fail "$TAG is not on main or a *-stable branch"
+
+          core=${TAG%%-*}
+          if [ "$core" = "$TAG" ]; then
+            # rpm sorts X.Y.Z-beta ABOVE X.Y.Z, so a stable tag can't share a
+            # core with a shipped prerelease (see docs/build.md).
+            if git tag -l "$core-*" | grep -q .; then
+              fail "$core was already used by prerelease $(git tag -l "$core-*" | head -1); bump the version"
+            fi
+            # A patch on an older line (e.g. from 0-6-stable after v0.7.0)
+            # is a real release but must not become "latest".
+            newest=$( { git tag -l 'v*' | grep -v -- -; echo "$TAG"; } | sort -V | tail -1)
+            if [ "$newest" = "$TAG" ]; then
+              echo "latest=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "latest=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::$TAG is older than $newest: untick 'Set as the latest release' when publishing the draft"
+            fi
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: validate-tag
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     permissions:
@@ -154,6 +198,7 @@ jobs:
           retention-days: 1
 
   build-arch:
+    needs: validate-tag
     name: Build (linux-x86_64-pacman)
     runs-on: ubuntu-22.04
     container: archlinux:base-devel
@@ -205,6 +250,7 @@ jobs:
   # be an hour-plus timeout trap — add arm64 via a native arm runner + manifest
   # merge when it's actually wanted.
   publish-headless-image:
+    needs: validate-tag
     name: Publish headless image (GHCR)
     runs-on: ubuntu-22.04
     permissions:
@@ -229,12 +275,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/linxiv-headless
-          # `latest` only for stable tags (no hyphen); prereleases publish the
-          # version tag alone, mirroring the GitHub /releases/latest skip above.
+          # `latest` only for the newest stable tag; prereleases and older-line
+          # patches publish the version tag alone.
           flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ needs.validate-tag.outputs.latest == 'true' }}
 
       - uses: docker/setup-buildx-action@v3
 
