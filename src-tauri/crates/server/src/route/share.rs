@@ -31,6 +31,9 @@ use crate::route::{parse_query, path_i64, split_segments, to_value, ApiError, Ap
 use crate::share_sync;
 use crate::state::AppState;
 
+/// Path segments the reconnect arm matches on; the headless admin page test joins them.
+pub const RELAY_RECONNECT: &[&str] = &["api", "share", "relay", "reconnect"];
+
 /// Managed beside `AppState` (never a field of it): owns the injected `ShareStore`
 /// over the share directory and, in the packaged app, the iroh `ShareNode`.
 /// `None` in store-only tests, where the network arms return 503.
@@ -510,9 +513,7 @@ async fn dispatch_inner(
             return put_settings(share, id, ctx.body).await
         }
         ("GET", ["api", "share", "member_code"]) => return member_code(share).await,
-        ("POST", ["api", "share", "relay", "reconnect"]) => {
-            return reconnect_relay(spawn_sync, share).await
-        }
+        ("POST", RELAY_RECONNECT) => return reconnect_relay(spawn_sync, share).await,
         // Shadows the sync arm in `handle` so the live app gets role-stamped
         // summaries; the store-only tests keep dispatching through `handle`.
         ("GET", ["api", "share", "received"]) => {
