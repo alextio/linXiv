@@ -27,7 +27,7 @@ linXiv follows [GitLab Flow](https://about.gitlab.com/topics/version-control/wha
 
 - Fill in the PR template, especially **Network calls** and **Debt or workarounds**.
 - Keep PRs small and focused; split unrelated changes.
-- CI checks your branch name, every commit message, the Rust tests and `cargo fmt`, the frontend type check and tests, and CodeQL. All must pass.
+- CI checks your branch name, every commit message, the Rust tests and `cargo fmt`, the frontend type check and tests, and CodeQL. All must pass, and a maintainer must approve the PR.
 
 ## License
 
