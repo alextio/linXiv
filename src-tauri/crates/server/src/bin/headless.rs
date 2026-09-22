@@ -153,7 +153,7 @@ async fn main() {
     } else {
         "UNAUTHENTICATED (loopback)"
     };
-    let app = Router::new().fallback(any(dispatch)).with_state(ctx);
+    let app = app(ctx);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind headless server");
@@ -166,6 +166,14 @@ async fn main() {
     if let Err(e) = share.shutdown().await {
         eprintln!("warning: share node shutdown: {e}");
     }
+}
+
+/// The full router: every path through `dispatch`, gzip on negotiation.
+fn app(ctx: Ctx) -> Router {
+    Router::new()
+        .fallback(any(dispatch))
+        .layer(tower_http::compression::CompressionLayer::new())
+        .with_state(ctx)
 }
 
 /// Take a systemd-logind sleep+idle inhibitor for the process lifetime (opt out:
@@ -1422,6 +1430,42 @@ mod tests {
         assert_eq!(status, super::StatusCode::BAD_REQUEST);
         let (status, _) = super::db_import(&st, None).await.unwrap_err();
         assert_eq!(status, super::StatusCode::BAD_REQUEST);
+    }
+
+    /// A JSON route gzips when the client negotiates it and stays plain
+    /// otherwise.
+    #[tokio::test]
+    async fn json_routes_gzip_on_accept_encoding() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = super::Ctx {
+            state: library(&[]),
+            share: super::Arc::new(super::ShareState::new(dir.path())),
+            token: None,
+            started: super::Instant::now(),
+            relay: super::Arc::new(super::Mutex::new(super::RelayLog::open(
+                dir.path().join("relay.jsonl"),
+            ))),
+            transfers: super::Arc::new(super::Mutex::new(super::TransferLog::default())),
+        };
+        let req = |gzip: bool| {
+            let b = super::Request::builder().uri("/api/stats");
+            let b = if gzip {
+                b.header("accept-encoding", "gzip")
+            } else {
+                b
+            };
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+        let resp = super::app(ctx.clone()).oneshot(req(true)).await.unwrap();
+        assert_eq!(resp.status(), super::StatusCode::OK);
+        assert_eq!(resp.headers()["content-encoding"], "gzip");
+        let resp = super::app(ctx).oneshot(req(false)).await.unwrap();
+        assert!(resp.headers().get("content-encoding").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&body).is_ok());
     }
 
     /// The size guard reads the base64 length, so an over-limit upload is
