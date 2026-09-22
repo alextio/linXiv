@@ -25,15 +25,11 @@ const ALLOWED_ENV_KEYS: [&str; 5] = [
 /// Keys `redact_secrets` strips from the GET body, replaced by `<KEY>_SET`.
 const SECRET_ENV_KEYS: [&str; 2] = ["GEMINI_API_KEY", "OPENAI_API_KEY"];
 
-/// Path segments the arms below match on; the headless admin page test joins them.
-pub const SETTINGS: &[&str] = &["api", "settings"];
-pub const ENV: &[&str] = &["api", "env"];
-
 pub(crate) async fn handle(_state: &AppState, ctx: &ReqCtx<'_>) -> Option<Result<Value, ApiError>> {
     match (ctx.method, ctx.segs) {
-        ("GET", SETTINGS) => Some(get()),
-        ("PATCH", SETTINGS) => Some(patch(ctx)),
-        ("PATCH", ENV) => Some(env_patch(ctx)),
+        ("GET", ["api", "settings"]) => Some(get()),
+        ("PATCH", ["api", "settings"]) => Some(patch(ctx)),
+        ("PATCH", ["api", "env"]) => Some(env_patch(ctx)),
         _ => None,
     }
 }

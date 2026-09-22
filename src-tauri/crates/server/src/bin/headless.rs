@@ -1133,7 +1133,6 @@ async fn status(ctx: &Ctx) -> Response {
 #[cfg(test)]
 mod tests {
     use super::latest_synced_at;
-    use linxiv_server::route::{settings, share};
     use serde_json::json;
 
     // relay_allow / member-list parsing tests live with the code in
@@ -1144,13 +1143,10 @@ mod tests {
     /// localStorage, is the token-storage contract.
     #[test]
     fn admin_html_matches_api_surface() {
-        let shared = [settings::SETTINGS, settings::ENV, share::RELAY_RECONNECT]
-            .map(|segs| format!("/{}", segs.join("/")));
-        for needle in super::ADMIN_ROUTES
-            .iter()
-            .copied()
-            .chain(shared.iter().map(String::as_str))
-        {
+        // Shared-router paths stay literal here: the CLI parity test scrapes
+        // their arms from route/*.rs and cannot see through consts.
+        let shared = ["/api/settings", "/api/env", "/api/share/relay/reconnect"];
+        for needle in super::ADMIN_ROUTES.iter().chain(shared.iter()) {
             assert!(super::ADMIN_HTML.contains(needle), "missing {needle}");
         }
         assert!(super::ADMIN_HTML.contains("sessionStorage"));

@@ -38,7 +38,7 @@ pub(crate) mod pdfs; // resolve_pdf reused by remote_query's byte lane
 pub(crate) mod projects; // request-body structs rendered by ts_bindings
 pub(crate) mod reading_status; // request-body structs rendered by ts_bindings
 mod search;
-pub mod settings; // request-body structs rendered by ts_bindings; path consts for headless
+pub(crate) mod settings; // request-body structs rendered by ts_bindings
 pub mod share; // ShareState + share_api command, managed beside AppState in main.rs
 pub(crate) mod sources; // request-body structs rendered by ts_bindings
 pub(crate) mod storage; // request-body structs rendered by ts_bindings
