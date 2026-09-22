@@ -8,7 +8,6 @@ route	GET /api/papers/sfk/{}	cli,mcp	GUI sfk lookup; CLI/MCP address by source_i
 cli	paper restore	route	route restores via /api/trash
 mcp	restore_paper	route	route restores via /api/trash
 cli	paper hard-delete	route	route hard-deletes via /api/trash
-mcp	hard_delete_paper	route	route hard-deletes via /api/trash
 mcp	paper_ref	route	MCP citation handles; no GUI/CLI use yet
 mcp	resolve_refs	route	MCP citation handles; no GUI/CLI use yet
 cli	pdf storage	route	GUI computes from list_pdfs
@@ -23,7 +22,6 @@ route	POST /api/crossref/search	cli,mcp	CLI/MCP: search --source crossref
 cli	project restore	route	route restores via /api/trash
 mcp	restore_project	route	route restores via /api/trash
 cli	project hard-delete	route	route hard-deletes via /api/trash
-mcp	hard_delete_project	route	route hard-deletes via /api/trash
 route	POST /api/projects/import/preview	cli,mcp	GUI two-phase import
 route	GET /api/tags/{}	cli,mcp	GUI tag detail page
 cli	tag list	route	GUI reads tags off get_paper

@@ -93,6 +93,24 @@ pub struct PaperIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct HardDeletePaperParams {
+    /// The paper source id (e.g. "arxiv:2204.12985").
+    pub paper_id: String,
+    /// Skip the trash: delete even if the paper is active. Irreversible.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HardDeleteProjectParams {
+    /// Numeric project id.
+    pub project_id: i64,
+    /// Skip the trash: delete even if the project is active. Irreversible.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetPdfPathParams {
     /// The paper source id (e.g. "arxiv:2204.12985").
     pub paper_id: String,
@@ -367,16 +385,22 @@ impl Server {
 
     // Route parity: `DELETE /api/trash/...`.
     #[tool(
-        description = "Permanently delete a trashed paper. Only works if the paper is in the trash."
+        description = "Permanently delete a trashed paper. Only works if the paper is in the trash \
+                       unless `force` is true, which skips the trash and deletes an active paper. \
+                       Irreversible."
     )]
     pub async fn trash_hard_delete_paper(
         &self,
-        Parameters(p): Parameters<PaperIdParams>,
+        Parameters(p): Parameters<HardDeletePaperParams>,
     ) -> Result<String, ErrorData> {
         self.with_conn(|conn| {
             // require_trashed passing implies the root exists (STATUS='deleted' row),
             // so no separate existence check — same reasoning as cli/cmd/trash.rs.
-            svc_paper::require_trashed(conn, &p.paper_id).map_err(guard_err)?;
+            if p.force {
+                svc_paper::resolve_source_fk(conn, &p.paper_id).map_err(guard_err)?;
+            } else {
+                svc_paper::require_trashed(conn, &p.paper_id).map_err(guard_err)?;
+            }
             svc_paper::hard_delete(conn, &svc_paper::PaperRef::source(p.paper_id.clone()))
                 .map_err(core_err)?;
             json_ok(&linxiv_core::service::trash::HardDeletedPaper {
@@ -412,14 +436,20 @@ impl Server {
 
     // Route parity: `DELETE /api/trash/projects/{}`.
     #[tool(
-        description = "Permanently delete a trashed project. Only works if the project is soft-deleted."
+        description = "Permanently delete a trashed project. Only works if the project is soft-deleted \
+                       unless `force` is true, which skips the trash and deletes an active project. \
+                       Irreversible; papers themselves are kept."
     )]
     pub async fn hard_delete_project_from_trash(
         &self,
-        Parameters(p): Parameters<ProjectIdParams>,
+        Parameters(p): Parameters<HardDeleteProjectParams>,
     ) -> Result<String, ErrorData> {
         self.with_conn(|conn| {
-            require_trashed_project(conn, p.project_id)?;
+            if p.force {
+                svc_project::require(conn, p.project_id).map_err(guard_err)?;
+            } else {
+                require_trashed_project(conn, p.project_id)?;
+            }
             svc_project::hard_delete(
                 conn,
                 &svc_project::Project {
@@ -513,6 +543,75 @@ mod tests {
         let d = std::env::temp_dir().join(format!("linxiv_mcp_pdfs_{n}"));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Hard-deleting an active paper/project is refused without `force` and
+    /// goes through with it; a missing id stays not-found either way.
+    #[tokio::test]
+    async fn hard_delete_requires_trash_unless_forced() {
+        let srv = server(std::env::temp_dir());
+        let meta: PaperMetadata = serde_json::from_value(json!({
+            "source_id": "arxiv:1",
+            "version": 1,
+            "title": "T",
+            "authors": ["A"],
+            "published": "2024-01-01",
+            "summary": "S",
+        }))
+        .unwrap();
+        srv.with_conn(|conn| svc_paper::save_paper_metadata(conn, &meta, None))
+            .unwrap();
+        let project_id = srv
+            .with_conn(|conn| {
+                svc_project::create(
+                    conn,
+                    &linxiv_core::models::ProjectIn {
+                        name: "P".into(),
+                        description: String::new(),
+                        color: None,
+                        tags: vec![],
+                        source_fks: vec![],
+                    },
+                )
+            })
+            .unwrap();
+        let paper = |force| HardDeletePaperParams {
+            paper_id: "arxiv:1".into(),
+            force,
+        };
+        let project = |force| HardDeleteProjectParams { project_id, force };
+
+        srv.trash_hard_delete_paper(Parameters(paper(false)))
+            .await
+            .unwrap_err();
+        srv.hard_delete_project_from_trash(Parameters(project(false)))
+            .await
+            .unwrap_err();
+        assert!(srv
+            .with_conn(|conn| svc_paper::resolve_source_fk(conn, "arxiv:1"))
+            .is_ok());
+
+        let out = srv
+            .trash_hard_delete_paper(Parameters(paper(true)))
+            .await
+            .unwrap();
+        assert_eq!(out, r#"{"ok":true,"hard_deleted":"arxiv:1"}"#);
+        let out = srv
+            .hard_delete_project_from_trash(Parameters(project(true)))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            format!(r#"{{"ok":true,"hard_deleted_project_id":{project_id}}}"#)
+        );
+        let err = srv
+            .trash_hard_delete_paper(Parameters(paper(true)))
+            .await
+            .unwrap_err();
+        assert_eq!(err.message.as_ref(), "Paper arxiv:1 not found");
+        srv.hard_delete_project_from_trash(Parameters(project(true)))
+            .await
+            .unwrap_err();
     }
 
     /// A managed PDF is listed with its size, then deleted off disk while the

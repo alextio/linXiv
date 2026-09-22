@@ -55,7 +55,7 @@ send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
 call(2, "create_project", {"name": "Survivor"})
 print("backup     :", call(3, "backup_database", {"dest": bak}))
-call(4, "hard_delete_project", {"project_id": 1})
+call(4, "hard_delete_project_from_trash", {"project_id": 1, "force": True})
 
 after_delete = call(5, "list_projects", {})
 print("after wipe :", names(after_delete))
