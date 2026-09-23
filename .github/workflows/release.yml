@@ -25,9 +25,11 @@ jobs:
           echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)(\.[0-9]+)?)?$' \
             || fail "tag $TAG must be vX.Y.Z or vX.Y.Z-(alpha|beta|rc)[.N]"
 
-          # Releases come from main or a *-stable branch, never a feature branch.
-          git branch -r --contains "$GITHUB_SHA" | grep -Eq '^ *origin/(main|[0-9]+-[0-9]+-stable)$' \
-            || fail "$TAG is not on main or a *-stable branch"
+          # Releases come from main or their own line's release branch
+          # (v0.6.1 from release/0.6), never a feature branch.
+          line=$(echo "$TAG" | sed -E 's/^v([0-9]+)\.([0-9]+).*/\1\\.\2/')
+          git branch -r --contains "$GITHUB_SHA" | grep -Eq "^ *origin/(main|release/$line)\$" \
+            || fail "$TAG is not on main or release/${line/\\/}"
 
           core=${TAG%%-*}
           if [ "$core" = "$TAG" ]; then
@@ -36,7 +38,7 @@ jobs:
             if git tag -l "$core-*" | grep -q .; then
               fail "$core was already used by prerelease $(git tag -l "$core-*" | head -1); bump the version"
             fi
-            # A patch on an older line (e.g. from 0-6-stable after v0.7.0)
+            # A patch on an older line (e.g. from release/0.6 after v0.7.0)
             # is a real release but must not become "latest".
             newest=$( { git tag -l 'v*' | grep -v -- -; echo "$TAG"; } | sort -V | tail -1)
             if [ "$newest" = "$TAG" ]; then

@@ -10,7 +10,7 @@ on:
   pull_request:
     branches:
       - main
-      - "*-stable"
+      - "release/*"
 
 permissions:
   contents: read
