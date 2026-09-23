@@ -1,0 +1,67 @@
+# release/N.N follows its own line's stable tags on main. v0.6.0 creates
+# release/0.6; each later v0.6.x on main opens a PR that brings release/0.6 up
+# to that tag as one squashed commit, so missed syncs (0.6.1 -> 0.6.5) are the
+# same total change. Once main moves to 0.7, release/0.6 stops syncing and
+# stays behind for 0.6 patches.
+#
+# BACKPORT_TOKEN (fine-grained PAT or GitHub App token: contents + pull
+# requests read/write on this repo) is required: PRs opened with the default
+# GITHUB_TOKEN never trigger CI, so their required checks would never run.
+name: Release branch
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.BACKPORT_TOKEN }}
+
+      - name: Create or sync release/N.N
+        env:
+          GH_TOKEN: ${{ secrets.BACKPORT_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::BACKPORT_TOKEN secret is not set"; exit 1; }
+          git merge-base --is-ancestor "$TAG" origin/main \
+            || { echo "$TAG is not on main; nothing to sync"; exit 0; }
+          line=$(echo "$TAG" | sed -E 's/^v([0-9]+\.[0-9]+).*/\1/')
+          base="release/$line"
+
+          if ! git ls-remote --exit-code --heads origin "$base" >/dev/null; then
+            git push origin "$TAG^{commit}:refs/heads/$base"
+            echo "created $base at $TAG"; exit 0
+          fi
+          if git diff --quiet "origin/$base" "$TAG"; then
+            echo "$base already matches $TAG"; exit 0
+          fi
+
+          # The tag release/N.N currently matches. None means the branch has
+          # its own changes, which a snapshot of $TAG would silently revert.
+          last=""
+          for t in $(git tag -l "v$line.*" | grep -v -- - | sort -rV); do
+            if git diff --quiet "$t" "origin/$base"; then last=$t; break; fi
+          done
+          [ -n "$last" ] || { echo "::error::$base matches no v$line.x tag; sync it to $TAG by hand"; exit 1; }
+
+          branch="chore/release-sync-$TAG"
+          c=$(git -c user.name="github-actions[bot]" \
+                  -c user.email="41898283+github-actions[bot]@users.noreply.github.com" \
+                commit-tree "$TAG^{tree}" -p "origin/$base" \
+                -m "chore(release): sync to $TAG" -m "Squashes $last..$TAG from main.")
+          git push -f origin "$c:refs/heads/$branch"
+          gh pr create --base "$base" --head "$branch" \
+            --title "chore(release): sync $base to $TAG" \
+            --body "Brings \`$base\` from $last to $TAG as one squashed commit. Commits on main in that range: $(git rev-list --count --no-merges "$last..$TAG")." \
+            || echo "PR for $branch already exists"

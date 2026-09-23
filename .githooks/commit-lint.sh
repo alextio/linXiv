@@ -22,7 +22,8 @@ function note(s) { notes[++nn] = s }
 BEGIN {
   types = "feat|fix|refactor|perf|docs|test|chore|build|ci|style|revert"
   subject_re = "^(" types ")(\\([^)]+\\))?!?: [^ \t\r\f\v].*$"
-  # Metadata, not reasoning, so exempt from the body budget. Matched lowercased.
+  # Metadata, not reasoning, so exempt from the body budget (as is the
+  # "(cherry picked from commit ...)" line `git cherry-pick -x` adds).
   trailer_re = "^(co-authored-by|signed-off-by|assisted-by|reviewed-by|closes|refs|fixes|see-also|breaking[ -]change):"
   n = split("added adds adding fixed fixes fixing updated updates updating " \
             "removed removes removing changed changes changing created creates " \
@@ -76,7 +77,9 @@ END {
     for (b = start; b <= m; b++) {
       t = trim(L[b])
       if (t ~ subject_re) { u++; lines[u] = 0; chars[u] = 0; continue }
-      if (t != "" && tolower(t) !~ trailer_re) { lines[u]++; chars[u] += ulen(t) }
+      if (t != "" && tolower(t) !~ trailer_re && t !~ /^\(cherry picked from commit [0-9a-f]+\)$/) {
+        lines[u]++; chars[u] += ulen(t)
+      }
     }
     for (k = 1; k <= u; k++) {
       c = chars[k] + (lines[k] > 0 ? lines[k] - 1 : 0)
