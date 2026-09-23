@@ -16,7 +16,7 @@ name: CodeQL
 
 on:
   pull_request:
-    branches: [main, "*-stable"]
+    branches: [main, "release/*"]
 
 jobs:
   analyze:
